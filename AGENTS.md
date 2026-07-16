@@ -34,8 +34,10 @@ src/
     PhysicsSystem.ts   Rapier3D 物理（Transform ↔ 刚体同步、射线拾取、debug draw）
     CameraSystem.ts    收集 active Camera → cameraUBO（布局由 uniform-layouts.json 声明）
     LightSystem.ts     收集 LightComponent + ambient → lightUBO（含 shadow viewProj）
+    AnimationSystem.ts 关键帧动画资产系统（setBaseDir/clear，assets 相对 app base）
   render/
     types.ts          渲染图 / 管线类型定义（PhaseDecl、PipelineEntry、ComputeBindingDecl 等）
+    rendererDecl.ts   renderer 声明块类型（geometry/steps/bindings/compute 等）
     RenderGraph.ts    渲染图执行引擎（相位调度由 phases.json 驱动）
     ResourceManager.ts GPU 资源管理（模块单例）
     PipelineLoader.ts  从 JSON 加载渲染 / 计算管线（含 blend-presets 加载）
@@ -44,6 +46,7 @@ src/
     vertexSlots.ts    SoA 顶点槽定义（从 vertex-slots.json 加载）
     PipelineDriver.ts 声明式管线执行器（draw steps、bind groups）
     ParticleManager.ts GPU 粒子系统（UBO 布局由 uniform-layouts.json 声明）
+    GaussianSplatManager.ts 3DGS 高斯泼溅管理器（PLY→storage buf + radix 排序 + model UBO）
     RenderScriptLoader.ts 渲染逃生舱脚本加载器
     valueResolver.ts  值源 mini-DSL（pack/const/script/transform/builtin/tag）
   events/
@@ -51,6 +54,7 @@ src/
     eventTypes.ts     事件类型常量集中定义（EVENT_TYPES）
   tools/              可选交互工具（ToolSystem + SceneTool + PickTool）
   gltf/               GltfLoader（.glb → 网格 + PBR 材质 + 纹理）
+  gs/                 3DGS PLY 解析器（SplatLoader.ts → centers/colors/covariances GPU 数组）
   editor/
     EditorPanel.ts    场景编辑器面板；PipelinePanel.ts 渲染图面板；dom.ts 工厂
   types/bitecs-legacy.d.ts  bitecs/legacy 环境类型声明
@@ -70,16 +74,20 @@ public/
     vbo-presets.json  命名 VBO（quad 等）
     meshes.json       预置网格目录（name + generator + params）
     gltf-mapping.json glTF → 组件字段映射声明
+    systems.json      声明式 system 有序清单（name + def 指向 systems/<name>.json，数组顺序=帧运行顺序；app 可覆盖）
+    systems/*.json    system 定义（source/components/ubos/buffers/needs）
     pipelines/*.json   管线配置（渲染 + 计算，内嵌 renderer 声明块）
     shaders/*.wgsl     WGSL 着色器
     scripts/render/*.js 渲染逃生舱脚本（value/geometry/compute 钩子）
     textures/*.png     纹理资产
   apps/<name>/        app-specific 资产（每个 demo 一套）
-    app.json          app 清单（components/scene/render/tools/gltf 声明）
+    app.json          app 清单（components/scene/render/systems/tools/gltf 声明）
     scene.json        场景实体数据
     render.json       渲染图配置（加载清单 + renderScripts + clearColor + post-process input/output）
+    systems.json      app system 顺序覆盖（整体取代 common 列表；缺失 = 用 common 默认）
+    systems/*.json    app 专属 system 定义（如 demo6 的 gaussianSplat）
     tools.json        可选交互工具配置（缺失 = 无工具，全部 opt-in）
-    components.json   app 追加的组件定义（可选）
+    components.json   app 追加的组件定义（可选，如 demo6 的 GsComponent）
     scripts/*.js       app 脚本资产（导出 update(ctx)）
 assets/               源素材（glb/skybox）— 不会被 serve！必须复制到 public/ 下才能加载
 
@@ -148,12 +156,6 @@ export class Example {
 
 - 入口函数用 `try/catch` 包裹最外层（`main.ts`）。
 - 不可恢复的错误用 `throw new Error(...)`（不使用自定义错误类）。
-- 函数内部用提前 return 做空值守卫：
-  ```ts
-  if (!comp) return;
-  if (!ef) return undefined;
-  ```
-- 大量使用可选链（`?.`）和空值合并（`??`）进行安全属性访问。
 
 ### ECS（bitecs）模式
 
@@ -171,7 +173,7 @@ export class Example {
 
 ### WebGPU
 
-- **引擎级配置**：`engine-config.json` 声明 `dataRoot`、`appsRoot`、`defaultApp`、`computeTgs`（引擎默认 workgroup size）、`alphaMode`、`systemOrder`（帧循环系统顺序）、`scriptHooks`（脚本生命周期钩子名）。Engine.init() 最先加载。
+- **引擎级配置**：`engine-config.json` 声明 `dataRoot`、`appsRoot`、`defaultApp`、`computeTgs`（引擎默认 workgroup size）、`alphaMode`、`renderScriptsSubdir`（渲染逃生舱脚本子目录）、`systemOrder`（**遗留回退**：仅当 `systems.json` 缺失时被 `Engine.init()` 用作默认顺序；正常运行顺序已由 `common/systems.json` + app `systems.json` 覆盖，见下文 Systems 节）、`scriptHooks`（脚本生命周期钩子名）。Engine.init() 最先加载。
 - **渲染相位**：`phases.json` 声明相位 `name` + `order` + `behavior`（`normal`/`shadow-clear`/`postprocess-chain`）。RenderGraph 按 `order` 排序迭代，按 `behavior` tag 分派特殊逻辑。`RenderPhase` 为 `string`，新增相位只加 JSON 不改 TS。
 - **顶点槽**：`vertex-slots.json` 声明每个槽的 `location`/`format`/`stride`/`components`。`vertexSlots.ts` 从 JSON 加载到 `VERTEX_SLOTS` / `SLOT_ORDER`。`SlotName` 为 `string`。WGSL `@location` 必须与 JSON 一致。
 - 管线绑定组布局二选一：简单管线用 `"layout": "auto"`；PBR/材质管线用 `"bindLayout": ["frame", "object", ...]` 引用 `bind-layouts.json` 里的命名布局（按 `@group` 顺序）。
@@ -190,11 +192,30 @@ export class Example {
 - 缓冲区使用 `COPY_DST` 标志以便 `writeBuffer` 更新。
 - 着色器放在 `public/common/shaders/*.wgsl`，管线配置放在 `public/common/pipelines/*.json`。
 
+### Systems（声明式 system 注册）
+
+- `common/systems.json` 是**有序数组**，每项 `{ name, def }`，`def` 指向 `common/systems/<name>.json`（省略 = 同）。**数组顺序 = 帧循环运行顺序**，重排数组即控制系统更新次序。
+- **app 可覆盖**：app 在 `app.json` 声明 `systems`（默认 `systems.json`），文件存在则**整体取代** common 的列表作为该 app 的运行顺序（app 只列自己想跑的 system；引用 common 的用 bare `{ "name": "input" }`，省略 `def` 即解析到 common；app 自己的 system 用相对 `def`）。文件缺失 = 用 common 默认；`unloadCurrentApp()` 恢复 common。
+- system 定义 JSON 字段：`source`（`builtin:<id>` 内置 / `scripts/<path>.js` 自定义）、`components`（声明依赖的 Component 名）、`ubos`（拥有/写入的命名 UBO，名引自 `uniform-layouts.json`）、`buffers`（拥有的命名 storage buffer）、`needs`（必须先于此运行的其它 system 名）、可选 `requires`（如 `wasm:rapier`）。
+- common 默认 7 个 system：`input`/`script`/`physics`/`camera`/`light`/`animation`/`render`。
+- **接线状态**：`Engine.init()` 已加载 `common/systems.json`、`loadApp()` 已按 app `systems.json` 覆盖、`Engine.frame()` 按 `activeSystems` 名分派（仍硬编码 `switch(sys.name)`，内置 system 写死在 `src/ecs/*System.ts`，用户接受内置硬编码）。`engine-config.json.systemOrder` 仅作 systems.json 缺失时的回退。**`def` 元数据（components/ubos/buffers/needs）尚未被引擎消费**（仅声明，供文档与未来校验）；`source:"scripts/..."` 的**自定义 system 加载器**（仿 ScriptSystem 的 Blob URL）尚未实现，需新建 `SystemRegistry`。
+- 内置 system 的 `update` 签名不统一（`CameraSystem.update(aspect)`、`LightSystem.update()`、其它 `update(time,dt)`），`Engine.frame()` 的 `switch` 按 `case` 分派。统一 `System` 接口 + 注册表是后续重构项。
+- `gaussianSplat` 是"app 专属 system"的范例：不在 common 默认集合，由 `demo6_3dgsViewer` 的 `systems.json` 引入（详见"动画与高斯泼溅"节）。
+
 ### 相机与灯光（专用 System）
 
-- `CameraSystem` 每帧收集 active `Camera` 实体 → 写 `cameraUBO`（布局声明在 `uniform-layouts.json` 的 `camera` 条目）；`LightSystem` 收集所有 `LightComponent`（数量由 `uniform-layouts.json` 的 `light` 条目中 `lightN_*` 成员数派生）+ `EnvironmentComponent` ambient → 写 `lightUBO`。两者在 `Engine.frame()` 中于 `renderGraph.execute()` **之前**调用（系统顺序由 `engine-config.json` 的 `systemOrder` 驱动）。
+- `CameraSystem` 每帧收集 active `Camera` 实体 → 写 `cameraUBO`（布局声明在 `uniform-layouts.json` 的 `camera` 条目）；`LightSystem` 收集所有 `LightComponent`（数量由 `uniform-layouts.json` 的 `light` 条目中 `lightN_*` 成员数派生）+ `EnvironmentComponent` ambient → 写 `lightUBO`。两者在 `Engine.frame()` 中于 `renderGraph.execute()` **之前**调用（系统顺序当前由 `engine-config.json` 的 `systemOrder` 驱动，设计上改由 `systems.json` 驱动，见 Systems 节）。
 - 灯光方向/位置**从 Transform 派生**（本地 -Z 轴经四元数旋转），编辑器 gizmo、shadow 相机、光照方向三者共用同一数据源。
 - `LightComponent` 每盏灯的 UBO 已预留 `viewProj: mat4x4f`（方向光用 `mat4LookAt + mat4OrthographicSym` 算 light-space 矩阵），为后续 ShadowMap pass 铺路。`shadowStrategy` 字段声明阴影相机策略（`origin-look`/`follow-entity`/`cube-map`）。
+
+### 动画与高斯泼溅（专用 System）
+
+- `AnimationSystem`（`ecs/AnimationSystem.ts`）是关键帧动画资产系统，在 common `systems.json` 中位于 `light` 与 `render` 之间。与 `ScriptSystem` 同样按 app base 解析资产（`setBaseDir(base)` / `clear()`），app 切换时由 `unloadCurrentApp()` 清空。
+- **高斯泼溅（3DGS）是 app 专属功能（`demo6_3dgsViewer`），不在 common 默认 system 集合中**。跨三个模块：`gs/SplatLoader.ts` 解析 3DGS PLY（binary little-endian；输出 `centers`/`colors`/`covariances` GPU-ready 数组，SH 解码与协方差已在 CPU 端算好）；`render/GaussianSplatManager.ts` 持有 storage buffers（centers/colors/cov）+ radix 排序 index buffer + model UBO，挂到 `RenderGraph.splats`（与 `RenderGraph.physics` 同模式）；`GsComponent`（`ply`/`count` 字段）声明在 `apps/demo6_3dgsViewer/components.json`（**app 专属组件，非 common**），由 demo6 的 `app.json` `components` 字段加载。
+- demo6 通过自己的 `systems.json` 覆盖 common 顺序，加入 `gaussianSplat` system（`needs:["camera"]`）。`Engine.loadApp()` 仅当 `activeSystems` 含 `gaussianSplat` 时才实例化 `GaussianSplatManager` + 设置 `renderGraph.splats` + 遍历 GsComponent 实体加载 ply；其它 app 这部分全为 null，零开销。
+- frame 循环有独立 `case 'gaussianSplat'`：`setModel(Transform)` + `sort(cameraView, cameraPos)`，排在 `render` 之前、`camera` 之后（splat 排序依赖 `CameraSystem.lastView/lastPos`）。
+- **单 splat 限制**：`Engine.gsEntityEid` 只跟踪一个 GsComponent 实例；场景含多个时 manager 用最后一个并 warn。新增多 splat 支持需改 manager，非纯 JSON。
+- 渲染端走命名 `"splat"` bind group layout（`read-only-storage`）+ model UBO（binding 4），渲染逃生舱脚本见 `common/scripts/render/splat.js`（`!splats || !splats.ready` 守卫，故非 splat app 零影响）。运行时依赖 `@d5techs/d5-gaussian-splat-lib`（仅类型/语义对齐，加载走自有 `SplatLoader`）。参考 app：`demo6_3dgsViewer`。
 
 ### 物理（Rapier3D）
 
@@ -226,5 +247,5 @@ export class Example {
 7. **新 render target**：在 `render-targets.json` 加条目（带 `size` 声明），零 TS 改动。
 8. **新绘制方式**：在管线 JSON 的 `renderer.geometry.steps` 声明 vertexBuffers + indexBuffer + draw。`PipelineDriver.emitGeometry` 泛型执行，无 switch。
 9. **新脚本钩子**：在 `engine-config.json` 的 `scriptHooks` 加名字，脚本导出同名函数。
-10. **新系统 / 改系统顺序**：在 `engine-config.json` 的 `systemOrder` 加名字，Engine.frame() 按 `switch(sys)` 分派。
+10. **改系统顺序 / 加 system**：重排 `common/systems.json` 数组即可（纯 JSON、零 TS 改动）；app 在自己的 `systems.json` 覆盖顺序（如 demo6 加 `gaussianSplat`）。**新增内置 system** 仍须在 `Engine.frame()` 的 `switch(sys.name)` 加 `case`（无 case 的名字静默跳过）；`source:"scripts/..."` 的自定义 system 加载器尚未实现（需 `SystemRegistry`）。
 11. 任何改动后，运行 `npm run build` 通过类型检查。

@@ -1,0 +1,8 @@
+{
+    "name": "camera",
+    "source": "builtin:camera",
+    "components": ["Camera", "Transform"],
+    "ubos": ["camera"],
+    "buffers": [],
+    "needs": ["physics"]
+}

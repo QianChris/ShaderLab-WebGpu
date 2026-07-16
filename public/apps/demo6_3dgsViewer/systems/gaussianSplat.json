@@ -1,0 +1,8 @@
+{
+    "name": "gaussianSplat",
+    "source": "builtin:gaussianSplat",
+    "components": ["GsComponent", "Transform"],
+    "ubos": ["gsSplatUniform"],
+    "buffers": ["gsCenters", "gsColors", "gsCov", "gsSortIdx"],
+    "needs": ["camera"]
+}

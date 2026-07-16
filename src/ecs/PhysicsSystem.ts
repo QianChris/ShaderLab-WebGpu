@@ -90,7 +90,12 @@ export class PhysicsSystem {
     /** Remove all bodies from the Rapier world (call when the scene is reset). */
     reset(): void {
         if (!this.world) return;
+        // Only remove root bodies: an "attached" collider record shares its parent
+        // root's body object (see createRecord), and removeRigidBody(body) already
+        // drops every collider attached to that body. Removing the parent and then
+        // the attached child's body would double-free the same body → WASM trap.
         for (const rec of this.records.values()) {
+            if (rec.attached) continue;
             this.world.removeRigidBody(rec.body);
         }
         if (this.groundBody) {

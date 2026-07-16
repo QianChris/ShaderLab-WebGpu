@@ -1,0 +1,8 @@
+{
+    "name": "animation",
+    "source": "builtin:animation",
+    "components": ["SpriteSheetComponent", "SpriteAnimationComponent"],
+    "ubos": [],
+    "buffers": [],
+    "needs": []
+}

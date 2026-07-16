@@ -1,0 +1,9 @@
+[
+    { "name": "input",     "def": "systems/input.json" },
+    { "name": "script",    "def": "systems/script.json" },
+    { "name": "physics",   "def": "systems/physics.json" },
+    { "name": "camera",    "def": "systems/camera.json" },
+    { "name": "light",     "def": "systems/light.json" },
+    { "name": "animation", "def": "systems/animation.json" },
+    { "name": "render",    "def": "systems/render.json" }
+]

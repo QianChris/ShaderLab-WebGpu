@@ -1,0 +1,8 @@
+{
+    "name": "input",
+    "source": "builtin:input",
+    "components": [],
+    "ubos": ["timeInput"],
+    "buffers": [],
+    "needs": []
+}

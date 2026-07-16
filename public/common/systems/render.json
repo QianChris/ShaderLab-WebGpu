@@ -1,0 +1,8 @@
+{
+    "name": "render",
+    "source": "builtin:render",
+    "components": [],
+    "ubos": [],
+    "buffers": [],
+    "needs": ["camera", "light", "animation", "gaussianSplat"]
+}

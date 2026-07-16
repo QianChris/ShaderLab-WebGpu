@@ -1,5 +1,7 @@
 {
   "name": "demo6_3dgsViewer",
+  "components": ["components.json"],
   "scene": "scene.json",
-  "render": "render.json"
+  "render": "render.json",
+  "systems": "systems.json"
 }

@@ -38,10 +38,19 @@ export interface AppManifest {
     scene?: string;
     /** Render graph file (default "render.json"). */
     render?: string;
+    /** App system order override file (default "systems.json"); absent = use common/systems.json. */
+    systems?: string;
     /** Interaction tools config. */
     tools?: string;
     /** glTF models to load into the scene. */
     gltf?: string[];
+}
+
+/** One entry in a systems.json list: a system name + optional def path. */
+export interface SystemEntry {
+    name: string;
+    /** Path to the system definition JSON; omitted = common systems/<name>.json. */
+    def?: string;
 }
 
 /** Engine-level configuration loaded from /common/engine-config.json. */
@@ -80,12 +89,17 @@ export class Engine {
     lightSystem!: LightSystem;
     animationSystem!: AnimationSystem;
     toolSystem!: ToolSystem;
-    gaussianSplatManager!: GaussianSplatManager;
+    /** Splat manager; only instantiated when the active app's systems.json lists the `gaussianSplat` system. */
+    gaussianSplatManager: GaussianSplatManager | null = null;
     /** eid of the active GsComponent entity (the gaussian object's Transform source). */
     gsEntityEid: number | null = null;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
+    /** Default system list from common/systems.json (the engine-wide baseline). */
+    commonSystems: SystemEntry[] = [];
+    /** Systems actually run each frame for the current app (= commonSystems until an app overrides). */
+    activeSystems: SystemEntry[] = [];
     /** glTF → component field mapping (from gltf-mapping.json). */
     gltfMapping: GltfMapping | null = null;
     /** Currently loaded app id, or null before first load / after unload. */
@@ -108,6 +122,16 @@ export class Engine {
         } catch { /* fall back to defaults */ }
 
         const root = this.engineConfig.dataRoot;
+        // Load the default system order (common/systems.json). Falls back to
+        // engine-config.systemOrder for back-compat when the file is absent.
+        try {
+            const sr = await fetch(`${root}/systems.json`);
+            if (sr.ok) this.commonSystems = await sr.json() as SystemEntry[];
+        } catch { /* fall back below */ }
+        if (this.commonSystems.length === 0) {
+            this.commonSystems = this.engineConfig.systemOrder.map(name => ({ name }));
+        }
+        this.activeSystems = this.commonSystems;
         await schemaRegistry.load(`${root}/components.json`);
         await RAPIER.init();
 
@@ -188,8 +212,6 @@ export class Engine {
         this.animationSystem = new AnimationSystem();
         this.animationSystem.attach(this.scene);
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
-        this.gaussianSplatManager = new GaussianSplatManager();
-        this.renderGraph.splats = this.gaussianSplatManager;
         this.scriptSystem.provide(this.physicsSystem, () => this.aspect());
     }
 
@@ -260,6 +282,16 @@ export class Engine {
         }
         const manifest = await manifestResp.json() as AppManifest;
 
+        // An app may override the common system order by shipping its own
+        // systems.json; absent → keep the common baseline (commonSystems).
+        const systemsUrl = this.resolveAsset(base, manifest.systems ?? 'systems.json');
+        const sysResp = await fetch(systemsUrl);
+        if (this.isJson(sysResp)) {
+            this.activeSystems = await sysResp.json() as SystemEntry[];
+        } else {
+            this.activeSystems = this.commonSystems;
+        }
+
         for (const rel of manifest.components ?? []) {
             await schemaRegistry.loadMore(this.resolveAsset(base, rel));
         }
@@ -298,22 +330,26 @@ export class Engine {
         for (const glb of manifest.gltf ?? []) {
             await this.loadGltf(this.resolveAsset(base, glb));
         }
-        // Splat (3DGS) assets come from GsComponent entities in the scene: each
-        // such entity's GsComponent.ply is loaded into the splat manager, and the
-        // entity's Transform provides the gaussian object's rotation/translation.
+        // Splat (3DGS) is an app-opted-in system: only wire the manager + load
+        // GsComponent ply assets when this app's systems.json lists gaussianSplat.
         // Storage buffers live under the app's resource scope (released on switch).
-        resourceManager.enterApp(name);
-        this.gsEntityEid = null;
-        for (const [, eid] of this.scene.entityKeyMap) {
-            if (!this.scene.hasComponent(eid, 'GsComponent')) continue;
-            const ply = this.scene.getField(eid, 'GsComponent', 'ply') as string;
-            if (!ply) continue;
-            await this.gaussianSplatManager.load(this.resolveAsset(base, ply));
-            this.scene.setField(eid, 'GsComponent', 'count', this.gaussianSplatManager.count);
-            if (this.gsEntityEid !== null) {
-                console.warn('[Engine] multiple GsComponent entities; splat manager currently serves one — using the last');
+        if (this.hasSystem('gaussianSplat')) {
+            resourceManager.enterApp(name);
+            const mgr = new GaussianSplatManager();
+            this.gaussianSplatManager = mgr;
+            this.renderGraph.splats = mgr;
+            this.gsEntityEid = null;
+            for (const [, eid] of this.scene.entityKeyMap) {
+                if (!this.scene.hasComponent(eid, 'GsComponent')) continue;
+                const ply = this.scene.getField(eid, 'GsComponent', 'ply') as string;
+                if (!ply) continue;
+                await mgr.load(this.resolveAsset(base, ply));
+                this.scene.setField(eid, 'GsComponent', 'count', mgr.count);
+                if (this.gsEntityEid !== null) {
+                    console.warn('[Engine] multiple GsComponent entities; splat manager currently serves one — using the last');
+                }
+                this.gsEntityEid = eid;
             }
-            this.gsEntityEid = eid;
         }
     }
 
@@ -328,8 +364,11 @@ export class Engine {
         this.animationSystem.clear();
         this.eventBus.clear();
         this.physicsSystem.reset();
-        this.gaussianSplatManager.dispose();
+        this.gaussianSplatManager?.dispose();
+        this.gaussianSplatManager = null;
+        this.renderGraph.splats = null;
         this.gsEntityEid = null;
+        this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
         this.renderGraph.exitApp(appId);
@@ -348,6 +387,11 @@ export class Engine {
         return resp.ok && (ct.includes('json') || ct.includes('application'));
     }
 
+    /** True if the named system is in the active app's system list. */
+    private hasSystem(name: string): boolean {
+        return this.activeSystems.some(s => s.name === name);
+    }
+
     resize(): void {
         this.canvas.width = this.canvas.clientWidth * this.dpr;
         this.canvas.height = this.canvas.clientHeight * this.dpr;
@@ -360,19 +404,23 @@ export class Engine {
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        for (const sys of this.engineConfig.systemOrder) {
-            switch (sys) {
+        for (const sys of this.activeSystems) {
+            switch (sys.name) {
                 case 'input':      this.inputSystem.update(time, dt); break;
                 case 'script':     this.scriptSystem.update(time, dt); break;
                 case 'physics':    this.physicsSystem.update(time, dt); break;
                 case 'camera':     this.cameraSystem.update(this.aspect()); break;
                 case 'light':      this.lightSystem.update(); break;
                 case 'animation':  this.animationSystem.update(time, dt); break;
-                case 'render':
-                    if (this.gsEntityEid !== null) {
+                case 'gaussianSplat':
+                    if (this.gaussianSplatManager && this.gsEntityEid !== null) {
                         this.gaussianSplatManager.setModel(this.scene.getModelMatrix(this.gsEntityEid), this.canvas.width, this.canvas.height);
                     }
-                    this.gaussianSplatManager.sort(this.cameraSystem.lastView, this.cameraSystem.lastPos);
+                    if (this.gaussianSplatManager) {
+                        this.gaussianSplatManager.sort(this.cameraSystem.lastView, this.cameraSystem.lastPos);
+                    }
+                    break;
+                case 'render':
                     this.renderGraph.execute(this.device, this.context, this.format, this.scene, time, dt);
                     break;
             }
