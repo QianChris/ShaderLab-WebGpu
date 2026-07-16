@@ -59,6 +59,7 @@ export class ResourceManager {
     private textureKeyToHandle = new Map<string, number>();
     private textures = new Map<string, GPUTexture>();
 
+    private bindLayoutDecls = new Map<string, BindEntryDecl[]>();
     private bindLayouts = new Map<string, GPUBindGroupLayout>();
     private samplers = new Map<string, GPUSampler>();
     private renderTargetDecls: RenderTargetDecls = {};
@@ -162,6 +163,7 @@ export class ResourceManager {
 
     loadBindLayouts(decls: BindLayoutDecls): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.bindLayoutDecls.set(name, decl.entries);
             this.bindLayouts.set(name, this.buildBindLayout(name, decl.entries));
         }
     }
@@ -691,33 +693,44 @@ export class ResourceManager {
 
     /* ── Bind groups (built against named layouts) ── */
 
-    frameBindGroup(): GPUBindGroup {
+    /** Resolve a single resource entry for a frame bind group. */
+    private resolveFrameResource(entry: BindEntryDecl): GPUBindingResource {
+        const name = entry.resource ?? '';
+        if (name.startsWith('sampler:')) {
+            return this.namedSampler(name.slice(8));
+        }
+        switch (name) {
+            case 'cameraUBO':          return { buffer: this.cameraUBO };
+            case 'lightUBO':           return { buffer: this.lightUBO };
+            case 'timeInputUBO':       return { buffer: this.timeInputUBO };
+            case 'pointShadowFaceUBO':  return { buffer: this.pointShadowFaceUBO };
+            case 'shadowDepth2DArray':  return this.shadowDepth2DArrayView();
+            case 'shadowPoint2DArray':  return this.shadowPoint2DArrayView();
+            default: throw new Error(`Unknown frame resource '${name}' in bind-layouts.json`);
+        }
+    }
+
+    /** Build a frame bind group from the named layout's entry declarations. */
+    private buildFrameBindGroup(layoutName: string): GPUBindGroup {
+        const entries = this.bindLayoutDecls.get(layoutName);
+        if (!entries) throw new Error(`Bind layout '${layoutName}' not declared`);
         return this.device.createBindGroup({
-            layout: this.namedLayout('frame'),
-            entries: [
-                { binding: 0, resource: { buffer: this.cameraUBO } },
-                { binding: 1, resource: { buffer: this.lightUBO } },
-                { binding: 2, resource: { buffer: this.timeInputUBO } },
-                { binding: 3, resource: this.shadowDepth2DArrayView() },
-                { binding: 4, resource: this.namedSampler('shadow') },
-                { binding: 5, resource: this.shadowPoint2DArrayView() },
-                { binding: 6, resource: { buffer: this.pointShadowFaceUBO } },
-            ],
+            layout: this.namedLayout(layoutName),
+            entries: entries.map(e => ({
+                binding: e.binding,
+                resource: this.resolveFrameResource(e),
+            })),
         });
+    }
+
+    frameBindGroup(): GPUBindGroup {
+        return this.buildFrameBindGroup('frame');
     }
 
     /** Frame bind group for the shadow render pass: UBOs only (camera/light/time +
      *  pointShadowFaces), no shadow textures (they are the render targets). */
     frameShadowBindGroup(): GPUBindGroup {
-        return this.device.createBindGroup({
-            layout: this.namedLayout('frameShadow'),
-            entries: [
-                { binding: 0, resource: { buffer: this.cameraUBO } },
-                { binding: 1, resource: { buffer: this.lightUBO } },
-                { binding: 2, resource: { buffer: this.timeInputUBO } },
-                { binding: 3, resource: { buffer: this.pointShadowFaceUBO } },
-            ],
-        });
+        return this.buildFrameBindGroup('frameShadow');
     }
 
     /** Per-face shadow-pass bind group: {lightIdx, face} selecting the current shadow

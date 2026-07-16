@@ -111,6 +111,10 @@ export interface BindEntryDecl {
      *  layered shadow maps bound as texture_depth_2d_array / texture_depth_cube_array. */
     viewDimension?: GPUTextureViewDimension;
     storageTexture?: { format: GPUTextureFormat; access?: GPUStorageTextureAccess };
+    /** Runtime resource name for frame bind group auto-assembly.
+     *  Valid values: "cameraUBO", "lightUBO", "timeInputUBO", "pointShadowFaceUBO",
+     *  "shadowDepth2DArray", "shadowPoint2DArray", "sampler:<samplerName>". */
+    resource?: string;
 }
 
 export type BindLayoutDecls = Record<string, { entries: BindEntryDecl[] }>;
