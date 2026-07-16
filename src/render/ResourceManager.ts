@@ -369,16 +369,8 @@ export class ResourceManager {
     }
 
     get quadVBO(): GPUBuffer {
-        let buf = this.namedVbos.get('quad');
-        if (!buf) {
-            const quad = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
-            buf = this.device.createBuffer({
-                size: quad.byteLength,
-                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            });
-            this.device.queue.writeBuffer(buf, 0, quad.buffer, quad.byteOffset, quad.byteLength);
-            this.namedVbos.set('quad', buf);
-        }
+        const buf = this.namedVbos.get('quad');
+        if (!buf) throw new Error(`VBO 'quad' not declared in vbo-presets.json`);
         return buf;
     }
 
