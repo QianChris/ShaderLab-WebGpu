@@ -678,42 +678,14 @@ export class ResourceManager {
     }
 
     get defaultWhite(): GPUTexture {
-        let tex = this.fallbackTextures.get('white');
-        if (!tex) {
-            tex = this.device.createTexture({
-                label: 'fallback:white',
-                size: { width: 1, height: 1 },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-            });
-            this.device.queue.writeTexture(
-                { texture: tex },
-                new Uint8Array([255, 255, 255, 255]),
-                { bytesPerRow: 4, rowsPerImage: 1 },
-                { width: 1, height: 1 },
-            );
-            this.fallbackTextures.set('white', tex);
-        }
+        const tex = this.fallbackTextures.get('white');
+        if (!tex) throw new Error(`Fallback texture 'white' not declared in fallback-textures.json`);
         return tex;
     }
 
     get defaultNormal(): GPUTexture {
-        let tex = this.fallbackTextures.get('normal');
-        if (!tex) {
-            tex = this.device.createTexture({
-                label: 'fallback:normal',
-                size: { width: 1, height: 1 },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-            });
-            this.device.queue.writeTexture(
-                { texture: tex },
-                new Uint8Array([128, 128, 255, 255]),
-                { bytesPerRow: 4, rowsPerImage: 1 },
-                { width: 1, height: 1 },
-            );
-            this.fallbackTextures.set('normal', tex);
-        }
+        const tex = this.fallbackTextures.get('normal');
+        if (!tex) throw new Error(`Fallback texture 'normal' not declared in fallback-textures.json`);
         return tex;
     }
 
