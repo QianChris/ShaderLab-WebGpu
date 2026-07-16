@@ -1,0 +1,22 @@
+[
+  {
+    "name": "SpriteSheetComponent",
+    "fields": {
+      "sheet":     { "type": "string", "default": "" },
+      "texHandle": { "type": "u32", "default": 0 },
+      "columns":   { "type": "u32", "default": 8 },
+      "rows":     { "type": "u32", "default": 9 }
+    }
+  },
+  {
+    "name": "SpriteAnimationComponent",
+    "fields": {
+      "animation": { "type": "u32",  "default": 0 },
+      "row":       { "type": "u32",  "default": 0 },
+      "frame":     { "type": "u32",  "default": 0 },
+      "elapsed":   { "type": "f32",  "default": 0.0 },
+      "playing":   { "type": "bool", "default": 1 },
+      "direction": { "type": "i32",  "default": 1 }
+    }
+  }
+]

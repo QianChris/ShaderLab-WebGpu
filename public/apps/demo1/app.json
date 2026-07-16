@@ -1,0 +1,7 @@
+{
+  "name": "demo1",
+  "scene": "scene.json",
+  "render": "render.json",
+  "tools": "tools.json",
+  "gltf": ["../../assets/models/DamagedHelmet.glb"]
+}

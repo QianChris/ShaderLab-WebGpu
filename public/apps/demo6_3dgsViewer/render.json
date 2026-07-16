@@ -1,0 +1,15 @@
+{
+  "name": "SplatRenderGraph",
+  "renderScripts": ["render/splat.js"],
+  "phases": {
+    "Opaque": [
+      { "name": "Grid",     "pipeline": "pipelines/GridPipeline.json",     "enabled": true },
+      { "name": "PbrSolid", "pipeline": "pipelines/PbrPipeline.json",      "enabled": true }
+    ],
+    "Transparent": [
+      { "name": "Splat", "pipeline": "pipelines/GaussianSplatPipeline.json", "enabled": true }
+    ],
+    "Skybox": [],
+    "Postprocess": []
+  }
+}

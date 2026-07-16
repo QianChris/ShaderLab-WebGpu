@@ -1,0 +1,6 @@
+{
+  "name": "demo3_shadow",
+  "scene": "scene.json",
+  "render": "render.json",
+  "gltf": ["../../assets/models/DamagedHelmet.glb"]
+}

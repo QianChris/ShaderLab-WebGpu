@@ -1,0 +1,21 @@
+{
+  "name": "DeferredRenderGraph",
+  "clearColor": [0.03, 0.03, 0.05, 1.0],
+  "renderScripts": ["render/physics.js"],
+  "phases": {
+    "Shadow": [
+      { "name": "ShadowMap", "pipeline": "pipelines/ShadowPipeline.json", "enabled": true }
+    ],
+    "GBuffer": [
+      { "name": "GBuffer", "pipeline": "pipelines/GBufferPipeline.json", "enabled": true }
+    ],
+    "Opaque": [
+      { "name": "DeferredLight", "pipeline": "pipelines/DeferredLightPipeline.json", "enabled": true },
+      { "name": "Grid",        "pipeline": "pipelines/GridPipeline.json",        "enabled": true },
+      { "name": "PhysicsDebug",  "pipeline": "pipelines/PhysicsDebugPipeline.json", "enabled": true }
+    ],
+    "Transparent": [],
+    "Skybox": [],
+    "Postprocess": []
+  }
+}
