@@ -508,11 +508,11 @@ export class ResourceManager {
         return entry.tex.createView();
     }
 
-    getUniform(key: string, data: number[] | Float32Array): GPUBuffer {
+    getUniform(key: string, data: number[] | Float32Array, byteSize: number): GPUBuffer {
         let buf = this.uniformBuffers.get(key);
         if (!buf) {
             buf = this.device.createBuffer({
-                size: 256,
+                size: byteSize,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             this.uniformBuffers.set(key, buf);
@@ -838,7 +838,7 @@ export class ResourceManager {
         if (entry.params) {
             const data: number[] = [];
             for (const values of Object.values(entry.params)) data.push(...values);
-            const buf = this.getUniform(`pp_${entry.name}`, data);
+            const buf = this.getUniform(`pp_${entry.name}`, data, Math.max(256, data.length * 4));
             return this.device.createBindGroup({
                 layout: this.namedLayout('fullscreenParam'),
                 entries: [
