@@ -48,6 +48,11 @@ export class PipelineLoader {
         this.blendPresets = decls;
     }
 
+    /** All declared blend preset names (keys of blend-presets.json). */
+    static get blendPresetNames(): string[] {
+        return Object.keys(this.blendPresets);
+    }
+
     static resolveBlend(blend: PipelineConfig['blend']): GPUBlendState | undefined {
         if (!blend) return undefined;
         if (typeof blend === 'string') return this.blendPresets[blend];

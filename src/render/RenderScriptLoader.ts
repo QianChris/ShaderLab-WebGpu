@@ -62,7 +62,8 @@ export class RenderScriptLoader {
                 console.error(`[RenderScriptLoader] ${err}`);
                 continue;
             }
-            const baseName = file.replace(/^render\//, '').replace(/\.js$/, '');
+            const prefix = `${this.scriptsSubdir}/`;
+            const baseName = file.startsWith(prefix) ? file.slice(prefix.length).replace(/\.js$/, '') : file.replace(/\.js$/, '');
             for (const [name, fn] of Object.entries(exports)) {
                 if (typeof fn !== 'function') continue;
                 const key = `${baseName}.${name}`;

@@ -11,11 +11,16 @@ const FRONT_FACE_OPTIONS: string[] = ['ccw', 'cw'];
 const COMPARE_OPTIONS: string[] = [
     'never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always',
 ];
-const BLEND_OPTIONS: string[] = ['opaque', 'alpha', 'additive'];
 
 export class PipelinePanel {
     private panel: HTMLElement;
     private engine!: Engine;
+
+    private get blendOptions(): string[] {
+        return PipelineLoader.blendPresetNames.length > 0
+            ? PipelineLoader.blendPresetNames
+            : ['opaque', 'alpha', 'additive'];
+    }
 
     constructor(container: HTMLElement) {
         this.panel = container;
@@ -108,7 +113,7 @@ export class PipelinePanel {
         // ── Blend ──
         const blendVal = typeof config.blend === 'string' ? config.blend : 'opaque';
         box.appendChild(this.field('blend', makeSelect(
-            BLEND_OPTIONS, blendVal,
+            this.blendOptions, blendVal,
             v => { config.blend = v as PipelineConfig['blend']; recompile(); },
         )));
 
