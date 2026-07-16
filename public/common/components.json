@@ -55,7 +55,8 @@
       "fov":    { "type": "f32", "default": 60 },
       "near":   { "type": "f32", "default": 0.1 },
       "far":    { "type": "f32", "default": 100 },
-      "active": { "type": "bool", "default": false }
+      "active": { "type": "bool", "default": false },
+      "viewport": { "type": "vec4", "default": [0, 0, 1, 1], "role": "viewport" }
     }
   },
   {

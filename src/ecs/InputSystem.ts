@@ -75,7 +75,7 @@ export class InputSystem {
 
     private onWheel = (e: WheelEvent): void => {
         this.wheel += Math.sign(e.deltaY);
-        this.bus.emit(EVENT_TYPES.WHEEL, { delta: Math.sign(e.deltaY) });
+        this.bus.emit(EVENT_TYPES.WHEEL, { delta: Math.sign(e.deltaY), x: this.mouseX, y: this.mouseY });
     };
 
     private onContextMenu = (e: MouseEvent): void => {

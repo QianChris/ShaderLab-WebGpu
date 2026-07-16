@@ -1,0 +1,17 @@
+{
+  "name": "MultiViewRenderGraph",
+  "clearColor": [0.05, 0.05, 0.08, 1.0],
+  "phases": {
+    "Preprocess": [],
+    "Compute": [],
+    "Shadow": [
+      { "name": "ShadowMap", "pipeline": "pipelines/ShadowPipeline.json", "enabled": true }
+    ],
+    "Opaque": [
+      { "name": "PbrSolid", "pipeline": "pipelines/PbrPipeline.json", "enabled": true }
+    ],
+    "Transparent": [],
+    "Skybox": [],
+    "Postprocess": []
+  }
+}

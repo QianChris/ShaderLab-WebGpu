@@ -5,6 +5,20 @@ import { buildCameraMatrices, mat4FromTRS, type TRS } from '../math';
 
 export type SceneData = Record<string, Record<string, Record<string, unknown>>>;
 
+/** A resolved camera ready to render: view-projection matrices + its on-screen
+ *  viewport rect (normalized x/y/w/h, default full screen). `aspect` is the
+ *  camera's own aspect ratio (canvas aspect scaled by viewport w/h). */
+export interface CameraView {
+    eid: number;
+    vp: Float32Array;
+    ivp: Float32Array;
+    pos: Float32Array;
+    view: Float32Array;
+    proj: Float32Array;
+    viewport: [number, number, number, number];
+    aspect: number;
+}
+
 export class Scene {
     world: World;
     entityKeyMap = new Map<string, number>();
@@ -120,7 +134,20 @@ export class Scene {
     }
 
     getActiveCamera(aspect: number): { vp: Float32Array; ivp: Float32Array; pos: Float32Array; view: Float32Array; proj: Float32Array } | null {
+        const cams = this.getActiveCameras(aspect);
+        if (cams.length === 0) return null;
+        const c = cams[0];
+        return { vp: c.vp, ivp: c.ivp, pos: c.pos, view: c.view, proj: c.proj };
+    }
+
+    /** Collect every active Camera entity. Multi-view: more than one active
+     *  camera is supported — each carries its own on-screen viewport rect
+     *  (Camera.viewport, normalized) and a per-camera aspect derived from the
+     *  viewport's w/h times the canvas aspect. Insertion order (= scene.json
+     *  object order) is preserved, so the first declared camera is the "primary". */
+    getActiveCameras(canvasAspect: number): CameraView[] {
         const camComp = schemaRegistry.get('Camera')!;
+        const result: CameraView[] = [];
         for (const [, eid] of this.entityKeyMap) {
             if (!hasComponent(this.world, camComp, eid)) continue;
             const active = schemaRegistry.getScalar(camComp, eid, 'active');
@@ -128,9 +155,19 @@ export class Scene {
             const fov = schemaRegistry.getScalar(camComp, eid, 'fov');
             const near = schemaRegistry.getScalar(camComp, eid, 'near');
             const far = schemaRegistry.getScalar(camComp, eid, 'far');
-            return buildCameraMatrices(this.getTransformTRS(eid), fov, aspect, near, far);
+            // Viewport rect (normalized). Missing/zero → full screen [0,0,1,1].
+            const vw = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 2) || 1;
+            const vh = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 3) || 1;
+            const vx = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 0) || 0;
+            const vy = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 1) || 0;
+            const camAspect = canvasAspect * (vw / Math.max(1e-6, vh));
+            const m = buildCameraMatrices(this.getTransformTRS(eid), fov, camAspect, near, far);
+            result.push({
+                eid, vp: m.vp, ivp: m.ivp, pos: m.pos, view: m.view, proj: m.proj,
+                viewport: [vx, vy, vw, vh], aspect: camAspect,
+            });
         }
-        return null;
+        return result;
     }
 
     private getTransformTRS(eid: number): TRS {

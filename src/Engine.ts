@@ -209,6 +209,7 @@ export class Engine {
         this.lightSystem = new LightSystem();
         this.lightSystem.attach(this.scene);
         this.renderGraph.lightSystem = this.lightSystem;
+        this.renderGraph.cameraSystem = this.cameraSystem;
         this.animationSystem = new AnimationSystem();
         this.animationSystem.attach(this.scene);
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
