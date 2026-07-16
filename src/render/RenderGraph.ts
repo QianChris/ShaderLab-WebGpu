@@ -12,16 +12,6 @@ import type { Scene } from '../ecs/Scene';
 
 const SCREEN = 'screen';
 
-const DEFAULT_PHASES: PhaseDecl[] = [
-    { name: 'Preprocess',  order: 10, behavior: 'normal' },
-    { name: 'Compute',     order: 20, behavior: 'normal' },
-    { name: 'Shadow',      order: 30, behavior: 'shadow-clear' },
-    { name: 'Opaque',      order: 40, behavior: 'normal' },
-    { name: 'Skybox',      order: 50, behavior: 'normal' },
-    { name: 'Transparent', order: 60, behavior: 'normal' },
-    { name: 'Postprocess', order: 70, behavior: 'postprocess-chain' },
-];
-
 /**
  * Data-driven render graph. Owns no per-pipeline draw logic. Each render
  * pipeline embeds a declarative `renderer` block (query / target / geometry /
@@ -35,7 +25,7 @@ export class RenderGraph {
     lightSystem: import('../ecs/LightSystem').LightSystem | null = null;
     splats: import('./GaussianSplatManager').GaussianSplatManager | null = null;
 
-    private phaseList: PhaseDecl[] = DEFAULT_PHASES;
+    private phaseList: PhaseDecl[] = [];
     private clearColor: [number, number, number, number] = [0, 0, 0, 1];
     private pipelines = new Map<string, GPURenderPipeline>();
     private computePipelines = new Map<string, GPUComputePipeline>();
