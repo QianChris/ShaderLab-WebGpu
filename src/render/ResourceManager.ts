@@ -491,9 +491,13 @@ export class ResourceManager {
         return this._shadowPoint!.createView({ dimension: '2d', baseArrayLayer: faceSlot, arrayLayerCount: 1 });
     }
 
-    /** Named depth target view; distinct depth textures keyed by name (data-driven targets). */
-    namedDepthTargetView(name: string, viewportW: number, viewportH: number, format: GPUTextureFormat = 'depth24plus'): GPUTextureView {
+    /** Named depth target view; distinct depth textures keyed by name (data-driven targets).
+     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'. */
+    namedDepthTargetView(name: string, viewportW: number, viewportH: number): GPUTextureView {
         const { w, h } = this.resolveTargetSize(name, viewportW, viewportH);
+        const decl = this.renderTargetDecls[name];
+        const format = (decl?.format && decl.format !== 'default'
+            ? decl.format : 'depth24plus') as GPUTextureFormat;
         let entry = this.depthTargets.get(name);
         if (!entry || entry.w !== w || entry.h !== h || entry.format !== format) {
             entry?.tex.destroy();
