@@ -356,6 +356,7 @@ export class Engine {
         }
 
         if (manifest.tools) {
+            this.toolSystem.setBase(base);
             await this.toolSystem.loadFromFile(this.resolveAsset(base, manifest.tools));
         }
         for (const glb of manifest.gltf ?? []) {
