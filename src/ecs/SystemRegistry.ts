@@ -176,7 +176,10 @@ class SystemRegistry {
      *  systems list. Call from Engine.loadApp after activeSystems is resolved.
      *  - commonBase: e.g. '/common'
      *  - appBase: e.g. '/apps/demo8'
-     *  Defs are looked up in common first, then app (app can override). */
+     *  Defs are looked up in common first, then app (app can override).
+     *  Also validates `needs` (a system whose `needs` aren't in the active
+     *  list logs a warning — running order is the responsibility of systems.json,
+     *  but missing dependencies usually indicate a config bug). */
     async loadDefs(systems: SystemEntry[], commonBase: string, appBase: string): Promise<void> {
         this.appBase = appBase;
         for (const entry of systems) {
@@ -195,6 +198,22 @@ class SystemRegistry {
                 if (!this.scripts.has(def.source)) {
                     const adapter = await this.loadScriptSystem(def.source);
                     if (adapter) this.scripts.set(def.source, adapter);
+                }
+            }
+        }
+
+        // Validate `needs`: every needed system must be in the active list.
+        const activeNames = new Set(systems.map(s => s.name));
+        for (const entry of systems) {
+            const def = this.defs.get(entry.name);
+            if (!def?.needs) continue;
+            for (const need of def.needs) {
+                if (!activeNames.has(need)) {
+                    console.warn(
+                        `[SystemRegistry] system '${entry.name}' declares needs=['${need}'] ` +
+                        `but '${need}' is not in the active systems list — ` +
+                        `running order may be wrong or '${need}' is missing from systems.json`,
+                    );
                 }
             }
         }

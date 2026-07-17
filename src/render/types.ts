@@ -130,8 +130,11 @@ export interface PipelineEntry {
     name: string;
     pipeline: string;
     enabled: boolean;
-    /** Legacy/optional kind hint; compute-only entries may still set "compute". */
-    kind?: 'scene' | 'fullscreen' | 'compute' | 'skybox' | 'grid' | 'physics-debug' | 'particles';
+    /** Legacy/optional kind hint. Loosened from a closed enum to an open
+     *  string so apps can use their own kind tags without TS changes. The
+     *  only special value consumed by the engine is "compute" (loads the
+     *  entry as a compute pipeline instead of a render pipeline). */
+    kind?: string;
     /** Post-process params passed to fullscreenParam bind group. */
     params?: Record<string, number[]>;
     /** Optional texture asset (legacy). */

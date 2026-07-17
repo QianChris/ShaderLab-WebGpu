@@ -75,9 +75,6 @@ export class ResourceManager {
      *  would allocate a new GPUTextureView each frame — a severe object leak. */
     private textureViewCache = new WeakMap<GPUTexture, GPUTextureView>();
 
-    private _depthTex: GPUTexture | null = null;
-    private _depthW = 0;
-    private _depthH = 0;
     private _shadow2D: GPUTexture | null = null;
     private _shadow2DW = 0;
     private _shadow2DH = 0;
@@ -440,20 +437,6 @@ export class ResourceManager {
     /** TimeInput UBO. Backed by BufferRegistry (declared in input.json `ubos`). */
     get timeInputUBO(): GPUBuffer {
         return bufferRegistry.get('timeInput');
-    }
-
-    depthView(width: number, height: number): GPUTextureView {
-        if (!this._depthTex || this._depthW !== width || this._depthH !== height) {
-            this._depthTex?.destroy();
-            this._depthTex = this.device.createTexture({
-                size: { width, height },
-                format: 'depth24plus',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT,
-            });
-            this._depthW = width;
-            this._depthH = height;
-        }
-        return this._depthTex.createView();
     }
 
     /** Create (or reuse) the two shadow depth textures from render-targets.json:
