@@ -93,8 +93,6 @@ export class Engine {
     toolSystem!: ToolSystem;
     /** Splat manager; only instantiated when the active app's systems.json lists the `gaussianSplat` system. */
     gaussianSplatManager: GaussianSplatManager | null = null;
-    /** eid of the active GsComponent entity (the gaussian object's Transform source). */
-    gsEntityEid: number | null = null;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -366,24 +364,15 @@ export class Engine {
         // Splat (3DGS) is an app-opted-in system: only wire the manager + load
         // GsComponent ply assets when this app's systems.json lists gaussianSplat.
         // Storage buffers live under the app's resource scope (released on switch).
+        // The heavy lifting (scan scene for GsComponent + async PLY load) is now
+        // a single manager call, keeping splat logic out of the Engine body.
         if (this.hasSystem('gaussianSplat')) {
             resourceManager.enterApp(name);
             const mgr = new GaussianSplatManager();
             this.gaussianSplatManager = mgr;
             this.renderGraph.splats = mgr;
-            this.gsEntityEid = null;
             systemRegistry.registerBuiltin('gaussianSplat', mgr);
-            for (const [, eid] of this.scene.entityKeyMap) {
-                if (!this.scene.hasComponent(eid, 'GsComponent')) continue;
-                const ply = this.scene.getField(eid, 'GsComponent', 'ply') as string;
-                if (!ply) continue;
-                await mgr.load(this.resolveAsset(base, ply));
-                this.scene.setField(eid, 'GsComponent', 'count', mgr.count);
-                if (this.gsEntityEid !== null) {
-                    console.warn('[Engine] multiple GsComponent entities; splat manager currently serves one — using the last');
-                }
-                this.gsEntityEid = eid;
-            }
+            await mgr.loadFromScene(this.scene, base);
         }
     }
 
@@ -401,7 +390,6 @@ export class Engine {
         this.gaussianSplatManager?.dispose();
         this.gaussianSplatManager = null;
         this.renderGraph.splats = null;
-        this.gsEntityEid = null;
         systemRegistry.unregisterBuiltin('gaussianSplat');
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
@@ -459,7 +447,6 @@ export class Engine {
             input: this.inputSystem,
             script: this.scriptSystem,
             splats: this.gaussianSplatManager,
-            gsEntityEid: this.gsEntityEid,
             renderGraph: this.renderGraph,
             // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
             getBuffer: (name: string) => bufferRegistry.get(name),

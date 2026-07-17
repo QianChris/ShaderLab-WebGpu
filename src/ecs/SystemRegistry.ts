@@ -39,7 +39,6 @@ export interface FrameContext {
     input: InputSystem;
     script: ScriptSystem;
     splats: GaussianSplatManager | null;
-    gsEntityEid: number | null;
     renderGraph: RenderGraph;
 
     /* ── Script-system GPU access ──────────────────────────────────────
