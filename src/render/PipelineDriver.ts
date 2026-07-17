@@ -181,7 +181,7 @@ export class PipelineDriver {
                 layout.write(buf, w.member, resolveValue(w.value, vctx));
             }
             const key = `bg_${this.path}_${bg.group}_${vctx.eid}`;
-            entries.push({ binding: bg.uniform.binding ?? 0, resource: { buffer: resourceManager.getUniform(key, buf) } });
+            entries.push({ binding: bg.uniform.binding ?? 0, resource: { buffer: resourceManager.getUniform(key, buf, layout.byteSize) } });
         }
 
         for (const s of bg.samplers ?? []) {

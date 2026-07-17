@@ -59,6 +59,7 @@ export class ResourceManager {
     private textureKeyToHandle = new Map<string, number>();
     private textures = new Map<string, GPUTexture>();
 
+    private bindLayoutDecls = new Map<string, BindEntryDecl[]>();
     private bindLayouts = new Map<string, GPUBindGroupLayout>();
     private samplers = new Map<string, GPUSampler>();
     private renderTargetDecls: RenderTargetDecls = {};
@@ -162,6 +163,7 @@ export class ResourceManager {
 
     loadBindLayouts(decls: BindLayoutDecls): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.bindLayoutDecls.set(name, decl.entries);
             this.bindLayouts.set(name, this.buildBindLayout(name, decl.entries));
         }
     }
@@ -369,16 +371,8 @@ export class ResourceManager {
     }
 
     get quadVBO(): GPUBuffer {
-        let buf = this.namedVbos.get('quad');
-        if (!buf) {
-            const quad = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
-            buf = this.device.createBuffer({
-                size: quad.byteLength,
-                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-            });
-            this.device.queue.writeBuffer(buf, 0, quad.buffer, quad.byteOffset, quad.byteLength);
-            this.namedVbos.set('quad', buf);
-        }
+        const buf = this.namedVbos.get('quad');
+        if (!buf) throw new Error(`VBO 'quad' not declared in vbo-presets.json`);
         return buf;
     }
 
@@ -497,9 +491,13 @@ export class ResourceManager {
         return this._shadowPoint!.createView({ dimension: '2d', baseArrayLayer: faceSlot, arrayLayerCount: 1 });
     }
 
-    /** Named depth target view; distinct depth textures keyed by name (data-driven targets). */
-    namedDepthTargetView(name: string, viewportW: number, viewportH: number, format: GPUTextureFormat = 'depth24plus'): GPUTextureView {
+    /** Named depth target view; distinct depth textures keyed by name (data-driven targets).
+     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'. */
+    namedDepthTargetView(name: string, viewportW: number, viewportH: number): GPUTextureView {
         const { w, h } = this.resolveTargetSize(name, viewportW, viewportH);
+        const decl = this.renderTargetDecls[name];
+        const format = (decl?.format && decl.format !== 'default'
+            ? decl.format : 'depth24plus') as GPUTextureFormat;
         let entry = this.depthTargets.get(name);
         if (!entry || entry.w !== w || entry.h !== h || entry.format !== format) {
             entry?.tex.destroy();
@@ -516,11 +514,11 @@ export class ResourceManager {
         return entry.tex.createView();
     }
 
-    getUniform(key: string, data: number[] | Float32Array): GPUBuffer {
+    getUniform(key: string, data: number[] | Float32Array, byteSize: number): GPUBuffer {
         let buf = this.uniformBuffers.get(key);
         if (!buf) {
             buf = this.device.createBuffer({
-                size: 256,
+                size: byteSize,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             this.uniformBuffers.set(key, buf);
@@ -686,74 +684,57 @@ export class ResourceManager {
     }
 
     get defaultWhite(): GPUTexture {
-        let tex = this.fallbackTextures.get('white');
-        if (!tex) {
-            tex = this.device.createTexture({
-                label: 'fallback:white',
-                size: { width: 1, height: 1 },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-            });
-            this.device.queue.writeTexture(
-                { texture: tex },
-                new Uint8Array([255, 255, 255, 255]),
-                { bytesPerRow: 4, rowsPerImage: 1 },
-                { width: 1, height: 1 },
-            );
-            this.fallbackTextures.set('white', tex);
-        }
+        const tex = this.fallbackTextures.get('white');
+        if (!tex) throw new Error(`Fallback texture 'white' not declared in fallback-textures.json`);
         return tex;
     }
 
     get defaultNormal(): GPUTexture {
-        let tex = this.fallbackTextures.get('normal');
-        if (!tex) {
-            tex = this.device.createTexture({
-                label: 'fallback:normal',
-                size: { width: 1, height: 1 },
-                format: 'rgba8unorm',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-            });
-            this.device.queue.writeTexture(
-                { texture: tex },
-                new Uint8Array([128, 128, 255, 255]),
-                { bytesPerRow: 4, rowsPerImage: 1 },
-                { width: 1, height: 1 },
-            );
-            this.fallbackTextures.set('normal', tex);
-        }
+        const tex = this.fallbackTextures.get('normal');
+        if (!tex) throw new Error(`Fallback texture 'normal' not declared in fallback-textures.json`);
         return tex;
     }
 
     /* ── Bind groups (built against named layouts) ── */
 
-    frameBindGroup(): GPUBindGroup {
+    /** Resolve a single resource entry for a frame bind group. */
+    private resolveFrameResource(entry: BindEntryDecl): GPUBindingResource {
+        const name = entry.resource ?? '';
+        if (name.startsWith('sampler:')) {
+            return this.namedSampler(name.slice(8));
+        }
+        switch (name) {
+            case 'cameraUBO':          return { buffer: this.cameraUBO };
+            case 'lightUBO':           return { buffer: this.lightUBO };
+            case 'timeInputUBO':       return { buffer: this.timeInputUBO };
+            case 'pointShadowFaceUBO':  return { buffer: this.pointShadowFaceUBO };
+            case 'shadowDepth2DArray':  return this.shadowDepth2DArrayView();
+            case 'shadowPoint2DArray':  return this.shadowPoint2DArrayView();
+            default: throw new Error(`Unknown frame resource '${name}' in bind-layouts.json`);
+        }
+    }
+
+    /** Build a frame bind group from the named layout's entry declarations. */
+    private buildFrameBindGroup(layoutName: string): GPUBindGroup {
+        const entries = this.bindLayoutDecls.get(layoutName);
+        if (!entries) throw new Error(`Bind layout '${layoutName}' not declared`);
         return this.device.createBindGroup({
-            layout: this.namedLayout('frame'),
-            entries: [
-                { binding: 0, resource: { buffer: this.cameraUBO } },
-                { binding: 1, resource: { buffer: this.lightUBO } },
-                { binding: 2, resource: { buffer: this.timeInputUBO } },
-                { binding: 3, resource: this.shadowDepth2DArrayView() },
-                { binding: 4, resource: this.namedSampler('shadow') },
-                { binding: 5, resource: this.shadowPoint2DArrayView() },
-                { binding: 6, resource: { buffer: this.pointShadowFaceUBO } },
-            ],
+            layout: this.namedLayout(layoutName),
+            entries: entries.map(e => ({
+                binding: e.binding,
+                resource: this.resolveFrameResource(e),
+            })),
         });
+    }
+
+    frameBindGroup(): GPUBindGroup {
+        return this.buildFrameBindGroup('frame');
     }
 
     /** Frame bind group for the shadow render pass: UBOs only (camera/light/time +
      *  pointShadowFaces), no shadow textures (they are the render targets). */
     frameShadowBindGroup(): GPUBindGroup {
-        return this.device.createBindGroup({
-            layout: this.namedLayout('frameShadow'),
-            entries: [
-                { binding: 0, resource: { buffer: this.cameraUBO } },
-                { binding: 1, resource: { buffer: this.lightUBO } },
-                { binding: 2, resource: { buffer: this.timeInputUBO } },
-                { binding: 3, resource: { buffer: this.pointShadowFaceUBO } },
-            ],
-        });
+        return this.buildFrameBindGroup('frameShadow');
     }
 
     /** Per-face shadow-pass bind group: {lightIdx, face} selecting the current shadow
@@ -874,7 +855,7 @@ export class ResourceManager {
         if (entry.params) {
             const data: number[] = [];
             for (const values of Object.values(entry.params)) data.push(...values);
-            const buf = this.getUniform(`pp_${entry.name}`, data);
+            const buf = this.getUniform(`pp_${entry.name}`, data, Math.max(256, data.length * 4));
             return this.device.createBindGroup({
                 layout: this.namedLayout('fullscreenParam'),
                 entries: [

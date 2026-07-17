@@ -17,6 +17,38 @@ export interface ValueContext {
     scripts: Map<string, (ctx: ValueContext) => number[] | number>;
 }
 
+/** A resolver for a single field within a namespace (e.g. builtin.time, transform.model). */
+export type AtomResolver = (ctx: ValueContext) => number | number[];
+
+/** Resolver tables for each namespace prefix (builtin, transform, tag). */
+export const atomNamespaces: Record<string, Record<string, AtomResolver>> = {
+    builtin: {},
+    transform: {},
+    tag: {},
+};
+
+// ── Register known builtins ──
+atomNamespaces.builtin = {
+    entityId: (ctx) => ctx.eid,
+    time:     (ctx) => ctx.time,
+    dt:       (ctx) => ctx.dt,
+    aspect:   (ctx) => ctx.aspect,
+    screenW:  (ctx) => ctx.screenW,
+    screenH:  (ctx) => ctx.screenH,
+};
+
+// ── Register known transform values ──
+atomNamespaces.transform = {
+    model:        (ctx) => Array.from(ctx.model()),
+    normalMatrix: (ctx) => Array.from(computeNormalMatrix(ctx.model())),
+};
+
+// ── Register known tag resolvers ──
+atomNamespaces.tag = {
+    color: (ctx) => ctx.scene.getTagColor(ctx.eid, ctx.tag),
+    extra: (ctx) => ctx.scene.getTagExtra(ctx.eid, ctx.tag),
+};
+
 /**
  * Resolve a value-source string into a number or number[] for a uniform write.
  *
@@ -56,26 +88,11 @@ function resolveAtom(src: string, ctx: ValueContext): number | number[] {
     const head = src.slice(0, dot);
     const field = src.slice(dot + 1);
 
-    if (head === 'transform') {
-        if (field === 'model') return Array.from(ctx.model());
-        if (field === 'normalMatrix') return Array.from(computeNormalMatrix(ctx.model()));
-        return 0;
-    }
-    if (head === 'builtin') {
-        switch (field) {
-            case 'entityId': return ctx.eid;
-            case 'time':     return ctx.time;
-            case 'dt':       return ctx.dt;
-            case 'aspect':   return ctx.aspect;
-            case 'screenW':  return ctx.screenW;
-            case 'screenH':  return ctx.screenH;
-            default:         return 0;
-        }
-    }
-    if (head === 'tag') {
-        if (field === 'color') return ctx.scene.getTagColor(ctx.eid, ctx.tag);
-        if (field === 'extra') return ctx.scene.getTagExtra(ctx.eid, ctx.tag);
-        return 0;
+    // Namespaced resolvers (builtin.*, transform.*, tag.*)
+    const ns = atomNamespaces[head];
+    if (ns) {
+        const fn = ns[field];
+        return fn ? fn(ctx) : 0;
     }
 
     // Comp.field

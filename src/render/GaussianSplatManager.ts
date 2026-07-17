@@ -71,7 +71,7 @@ export class GaussianSplatManager {
         this.uniformData.set(IDENTITY_MAT4, 0);
         this.uniformData[16] = 0; this.uniformData[17] = 0;
         this.uniformData[18] = this.splatScale; this.uniformData[19] = 0;
-        this.modelUBO = resourceManager.getUniform('gsSplatUniform', this.uniformData);
+        this.modelUBO = resourceManager.getUniform('gsSplatUniform', this.uniformData, 80);
         this.cpuModel = IDENTITY_MAT4;
         this.ready = true;
     }
@@ -87,7 +87,7 @@ export class GaussianSplatManager {
         u.set(model, 0);
         u[16] = viewportW; u[17] = viewportH;
         u[18] = this.splatScale; u[19] = 0;
-        this.modelUBO = resourceManager.getUniform('gsSplatUniform', u);
+        this.modelUBO = resourceManager.getUniform('gsSplatUniform', u, 80);
         this.cpuModel = model;
         this.lastViewPos = null;  // force re-sort against the new transform
     }
