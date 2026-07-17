@@ -1,0 +1,8 @@
+{
+    "name": "orbit",
+    "source": "scripts/orbit.js",
+    "components": ["Transform"],
+    "ubos": [],
+    "buffers": [],
+    "needs": []
+}

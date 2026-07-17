@@ -49,16 +49,67 @@ export interface System {
     dispose?(): void;
 }
 
+/** Loaded JSON of a system def (`common/systems/<name>.json` or app override). */
+export interface SystemDef {
+    name: string;
+    /** "builtin:<id>" → builtin registry lookup; "<path>.js" → script-loaded system. */
+    source: string;
+    components?: string[];
+    ubos?: string[];
+    buffers?: string[];
+    needs?: string[];
+    requires?: string[];
+}
+
+/** Lifecycle hooks a script system may export. All optional; missing hooks are skipped. */
+export interface SystemScriptModule {
+    init?: (ctx: FrameContext) => void;
+    update?: (ctx: FrameContext) => void;
+    dispose?: () => void;
+    [key: string]: unknown;
+}
+
+/**
+ * Wraps a script module in the System interface. `init` is called lazily on
+ * the first `update` (mirrors ScriptSystem's lazy-init pattern), so the
+ * FrameContext is available — script systems don't need a separate init phase.
+ */
+class ScriptSystemAdapter implements System {
+    private initialized = false;
+    private mod: SystemScriptModule;
+
+    constructor(mod: SystemScriptModule) {
+        this.mod = mod;
+    }
+
+    update(ctx: FrameContext): void {
+        if (!this.initialized) {
+            this.initialized = true;
+            this.mod.init?.(ctx);
+        }
+        this.mod.update?.(ctx);
+    }
+
+    dispose(): void {
+        this.mod.dispose?.();
+    }
+}
+
 /**
  * Resolves a `SystemEntry` (from systems.json) to a runnable System instance.
  *
- * Step 1 scope: only `builtin:<id>` lookups. A builtin is registered via
- * `registerBuiltin(name, instance)` at engine init; `resolve()` finds it by
- * the entry's `name` (matching the previous switch-case behaviour). Step 2
- * adds script-loaded systems (`source: "scripts/x.js"`).
+ * Builtins are registered at engine init via `registerBuiltin(name, instance)`.
+ * Script systems (`source: "<path>.js"` in the system def) are loaded lazily
+ * by `loadDefs` (fetch text → Blob URL → dynamic import, mirroring ScriptSystem).
+ * `resolve()` is synchronous and uses the pre-loaded maps populated by loadDefs.
  */
 class SystemRegistry {
     private builtins = new Map<string, System>();
+    /** system name → def JSON. Populated by loadDefs; cleared on app switch. */
+    private defs = new Map<string, SystemDef>();
+    /** script source path → loaded adapter. Persists for the app's lifetime. */
+    private scripts = new Map<string, System>();
+    private appBase = '';
 
     /** Register a builtin system instance under `name` (matches systems.json `name`). */
     registerBuiltin(name: string, sys: System): void {
@@ -70,10 +121,79 @@ class SystemRegistry {
         this.builtins.delete(name);
     }
 
-    /** Resolve a SystemEntry to its System, or null if not registered yet
-     *  (e.g. an app-opted-in builtin that wasn't created this session). */
+    /** Pre-load system def JSON files + any script systems for the given
+     *  systems list. Call from Engine.loadApp after activeSystems is resolved.
+     *  - commonBase: e.g. '/common'
+     *  - appBase: e.g. '/apps/demo8'
+     *  Defs are looked up in common first, then app (app can override). */
+    async loadDefs(systems: SystemEntry[], commonBase: string, appBase: string): Promise<void> {
+        this.appBase = appBase;
+        for (const entry of systems) {
+            if (this.defs.has(entry.name)) continue;
+            const defPath = entry.def ?? `systems/${entry.name}.json`;
+            let resp = await fetch(`${commonBase}/${defPath}`);
+            if (!resp.ok && appBase) {
+                resp = await fetch(`${appBase}/${defPath}`);
+            }
+            if (!resp.ok) continue;  // no def → resolve() falls back to builtin-by-name
+            const def = await resp.json() as SystemDef;
+            this.defs.set(entry.name, def);
+
+            // Pre-load script systems (builtin: needs no async work).
+            if (def.source && !def.source.startsWith('builtin:')) {
+                if (!this.scripts.has(def.source)) {
+                    const adapter = await this.loadScriptSystem(def.source);
+                    if (adapter) this.scripts.set(def.source, adapter);
+                }
+            }
+        }
+    }
+
+    /** Fetch → Blob URL → dynamic import a JS system script (mirrors ScriptSystem).
+     *  Path resolution: absolute (leading /) → as-is; relative → appBase. */
+    private async loadScriptSystem(source: string): Promise<ScriptSystemAdapter | null> {
+        const url = source.startsWith('/') ? source : `${this.appBase}/${source}`;
+        // Cache-bust so dev-server edits to the system script reload cleanly.
+        const cacheBust = `${url}?t=${Date.now()}`;
+        try {
+            const resp = await fetch(cacheBust);
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const src = await resp.text();
+            const blob = new Blob([src], { type: 'text/javascript' });
+            const blobUrl = URL.createObjectURL(blob);
+            const mod = await import(/* @vite-ignore */ blobUrl).finally(() => URL.revokeObjectURL(blobUrl));
+            const systemMod = (mod.default ?? mod) as SystemScriptModule;
+            return new ScriptSystemAdapter(systemMod);
+        } catch (err) {
+            console.error(`[SystemRegistry] failed to load system script '${source}':`, err);
+            return null;
+        }
+    }
+
+    /** Synchronous resolution: returns System or null.
+     *  Uses pre-loaded defs (loadDefs must have been called for script systems
+     *  to be resolvable). Builtin systems work without loadDefs (by-name fallback). */
     resolve(entry: SystemEntry): System | null {
+        const def = this.defs.get(entry.name);
+        if (def) {
+            if (def.source.startsWith('builtin:')) {
+                const id = def.source.slice('builtin:'.length);
+                return this.builtins.get(id) ?? null;
+            }
+            return this.scripts.get(def.source) ?? null;
+        }
+        // No def file → fall back to builtin-by-name (backward compat).
         return this.builtins.get(entry.name) ?? null;
+    }
+
+    /** Drop script systems + defs for the current app (call on app unload).
+     *  Disposes each script system so it can release event handlers, etc.
+     *  Builtins stay (engine-lifetime). */
+    clearScripts(): void {
+        for (const sys of this.scripts.values()) sys.dispose?.();
+        this.scripts.clear();
+        this.defs.clear();
+        this.appBase = '';
     }
 }
 

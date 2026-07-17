@@ -305,6 +305,10 @@ export class Engine {
             this.activeSystems = this.commonSystems;
         }
 
+        // Pre-load each system's def JSON + any script systems referenced by
+        // `source: "<path>.js"` so resolve() in the frame loop is synchronous.
+        await systemRegistry.loadDefs(this.activeSystems, this.engineConfig.dataRoot, base);
+
         for (const rel of manifest.components ?? []) {
             await schemaRegistry.loadMore(this.resolveAsset(base, rel));
         }
@@ -383,6 +387,7 @@ export class Engine {
         this.renderGraph.splats = null;
         this.gsEntityEid = null;
         systemRegistry.unregisterBuiltin('gaussianSplat');
+        systemRegistry.clearScripts();
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
