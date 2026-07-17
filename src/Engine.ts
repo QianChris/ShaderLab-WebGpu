@@ -169,6 +169,17 @@ export class Engine {
         loadVertexSlots(vertexSlotsData);
         uniformLayouts.load(uniformLayoutsData);
 
+        // Load common system defs so BufferRegistry can see what UBOs/storage
+        // buffers each common system declares. (loadDefs is idempotent — the
+        // subsequent call in loadApp skips already-loaded common defs.)
+        await systemRegistry.loadDefs(this.commonSystems, root, '');
+        // Allocate every common-scoped buffer declared by common systems' defs
+        // (the four legacy engine UBOs — camera / light / timeInput /
+        // pointShadowFaces — are declared in camera.json / light.json /
+        // input.json). Persists for the engine lifetime; app-scoped buffers
+        // declared by an app's own system defs are allocated in loadApp.
+        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
+
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
         }

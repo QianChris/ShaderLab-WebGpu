@@ -112,8 +112,13 @@ export interface BindEntryDecl {
     viewDimension?: GPUTextureViewDimension;
     storageTexture?: { format: GPUTextureFormat; access?: GPUStorageTextureAccess };
     /** Runtime resource name for frame bind group auto-assembly.
-     *  Valid values: "cameraUBO", "lightUBO", "timeInputUBO", "pointShadowFaceUBO",
-     *  "shadowDepth2DArray", "shadowPoint2DArray", "sampler:<samplerName>". */
+     *  - "sampler:<samplerName>" → named sampler from samplers.json
+     *  - "<uboName>" → UBO registered by BufferRegistry (declared via
+     *    system.json `ubos` field, name matches uniform-layouts.json layout)
+     *  - "<storageBufferName>" → storage buffer registered by BufferRegistry
+     *    (declared via system.json `buffers[].name`)
+     *  - "shadowDepth2DArray" / "shadowPoint2DArray" → legacy shadow map views
+     *    (still special-cased pending TextureViewRegistry). */
     resource?: string;
 }
 

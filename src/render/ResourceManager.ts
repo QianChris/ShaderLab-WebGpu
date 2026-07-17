@@ -1,5 +1,6 @@
 import { meshEdges, type MeshData, type PbrMeshData } from './Primitives';
 import { uniformLayouts } from './UniformLayout';
+import { bufferRegistry } from './BufferRegistry';
 import type { SlotName } from './vertexSlots';
 import type { PipelineEntry, BindLayoutDecls, BindEntryDecl, SamplerDecls } from './types';
 import type { RenderTargetDecls, RenderTargetSize } from './rendererDecl';
@@ -74,10 +75,6 @@ export class ResourceManager {
      *  would allocate a new GPUTextureView each frame — a severe object leak. */
     private textureViewCache = new WeakMap<GPUTexture, GPUTextureView>();
 
-    private _camUBO: GPUBuffer | null = null;
-    private _lightUBO: GPUBuffer | null = null;
-    private _pointShadowFaceUBO: GPUBuffer | null = null;
-    private _timeInputUBO: GPUBuffer | null = null;
     private _depthTex: GPUTexture | null = null;
     private _depthW = 0;
     private _depthH = 0;
@@ -187,6 +184,13 @@ export class ResourceManager {
             this.depthTargets.delete(key);
             this.depthTargetOwner.delete(key);
         }
+        // Invalidate cached frame bind groups: future user-declared app-scoped
+        // UBOs (referenced via `resource: "myAppUbo"` in bind-layouts.json) would
+        // leave _frameBg/_frameShadowBg pointing at destroyed buffers. The four
+        // legacy engine UBOs are common-scoped so this is a no-op for them today,
+        // but invalidating eagerly keeps the cache correct under app-scoped growth.
+        this._frameBg = null;
+        this._frameShadowBg = null;
         // Note: shadow-pass selector UBOs + bind groups are common-owned (not
         // app-scoped) so they survive reload — do not clear _shadowPassBindGroups.
         this.currentOwner = 'common';
@@ -416,46 +420,26 @@ export class ResourceManager {
         return buf;
     }
 
+    /** Camera UBO. Backed by BufferRegistry (declared in camera.json `ubos`). */
     get cameraUBO(): GPUBuffer {
-        if (!this._camUBO) {
-            this._camUBO = this.device.createBuffer({
-                size: uniformLayouts.get('camera').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._camUBO;
+        return bufferRegistry.get('camera');
     }
 
+    /** Light UBO. Backed by BufferRegistry (declared in light.json `ubos`). */
     get lightUBO(): GPUBuffer {
-        if (!this._lightUBO) {
-            this._lightUBO = this.device.createBuffer({
-                size: uniformLayouts.get('light').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._lightUBO;
+        return bufferRegistry.get('light');
     }
 
     /** Per-point-light cube-face view-projection array (6 faces × up to 4 point lights).
-     *  Written by LightSystem; read by the shadow-depth pass (vertex) and PBR (fragment). */
+     *  Written by LightSystem; read by the shadow-depth pass (vertex) and PBR (fragment).
+     *  Backed by BufferRegistry (declared in light.json `ubos`). */
     get pointShadowFaceUBO(): GPUBuffer {
-        if (!this._pointShadowFaceUBO) {
-            this._pointShadowFaceUBO = this.device.createBuffer({
-                size: uniformLayouts.get('pointShadowFaces').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._pointShadowFaceUBO;
+        return bufferRegistry.get('pointShadowFaces');
     }
 
+    /** TimeInput UBO. Backed by BufferRegistry (declared in input.json `ubos`). */
     get timeInputUBO(): GPUBuffer {
-        if (!this._timeInputUBO) {
-            this._timeInputUBO = this.device.createBuffer({
-                size: uniformLayouts.get('timeInput').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._timeInputUBO;
+        return bufferRegistry.get('timeInput');
     }
 
     depthView(width: number, height: number): GPUTextureView {
@@ -775,11 +759,16 @@ export class ResourceManager {
         if (name.startsWith('sampler:')) {
             return this.namedSampler(name.slice(8));
         }
+        // Buffer resources (UBOs + storage buffers) — registered by name in
+        // BufferRegistry (declared via system.json `ubos`/`buffers` fields).
+        // The name matches the uniform-layouts.json layout name (for UBOs) or
+        // the explicit `name` field (for storage buffers).
+        if (bufferRegistry.has(name)) {
+            return { buffer: bufferRegistry.get(name) };
+        }
+        // Shadow texture resources — still special-cased here pending a
+        // TextureViewRegistry (Step 9 cleanup).
         switch (name) {
-            case 'cameraUBO':          return { buffer: this.cameraUBO };
-            case 'lightUBO':           return { buffer: this.lightUBO };
-            case 'timeInputUBO':       return { buffer: this.timeInputUBO };
-            case 'pointShadowFaceUBO':  return { buffer: this.pointShadowFaceUBO };
             case 'shadowDepth2DArray':  return this.shadowDepth2DArrayView();
             case 'shadowPoint2DArray':  return this.shadowPoint2DArrayView();
             default: throw new Error(`Unknown frame resource '${name}' in bind-layouts.json`);

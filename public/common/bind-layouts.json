@@ -1,21 +1,21 @@
 {
   "frame": {
     "entries": [
-      { "binding": 0, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "cameraUBO" },
-      { "binding": 1, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "lightUBO" },
-      { "binding": 2, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "timeInputUBO" },
+      { "binding": 0, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "camera" },
+      { "binding": 1, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "light" },
+      { "binding": 2, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "timeInput" },
       { "binding": 3, "visibility": ["fragment"], "texture": "depth", "viewDimension": "2d-array", "resource": "shadowDepth2DArray" },
       { "binding": 4, "visibility": ["fragment"], "sampler": "comparison", "resource": "sampler:shadow" },
       { "binding": 5, "visibility": ["fragment"], "texture": "depth", "viewDimension": "2d-array", "resource": "shadowPoint2DArray" },
-      { "binding": 6, "visibility": ["fragment"], "buffer": "uniform", "resource": "pointShadowFaceUBO" }
+      { "binding": 6, "visibility": ["fragment"], "buffer": "uniform", "resource": "pointShadowFaces" }
     ]
   },
   "frameShadow": {
     "entries": [
-      { "binding": 0, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "cameraUBO" },
-      { "binding": 1, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "lightUBO" },
-      { "binding": 2, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "timeInputUBO" },
-      { "binding": 3, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "pointShadowFaceUBO" }
+      { "binding": 0, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "camera" },
+      { "binding": 1, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "light" },
+      { "binding": 2, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "timeInput" },
+      { "binding": 3, "visibility": ["vertex", "fragment"], "buffer": "uniform", "resource": "pointShadowFaces" }
     ]
   },
   "shadowPass": {
