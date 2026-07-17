@@ -1,5 +1,6 @@
 {
   "name": "MultiViewRenderGraph",
+  "multiView": true,
   "clearColor": [0.05, 0.05, 0.08, 1.0],
   "phases": {
     "Preprocess": [],

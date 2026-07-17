@@ -142,4 +142,8 @@ export interface RenderGraphData {
     /** Scene pass clear color [r,g,b,a]; defaults to a dark blue if omitted. */
     clearColor?: [number, number, number, number];
     phases: Partial<PhaseMap>;
+    /** Enable multi-view split-screen rendering. When true, every active Camera
+     *  entity renders into its own on-screen `Camera.viewport` rect per frame.
+     *  When false (default), only the primary (first active) Camera renders. */
+    multiView?: boolean;
 }

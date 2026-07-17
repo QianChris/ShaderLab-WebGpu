@@ -60,6 +60,14 @@ export class PipelineDriver {
     geometryHooks: Map<string, GeometryHook>;
     /** Named compute scripts (compute stage). */
     computeHooks: Map<string, ComputeHook>;
+    /** Per-entity bind-group cache keyed `${group}_${eid}`. Entries are rebuilt
+     *  only when a bound resource changes identity (e.g. a sprite texture
+     *  finishing async load flips the view from fallback to the real one);
+     *  otherwise the same GPUBindGroup is reused across frames. Uniform
+     *  buffers (getUniform, cached by key), samplers (namedSampler, cached by
+     *  name) and texture views (ResourceManager.textureView, cached per tex)
+     *  are all stable objects, so the signature comparison is cheap and exact. */
+    private bgCache = new Map<string, { bg: GPUBindGroup; sig: unknown[] }>();
 
     constructor(
         path: string,
@@ -167,7 +175,21 @@ export class PipelineDriver {
         for (const bg of this.decl.bindGroups ?? []) {
             const layoutName = this.layoutNameFor(bg.group);
             const entries = this.buildEntries(bg, vctx, layoutName);
-            pass.setBindGroup(bg.group, resourceManager.genericBindGroup(layoutName, entries));
+            // Per-entity bind-group reuse: only rebuild when a bound resource
+            // changes identity (uniform buffer/sampler/view are all cached +
+            // stable, so the common case is a cache hit → no new GPUBindGroup).
+            const sig = entries.map(e => (e.resource as GPUBufferBinding).buffer ?? e.resource);
+            const key = `${bg.group}_${vctx.eid}`;
+            const cached = this.bgCache.get(key);
+            let bgObj: GPUBindGroup;
+            if (cached && sig.length === cached.sig.length
+                && sig.every((r, i) => r === cached.sig[i])) {
+                bgObj = cached.bg;
+            } else {
+                bgObj = resourceManager.genericBindGroup(layoutName, entries);
+                this.bgCache.set(key, { bg: bgObj, sig });
+            }
+            pass.setBindGroup(bg.group, bgObj);
         }
     }
 
@@ -202,7 +224,7 @@ export class PipelineDriver {
                 const tex = resourceManager.getTexture(url);
                 entries.push({
                     binding: t.binding,
-                    resource: tex ? tex.createView() : resourceManager.fallbackTextureView(t.fallback),
+                    resource: tex ? resourceManager.textureView(tex) : resourceManager.fallbackTextureView(t.fallback),
                 });
                 continue;
             }
@@ -210,7 +232,7 @@ export class PipelineDriver {
             const tex = resourceManager.getTextureByHandle(handle);
             entries.push({
                 binding: t.binding,
-                resource: tex ? tex.createView() : resourceManager.fallbackTextureView(t.fallback),
+                resource: tex ? resourceManager.textureView(tex) : resourceManager.fallbackTextureView(t.fallback),
             });
         }
 
