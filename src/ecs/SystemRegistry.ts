@@ -186,10 +186,10 @@ class SystemRegistry {
             if (this.defs.has(entry.name)) continue;
             const defPath = entry.def ?? `systems/${entry.name}.json`;
             let resp = await fetch(`${commonBase}/${defPath}`);
-            if (!resp.ok && appBase) {
+            if (!isJsonResp(resp) && appBase) {
                 resp = await fetch(`${appBase}/${defPath}`);
             }
-            if (!resp.ok) continue;  // no def → resolve() falls back to builtin-by-name
+            if (!isJsonResp(resp)) continue;  // no def → resolve() falls back to builtin-by-name
             const def = await resp.json() as SystemDef;
             this.defs.set(entry.name, def);
 
@@ -202,17 +202,25 @@ class SystemRegistry {
             }
         }
 
-        // Validate `needs`: every needed system must be in the active list.
-        const activeNames = new Set(systems.map(s => s.name));
+        // Validate `needs`: a `needs` entry is a SOFT ordering constraint —
+        // "if this system is in the active list, it must run before me". A
+        // missing need (e.g. `gaussianSplat` declared in render.json's needs
+        // but absent from an app's systems.json) is fine; an out-of-order need
+        // (the needed system runs AFTER the needing one) is a real bug.
+        const activeOrder = new Map<string, number>();
+        for (let i = 0; i < systems.length; i++) activeOrder.set(systems[i].name, i);
         for (const entry of systems) {
             const def = this.defs.get(entry.name);
             if (!def?.needs) continue;
+            const myIdx = activeOrder.get(entry.name);
+            if (myIdx === undefined) continue;
             for (const need of def.needs) {
-                if (!activeNames.has(need)) {
+                const needIdx = activeOrder.get(need);
+                if (needIdx === undefined) continue;  // not active → no constraint
+                if (needIdx > myIdx) {
                     console.warn(
-                        `[SystemRegistry] system '${entry.name}' declares needs=['${need}'] ` +
-                        `but '${need}' is not in the active systems list — ` +
-                        `running order may be wrong or '${need}' is missing from systems.json`,
+                        `[SystemRegistry] system '${entry.name}' (idx ${myIdx}) declares needs=['${need}'] ` +
+                        `but '${need}' is ordered after it (idx ${needIdx}) — fix the order in systems.json`,
                     );
                 }
             }
@@ -265,6 +273,13 @@ class SystemRegistry {
         this.defs.clear();
         this.appBase = '';
     }
+}
+
+/** True if the response is a fetch-able JSON document. Guards against the
+ *  Vite SPA fallback (200 + text/html for unknown paths). */
+function isJsonResp(resp: Response): boolean {
+    const ct = resp.headers.get('content-type') ?? '';
+    return resp.ok && (ct.includes('json') || ct.includes('application'));
 }
 
 export const systemRegistry = new SystemRegistry();
