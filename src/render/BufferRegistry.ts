@@ -46,7 +46,17 @@ class BufferRegistry {
             const def = systemRegistry.getDef(entry.name);
             if (!def) continue;
             // UBOs: name matches a uniform-layouts.json entry; layout = same name.
+            // A UBO whose layout isn't declared is skipped with a warning — the
+            // owning system is expected to allocate it itself (e.g. dynamic-size
+            // UBOs like the splat model UBO built by GaussianSplatManager).
             for (const uboName of def.ubos ?? []) {
+                if (!uniformLayouts.has(uboName)) {
+                    console.warn(
+                        `[BufferRegistry] system '${entry.name}' declares ubo '${uboName}' ` +
+                        `but no such layout in uniform-layouts.json — skipping (system must allocate it itself)`,
+                    );
+                    continue;
+                }
                 this.ensure({
                     name: uboName,
                     layout: uboName,
@@ -55,7 +65,17 @@ class BufferRegistry {
                 }, appId, device);
             }
             // Storage / other buffers: explicit decl with size/layout/usage.
+            // String entries (instead of objects) are skipped with a warning —
+            // dynamic-size storage buffers (e.g. splat centers/colors) can't be
+            // statically allocated from a def and must be created at runtime.
             for (const bufDecl of def.buffers ?? []) {
+                if (typeof bufDecl === 'string') {
+                    console.warn(
+                        `[BufferRegistry] system '${entry.name}' declares buffer '${bufDecl}' ` +
+                        `as a string — storage buffers need a {name,size,...} object decl; skipping`,
+                    );
+                    continue;
+                }
                 this.ensure(bufDecl, appId, device);
             }
         }

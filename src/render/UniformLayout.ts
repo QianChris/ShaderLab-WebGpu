@@ -107,6 +107,10 @@ export class UniformLayoutRegistry {
         }
     }
 
+    has(name: string): boolean {
+        return this.layouts.has(name);
+    }
+
     get(name: string): UniformLayout {
         const layout = this.layouts.get(name);
         if (!layout) throw new Error(`Uniform layout '${name}' not found`);
