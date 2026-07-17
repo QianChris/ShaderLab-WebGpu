@@ -9,6 +9,25 @@ Eliminate the remaining hardcoded dispatch / closed enums / dead metadata in the
 
 Each step keeps `npm run build` green and is one git commit.
 
+## Status
+
+| Step | Status | Commit |
+|------|--------|--------|
+| 1 — System interface + SystemRegistry dispatch | ✅ done | `9b074f3` |
+| 2 — Custom system script loader + demo8 | ✅ done | `64ebeab` |
+| 3 — BufferRegistry: system-level globals | ✅ done | `a73d667` |
+| 4 — resolveFrameResource via BufferRegistry | ✅ done | `4a909fe` |
+| 5 — Per-entity component buffers | ⏸ deferred (needs Scene + SchemaRegistry refactor) | — |
+| 6 — FrameContext GPU access (getBuffer/writeBuffer/dispatchCompute) | ✅ done (minimal) | `0f8f6ef` |
+| 7 — gaussianSplat self-contained (loadFromScene moved to manager) | ✅ done (partial) | `62cdbed` |
+| 8 — Tool scripts (source: scripts/x.js) | ✅ done | `57c3b01` |
+| 9 — Phase behavior scripts | ⏸ deferred (RenderGraph.runPhase refactor) | — |
+| 10 — Cleanup (depthView dead code / kind enum / needs validation) | ✅ done | `23b8b19` |
+
+Deferred items (5, 9, full-7) require deeper refactors that risk breaking existing apps; they are documented below for a follow-up pass.
+
+---
+
 ## Inventory of violations (mapped to steps)
 
 | # | Violation | Step |
