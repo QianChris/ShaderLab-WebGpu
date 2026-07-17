@@ -1,6 +1,7 @@
 import { resourceManager } from './ResourceManager';
 import { mat4Mul } from '../math';
 import { loadSplatPly, type SplatData } from '../gs/SplatLoader';
+import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -19,7 +20,7 @@ const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0
  * the splat referenced by a GsComponent entity via load() and disposes on app
  * switch.
  */
-export class GaussianSplatManager {
+export class GaussianSplatManager implements System {
     count = 0;
     ready = false;
     splatScale = 1.0;
@@ -74,6 +75,13 @@ export class GaussianSplatManager {
         this.modelUBO = resourceManager.getUniform('gsSplatUniform', this.uniformData, 80);
         this.cpuModel = IDENTITY_MAT4;
         this.ready = true;
+    }
+
+    /** System interface: refresh model UBO + re-sort splats against the active camera. */
+    update(ctx: FrameContext): void {
+        if (ctx.gsEntityEid === null) return;
+        this.setModel(ctx.scene.getModelMatrix(ctx.gsEntityEid), ctx.cw, ctx.ch);
+        this.sort(ctx.camera.lastView, ctx.camera.lastPos);
     }
 
     /**

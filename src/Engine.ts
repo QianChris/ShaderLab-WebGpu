@@ -12,6 +12,7 @@ import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
 import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
+import { systemRegistry, type FrameContext } from './ecs/SystemRegistry';
 import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData } from './render/Primitives';
 import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
 import { GltfLoader } from './gltf/GltfLoader';
@@ -213,6 +214,18 @@ export class Engine {
         this.animationSystem.attach(this.scene);
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
         this.scriptSystem.provide(this.physicsSystem, () => this.aspect());
+
+        // Register built-in systems with the SystemRegistry so frame() dispatch
+        // is data-driven (systems.json drives order + presence, registry maps
+        // names to instances). 'gaussianSplat' is registered conditionally by
+        // loadApp() (app-opted-in); the rest are always-present engine systems.
+        systemRegistry.registerBuiltin('input', this.inputSystem);
+        systemRegistry.registerBuiltin('script', this.scriptSystem);
+        systemRegistry.registerBuiltin('physics', this.physicsSystem);
+        systemRegistry.registerBuiltin('camera', this.cameraSystem);
+        systemRegistry.registerBuiltin('light', this.lightSystem);
+        systemRegistry.registerBuiltin('animation', this.animationSystem);
+        systemRegistry.registerBuiltin('render', this.renderGraph);
     }
 
     private aspect(): number {
@@ -339,6 +352,7 @@ export class Engine {
             this.gaussianSplatManager = mgr;
             this.renderGraph.splats = mgr;
             this.gsEntityEid = null;
+            systemRegistry.registerBuiltin('gaussianSplat', mgr);
             for (const [, eid] of this.scene.entityKeyMap) {
                 if (!this.scene.hasComponent(eid, 'GsComponent')) continue;
                 const ply = this.scene.getField(eid, 'GsComponent', 'ply') as string;
@@ -368,6 +382,7 @@ export class Engine {
         this.gaussianSplatManager = null;
         this.renderGraph.splats = null;
         this.gsEntityEid = null;
+        systemRegistry.unregisterBuiltin('gaussianSplat');
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
@@ -404,26 +419,31 @@ export class Engine {
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
+        const ctx: FrameContext = {
+            scene: this.scene,
+            time, dt,
+            aspect: this.aspect(),
+            cw: this.canvas.width,
+            ch: this.canvas.height,
+            canvas: this.canvas,
+            device: this.device,
+            context: this.context,
+            format: this.format,
+            eventBus: this.eventBus,
+            physics: this.physicsSystem,
+            camera: this.cameraSystem,
+            light: this.lightSystem,
+            animation: this.animationSystem,
+            input: this.inputSystem,
+            script: this.scriptSystem,
+            splats: this.gaussianSplatManager,
+            gsEntityEid: this.gsEntityEid,
+            renderGraph: this.renderGraph,
+        };
+
         for (const sys of this.activeSystems) {
-            switch (sys.name) {
-                case 'input':      this.inputSystem.update(time, dt); break;
-                case 'script':     this.scriptSystem.update(time, dt); break;
-                case 'physics':    this.physicsSystem.update(time, dt); break;
-                case 'camera':     this.cameraSystem.update(this.aspect()); break;
-                case 'light':      this.lightSystem.update(); break;
-                case 'animation':  this.animationSystem.update(time, dt); break;
-                case 'gaussianSplat':
-                    if (this.gaussianSplatManager && this.gsEntityEid !== null) {
-                        this.gaussianSplatManager.setModel(this.scene.getModelMatrix(this.gsEntityEid), this.canvas.width, this.canvas.height);
-                    }
-                    if (this.gaussianSplatManager) {
-                        this.gaussianSplatManager.sort(this.cameraSystem.lastView, this.cameraSystem.lastPos);
-                    }
-                    break;
-                case 'render':
-                    this.renderGraph.execute(this.device, this.context, this.format, this.scene, time, dt);
-                    break;
-            }
+            const impl = systemRegistry.resolve(sys);
+            impl?.update(ctx);
         }
         requestAnimationFrame(this.frame);
     };

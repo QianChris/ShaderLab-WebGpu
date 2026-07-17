@@ -5,6 +5,7 @@ import { resourceManager } from '../render/ResourceManager';
 import { EVENT_TYPES } from '../events/eventTypes';
 import type { Scene } from '../ecs/Scene';
 import type { EventBus } from '../events/EventBus';
+import type { FrameContext, System } from './SystemRegistry';
 
 interface ControllerParams {
     enabled: boolean;
@@ -61,7 +62,7 @@ const BODY_DESC_BUILDERS: Record<string, (R: typeof RAPIER) => RAPIER.RigidBodyD
  * Transform. A PhysicsControllerComponent singleton toggles stepping, gravity,
  * an optional ground plane and debug drawing.
  */
-export class PhysicsSystem {
+export class PhysicsSystem implements System {
     debugVertexCount = 0;
     debugPosBuffer: GPUBuffer | null = null;
     debugColBuffer: GPUBuffer | null = null;
@@ -109,7 +110,8 @@ export class PhysicsSystem {
         this.debugVertexCount = 0;
     }
 
-    update(_time: number, dt: number): void {
+    update(ctx: FrameContext): void {
+        const dt = ctx.dt;
         const world = this.world;
         if (!world) return;
 

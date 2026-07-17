@@ -2,6 +2,7 @@ import { defineQuery } from 'bitecs/legacy';
 import { schemaRegistry } from './SchemaRegistry';
 import { resourceManager } from '../render/ResourceManager';
 import type { Scene } from './Scene';
+import type { FrameContext, System } from './SystemRegistry';
 
 interface SheetAnimation {
     name: string;
@@ -33,7 +34,7 @@ interface SheetData {
  *   "loop"     – wrap around (0,1,…,n-1,0,1,…)
  *   "once"     – play forward once then stop (sets playing=0)
  */
-export class AnimationSystem {
+export class AnimationSystem implements System {
     private scene!: Scene;
     private baseDir = '';
     private sheets = new Map<string, SheetData | null>();
@@ -60,7 +61,8 @@ export class AnimationSystem {
         this.query = () => [];
     }
 
-    update(_time: number, dt: number): void {
+    update(ctx: FrameContext): void {
+        const dt = ctx.dt;
         if (!this.initialized) {
             this.initialized = true;
             const sheetComp = schemaRegistry.get('SpriteSheetComponent');

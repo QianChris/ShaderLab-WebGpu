@@ -1,6 +1,7 @@
 import { resourceManager } from '../render/ResourceManager';
 import { uniformLayouts } from '../render/UniformLayout';
 import type { Scene } from './Scene';
+import type { FrameContext, System } from './SystemRegistry';
 
 const layout = uniformLayouts;
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -17,7 +18,7 @@ const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0
  * via `update` so off-pipeline consumers (splat sort, the editor gizmo) see a
  * valid view, and tracks `lastView`/`lastPos` from that primary camera.
  */
-export class CameraSystem {
+export class CameraSystem implements System {
     private scene!: Scene;
     private data: Float32Array = new Float32Array(0);
     /** Last frame's view matrix + position (for splat sort / off-pipeline use). */
@@ -29,8 +30,8 @@ export class CameraSystem {
         this.data = layout.get('camera').createBuffer();
     }
 
-    update(aspect: number): void {
-        const cam = this.scene.getActiveCamera(aspect);
+    update(ctx: FrameContext): void {
+        const cam = this.scene.getActiveCamera(ctx.aspect);
         const buf = this.data;
         const camLayout = layout.get('camera');
         if (cam) {

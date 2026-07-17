@@ -2,6 +2,7 @@ import { resourceManager } from '../render/ResourceManager';
 import { uniformLayouts } from '../render/UniformLayout';
 import { EVENT_TYPES } from '../events/eventTypes';
 import type { EventBus } from '../events/EventBus';
+import type { FrameContext, System } from './SystemRegistry';
 
 /**
  * Mouse input tracker. Fills the per-frame TimeInput UBO.
@@ -9,7 +10,7 @@ import type { EventBus } from '../events/EventBus';
  * UBO layout: declared in uniform-layouts.json as "timeInput"
  * (time, dt, frame, _pad, mouse).
  */
-export class InputSystem {
+export class InputSystem implements System {
     private canvas: HTMLCanvasElement;
     private bus: EventBus;
     private mouseX = 0;
@@ -42,12 +43,12 @@ export class InputSystem {
         this.canvas.removeEventListener('contextmenu', this.onContextMenu);
     }
 
-    update(time: number, dt: number): void {
+    update(ctx: FrameContext): void {
         const layout = uniformLayouts.get('timeInput');
         const buf = this.data;
         buf.fill(0);
-        layout.write(buf, 'time', time);
-        layout.write(buf, 'dt', dt);
+        layout.write(buf, 'time', ctx.time);
+        layout.write(buf, 'dt', ctx.dt);
         layout.write(buf, 'frame', this.frameCount++);
         layout.write(buf, 'mouse', [this.mouseX, this.mouseY, this.buttons, this.wheel]);
         const ubo = resourceManager.timeInputUBO;

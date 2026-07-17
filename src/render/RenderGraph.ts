@@ -10,6 +10,7 @@ import { type RenderGraphData, type PhaseMap, type PhaseDecl } from './types';
 import type { RenderTargetDecls } from './rendererDecl';
 import type { ValueContext } from './valueResolver';
 import type { Scene, CameraView } from '../ecs/Scene';
+import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const SCREEN = 'screen';
 
@@ -27,7 +28,7 @@ interface ViewportRect {
  * bind groups); a generic PipelineDriver executes it. Pipelines self-declare
  * their phase; render.json is just the load manifest + defaults.
  */
-export class RenderGraph {
+export class RenderGraph implements System {
     name = '';
     phases: PhaseMap = {};
     physics: import('../ecs/PhysicsSystem').PhysicsSystem | null = null;
@@ -229,6 +230,11 @@ export class RenderGraph {
             if (!appBase) throw new Error(`Compute pipeline '${path}' not found in ${commonBase}`);
             return PipelineLoader.loadCompute(device, appBase, path);
         }
+    }
+
+    /** System interface: run the render graph for this frame. */
+    update(ctx: FrameContext): void {
+        this.execute(ctx.device, ctx.context, ctx.format, ctx.scene, ctx.time, ctx.dt);
     }
 
     execute(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat, scene: Scene, time: number, dt: number): void {
