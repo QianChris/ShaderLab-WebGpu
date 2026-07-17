@@ -56,9 +56,25 @@ export interface SystemDef {
     source: string;
     components?: string[];
     ubos?: string[];
-    buffers?: string[];
+    buffers?: SystemBufferDecl[];
     needs?: string[];
     requires?: string[];
+}
+
+/** A buffer declared in a system def's `ubos` or `buffers` array.
+ *  - For UBOs: `name` matches a uniform-layouts.json entry; size = layout.byteSize.
+ *  - For storage buffers: explicit `size`, OR `layout` + optional `count`
+ *    (size = layout.byteSize * count), OR `layout` alone (size = layout.byteSize).
+ *  - `scope`: "app" (default) = destroyed on app switch; "common" = engine-lifetime.
+ *  - `usage`: array of GPUBufferUsage flag names (default ['storage','copy_dst']
+ *    for storage, ['uniform','copy_dst'] for UBOs). */
+export interface SystemBufferDecl {
+    name: string;
+    layout?: string;
+    size?: number;
+    count?: number;
+    scope?: 'app' | 'common';
+    usage?: string[];
 }
 
 /** Lifecycle hooks a script system may export. All optional; missing hooks are skipped. */
@@ -119,6 +135,16 @@ class SystemRegistry {
     /** Drop a builtin registration (used when an app-opted-in system is torn down). */
     unregisterBuiltin(name: string): void {
         this.builtins.delete(name);
+    }
+
+    /** Look up a loaded system def by system name (or undefined if not loaded). */
+    getDef(name: string): SystemDef | undefined {
+        return this.defs.get(name);
+    }
+
+    /** All currently-loaded system defs (for BufferRegistry to scan). */
+    allDefs(): Iterable<[string, SystemDef]> {
+        return this.defs.entries();
     }
 
     /** Pre-load system def JSON files + any script systems for the given

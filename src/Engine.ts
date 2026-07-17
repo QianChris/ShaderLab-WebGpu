@@ -13,6 +13,7 @@ import { PipelineLoader } from './render/PipelineLoader';
 import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext } from './ecs/SystemRegistry';
+import { bufferRegistry } from './render/BufferRegistry';
 import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData } from './render/Primitives';
 import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
 import { GltfLoader } from './gltf/GltfLoader';
@@ -309,6 +310,10 @@ export class Engine {
         // `source: "<path>.js"` so resolve() in the frame loop is synchronous.
         await systemRegistry.loadDefs(this.activeSystems, this.engineConfig.dataRoot, base);
 
+        // Allocate every UBO/storage buffer declared in the active systems' defs
+        // (`ubos`/`buffers` fields). App-scoped: released on app switch.
+        bufferRegistry.allocateFor(this.activeSystems, name, this.device);
+
         for (const rel of manifest.components ?? []) {
             await schemaRegistry.loadMore(this.resolveAsset(base, rel));
         }
@@ -388,6 +393,7 @@ export class Engine {
         this.gsEntityEid = null;
         systemRegistry.unregisterBuiltin('gaussianSplat');
         systemRegistry.clearScripts();
+        bufferRegistry.exitApp(appId);
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
