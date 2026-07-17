@@ -23,4 +23,10 @@ export function update(ctx) {
     const half = Math.sin(angle * 0.5);
     const w = Math.cos(angle * 0.5);
     ctx.scene.setField(eid, 'Transform', 'rotation', [0, half, 0, w]);
+
+    // Prove script systems have GPU buffer access: write the orbit state into
+    // the 'orbitScratch' storage buffer declared in orbit.json `buffers`.
+    // (Step 6 — script systems can read/write declared buffers via ctx helpers.)
+    ctx.writeBuffer('orbitScratch', new Float32Array([t, eid, x, z]));
 }
+

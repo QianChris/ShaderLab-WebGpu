@@ -641,6 +641,12 @@ export class RenderGraph implements System {
         return { name: this.name, clearColor: [...this.clearColor], phases, multiView: this.multiView };
     }
 
+    /** Look up a loaded compute pipeline by name (for script systems that
+     *  want to dispatch their own compute via ctx.dispatchCompute). */
+    getComputePipeline(name: string): GPUComputePipeline | undefined {
+        return this.computePipelines.get(name);
+    }
+
     rebuildPipeline(device: GPUDevice, pipelinePath: string): void {
         if (!this.pipelines.has(pipelinePath)) return;
         this.pipelines.set(pipelinePath, PipelineLoader.rebuild(device, this.dataBase, pipelinePath));

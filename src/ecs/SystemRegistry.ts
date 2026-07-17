@@ -41,6 +41,32 @@ export interface FrameContext {
     splats: GaussianSplatManager | null;
     gsEntityEid: number | null;
     renderGraph: RenderGraph;
+
+    /* ── Script-system GPU access ──────────────────────────────────────
+     * The following helpers expose BufferRegistry + compute dispatch to
+     * script-loaded systems (`source: "scripts/x.js"`). They let a user
+     * write a JS system that writes to declared UBOs/storage buffers and
+     * dispatches compute pipelines — no TypeScript changes required to
+     * add a new GPU-driven simulation system.
+     *
+     * Limitations (Step 6 minimal):
+     *   - dispatchCompute opens its own command encoder + submit (slow path);
+     *     lifting the encoder to frame scope for batched compute is a future
+     *     refactor (see PLAN.md Step 6).
+     *   - bind groups for dispatched compute must be passed in by the script
+     *     (no auto-assembly from a layout). */
+
+    /** Look up a named GPU buffer (UBO or storage) declared by a system.json
+     *  `ubos` / `buffers` field. The buffer is allocated by BufferRegistry. */
+    getBuffer(name: string): GPUBuffer;
+    /** Write data into a named buffer (queue.writeBuffer wrapper). */
+    writeBuffer(name: string, data: BufferSource): void;
+    /** Dispatch a compute pipeline by its name (must be preloaded in render.json
+     *  `renderScripts` or referenced by an enabled pipeline's `aux`). `count`
+     *  is the logical item count; the workgroup count is derived from the
+     *  pipeline's declared workgroupSize (in computeTgs). Optional `entries`
+     *  build a fresh bind group against @group(0) for this dispatch. */
+    dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void;
 }
 
 /** Uniform interface every system — builtin or script-loaded — must satisfy. */

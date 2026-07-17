@@ -461,6 +461,12 @@ export class Engine {
             splats: this.gaussianSplatManager,
             gsEntityEid: this.gsEntityEid,
             renderGraph: this.renderGraph,
+            // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
+            getBuffer: (name: string) => bufferRegistry.get(name),
+            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
+            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
+                this.dispatchCompute(pipelineName, count, entries);
+            },
         };
 
         for (const sys of this.activeSystems) {
@@ -472,6 +478,29 @@ export class Engine {
 
     startLoop(): void {
         requestAnimationFrame(this.frame);
+    }
+
+    /** Dispatch a preloaded compute pipeline by name (script-system escape hatch).
+     *  Opens a per-call command encoder + submit — functional but not optimal;
+     *  batching multiple dispatches per frame is a future optimization. */
+    private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void {
+        const pipeline = this.renderGraph.getComputePipeline(pipelineName);
+        if (!pipeline) throw new Error(`compute pipeline '${pipelineName}' not loaded`);
+        const meta = PipelineLoader.getComputeMeta(pipelineName);
+        const tgs = meta?.workgroupSize ?? this.engineConfig.computeTgs;
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        if (entries && entries.length > 0) {
+            const bg = this.device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries,
+            });
+            pass.setBindGroup(0, bg);
+        }
+        pass.dispatchWorkgroups(Math.ceil(count / tgs));
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
     }
 
     exportScene(): object {
