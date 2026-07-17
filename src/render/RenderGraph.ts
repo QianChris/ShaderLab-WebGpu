@@ -73,6 +73,10 @@ export class RenderGraph {
     /** Release app-owned state: drivers, escape-hatch hooks, particle GPU buffers.
      *  Common pipelines / shader modules are kept for reuse across apps. */
     exitApp(_appId: string): void {
+        // Drop per-entity bind-group caches promptly (the driver objects will be
+        // GC'd eventually, but explicitly clearing the cache makes the cached
+        // GPUBindGroups dereferenced now rather than after driver GC).
+        for (const d of this.drivers) d.dispose();
         this.drivers = [];
         this.valueScripts.clear();
         this.geometryHooks.clear();

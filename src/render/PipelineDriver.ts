@@ -85,6 +85,13 @@ export class PipelineDriver {
         this.computeHooks = computeHooks;
     }
 
+    /** Release cached GPU objects so they are GC-eligible immediately on app
+     *  unload, rather than waiting for this driver (and its bgCache Map) to be
+     *  collected. GPUBindGroup has no destroy(); dereferencing is the only lever. */
+    dispose(): void {
+        this.bgCache.clear();
+    }
+
     /** Encode compute work declared by this pipeline (script hook), before the render pass. */
     compute(encoder: GPUCommandEncoder, ctx: Omit<ComputeHookContext, 'entities' | 'aux'> & { scene: Scene }): void {
         const decl = this.decl.compute as { script?: string } | undefined;

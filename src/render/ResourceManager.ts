@@ -158,7 +158,13 @@ export class ResourceManager {
         }
         for (const [key, owner] of this.textureOwner) {
             if (owner !== appId) continue;
-            this.textures.get(key)?.destroy();
+            const tex = this.textures.get(key);
+            if (tex) {
+                // Drop the cached view promptly so it is GC-eligible without
+                // waiting for the destroyed GPUTexture to be collected.
+                this.textureViewCache.delete(tex);
+                tex.destroy();
+            }
             this.textures.delete(key);
             this.textureOwner.delete(key);
             const handle = this.textureKeyToHandle.get(key);
@@ -169,20 +175,20 @@ export class ResourceManager {
         }
         for (const [key, owner] of this.colorTargetOwner) {
             if (owner !== appId) continue;
-            this.colorTargets.get(key)?.tex.destroy();
+            const entry = this.colorTargets.get(key);
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             this.colorTargets.delete(key);
             this.colorTargetOwner.delete(key);
         }
         for (const [key, owner] of this.depthTargetOwner) {
             if (owner !== appId) continue;
-            this.depthTargets.get(key)?.tex.destroy();
+            const entry = this.depthTargets.get(key);
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             this.depthTargets.delete(key);
             this.depthTargetOwner.delete(key);
         }
-        // Shadow-pass selector bind groups wrap app-owned `shadowPass_*` UBOs
-        // (destroyed above); drop the stale bind-group cache so the next app
-        // rebuilds them against fresh UBO buffers.
-        this._shadowPassBindGroups.clear();
+        // Note: shadow-pass selector UBOs + bind groups are common-owned (not
+        // app-scoped) so they survive reload — do not clear _shadowPassBindGroups.
         this.currentOwner = 'common';
     }
 
@@ -552,7 +558,13 @@ export class ResourceManager {
     }
 
     /** Named depth target view; distinct depth textures keyed by name (data-driven targets).
-     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'. */
+     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'.
+     *
+     *  Note: WebGPU requires the depth attachment's size to exactly match the color
+     *  attachment's base plane size, so a viewport-sized depth target MUST be
+     *  reallocated on every canvas resize. The old GPUTextureView cannot be freed
+     *  eagerly (no destroy()), so each resize leaves one stale view until GC — this
+     *  is a WebGPU/browser limitation, not an engine bug. */
     namedDepthTargetView(name: string, viewportW: number, viewportH: number): GPUTextureView {
         const { w, h } = this.resolveTargetSize(name, viewportW, viewportH);
         const decl = this.renderTargetDecls[name];
@@ -560,7 +572,7 @@ export class ResourceManager {
             ? decl.format : 'depth24plus') as GPUTextureFormat;
         let entry = this.depthTargets.get(name);
         if (!entry || entry.w !== w || entry.h !== h || entry.format !== format) {
-            entry?.tex.destroy();
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             const tex = this.device.createTexture({
                 label: `depth:${name}`,
                 size: { width: w, height: h },
@@ -676,7 +688,7 @@ export class ResourceManager {
     colorTarget(key: string, w: number, h: number, format: GPUTextureFormat): GPUTexture {
         const prev = this.colorTargets.get(key);
         if (!prev || prev.w !== w || prev.h !== h || prev.format !== format) {
-            prev?.tex.destroy();
+            if (prev) { this.textureViewCache.delete(prev.tex); prev.tex.destroy(); }
             const tex = this.device.createTexture({
                 size: { width: w, height: h },
                 format,
@@ -805,7 +817,12 @@ export class ResourceManager {
      *  single shared UBO between render passes in one command buffer.
      *  The bind group wraps the per-passIndex UBO buffer (stable object; its
      *  {lightIdx, face} contents are rewritten each frame via writeBuffer), so the
-     *  bind group object is cached per passIndex — only built once, then reused. */
+     *  bind group object is cached per passIndex — only built once, then reused.
+     *
+     *  The UBO + bind group are common-owned (not app-scoped): the passIndex →
+     *  lightIdx/face mapping is rewritten every frame, so they survive app reload
+     *  without going stale. This avoids recreating them on every reload (the
+     *  browser does not promptly GC GPUBindGroup). */
     shadowPassBindGroup(passIndex: number, lightIdx: number, face: number): GPUBindGroup {
         const key = `shadowPass_${passIndex}`;
         let buf = this.uniformBuffers.get(key);
@@ -815,7 +832,7 @@ export class ResourceManager {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             this.uniformBuffers.set(key, buf);
-            this.uniformOwner.set(key, this.currentOwner);
+            this.uniformOwner.set(key, 'common');
         }
         const layout = uniformLayouts.get('shadowPass');
         const scratch = this._shadowPassScratch;
