@@ -22,6 +22,18 @@
  *     a plugin; all engine→plugin calls go through the interfaces below)
  */
 
+/* ── Plugin system ─────────────────────────────────────────────── */
+export { EnginePlugin } from './plugins/Plugin';
+export type {
+    PluginMeta,
+    PluginContext,
+    ValueHook,
+    MeshCatalogEntry,
+    FallbackTextureDecls,
+    VboPresetDecls,
+} from './plugins/Plugin';
+export type { ToolFactory } from './tools/ToolSystem';
+
 /* ── ECS mechanisms ────────────────────────────────────────────── */
 export { Scene } from './ecs/Scene';
 export type { SceneData, CameraView } from './ecs/Scene';

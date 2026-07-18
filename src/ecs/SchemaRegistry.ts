@@ -46,6 +46,11 @@ export class SchemaRegistry {
         this.register(defs);
     }
 
+    /** Register component definitions provided programmatically (plugins). */
+    registerDefs(defs: ComponentDef[]): void {
+        this.register(defs);
+    }
+
     private register(defs: ComponentDef[]): void {
         for (const def of defs) {
             if (this.comps.has(def.name)) continue;

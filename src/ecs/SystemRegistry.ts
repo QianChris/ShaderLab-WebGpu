@@ -148,6 +148,8 @@ class SystemRegistry {
     private builtins = new Map<string, System>();
     /** system name → def JSON. Populated by loadDefs; cleared on app switch. */
     private defs = new Map<string, SystemDef>();
+    /** Defs injected programmatically by plugins (owner-tagged, swept on plugin unload). */
+    private injectedDefs = new Map<string, { def: SystemDef; owner: string }>();
     /** script source path → loaded adapter. Persists for the app's lifetime. */
     private scripts = new Map<string, System>();
     private appBase = '';
@@ -164,7 +166,23 @@ class SystemRegistry {
 
     /** Look up a loaded system def by system name (or undefined if not loaded). */
     getDef(name: string): SystemDef | undefined {
-        return this.defs.get(name);
+        return this.defs.get(name) ?? this.injectedDefs.get(name)?.def;
+    }
+
+    /** Inject a system def programmatically (plugins). Cross-owner duplicates throw. */
+    addDef(def: SystemDef, owner: string): void {
+        const existing = this.injectedDefs.get(def.name);
+        if (existing && existing.owner !== owner) {
+            throw new Error(`System def '${def.name}' already declared by ${existing.owner} (attempted by ${owner})`);
+        }
+        this.injectedDefs.set(def.name, { def, owner });
+    }
+
+    /** Drop every injected def owned by `owner` (plugin unload). */
+    removeDefsByOwner(owner: string): void {
+        for (const [name, entry] of this.injectedDefs) {
+            if (entry.owner === owner) this.injectedDefs.delete(name);
+        }
     }
 
     /** All currently-loaded system defs (for BufferRegistry to scan). */

@@ -683,7 +683,7 @@ export class ResourceManager {
     /* ── Named render targets (render-targets.json) ──── */
 
     loadRenderTargets(decls: RenderTargetDecls): void {
-        this.renderTargetDecls = decls;
+        Object.assign(this.renderTargetDecls, decls);
     }
 
     /** Resolve a target's actual pixel size from its declaration. */

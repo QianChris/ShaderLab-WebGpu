@@ -68,7 +68,15 @@ export class RenderGraph implements System {
     }
 
     setRenderTargets(targets: RenderTargetDecls): void {
-        this.targets = targets;
+        this.targets = { ...this.targets, ...targets };
+    }
+
+    /** Merge render targets declared by a plugin. Duplicate names throw. */
+    mergeRenderTargets(targets: RenderTargetDecls): void {
+        for (const [name, decl] of Object.entries(targets)) {
+            if (this.targets[name]) throw new Error(`Render target '${name}' already declared`);
+            this.targets[name] = decl;
+        }
     }
 
     /** Release app-owned state: drivers, escape-hatch hooks, particle GPU buffers.
@@ -98,6 +106,22 @@ export class RenderGraph implements System {
     /** Set the phase list (from phases.json). */
     setPhases(phases: PhaseDecl[]): void {
         this.phaseList = [...phases].sort((a, b) => a.order - b.order);
+    }
+
+    /** Merge phases declared by a plugin. Duplicate names throw (fail-loud). */
+    addPhases(phases: PhaseDecl[]): void {
+        for (const p of phases) {
+            if (this.phaseList.some(e => e.name === p.name)) {
+                throw new Error(`Phase '${p.name}' already declared`);
+            }
+            this.phaseList.push(p);
+        }
+        this.phaseList.sort((a, b) => a.order - b.order);
+    }
+
+    /** Remove phases by name (plugin unload). */
+    removePhases(names: string[]): void {
+        this.phaseList = this.phaseList.filter(p => !names.includes(p.name));
     }
 
     /** Ordered phase names (for editor display). */
@@ -221,11 +245,12 @@ export class RenderGraph implements System {
         }
     }
 
-    /** Try loading a render pipeline from commonBase first, then appBase on 404. */
+    /** Try loading a render pipeline from commonBase first, then appBase on 404.
+     *  Plugin-prefixed paths ('<plugin>:…') resolve directly, no fallback. */
     private async tryLoadPipeline(
         device: GPUDevice, format: GPUTextureFormat, commonBase: string, appBase: string | undefined, path: string,
     ): Promise<GPURenderPipeline> {
-        if (path.startsWith('/')) {
+        if (path.startsWith('/') || PipelineLoader.pluginRef(path)) {
             return PipelineLoader.load(device, format, commonBase, path);
         }
         try {
@@ -236,11 +261,12 @@ export class RenderGraph implements System {
         }
     }
 
-    /** Try loading a compute pipeline from commonBase first, then appBase on 404. */
+    /** Try loading a compute pipeline from commonBase first, then appBase on 404.
+     *  Plugin-prefixed paths ('<plugin>:…') resolve directly, no fallback. */
     private async tryLoadCompute(
         device: GPUDevice, commonBase: string, appBase: string | undefined, path: string,
     ): Promise<GPUComputePipeline> {
-        if (path.startsWith('/')) {
+        if (path.startsWith('/') || PipelineLoader.pluginRef(path)) {
             return PipelineLoader.loadCompute(device, commonBase, path);
         }
         try {

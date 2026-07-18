@@ -5,20 +5,23 @@ import { PhysicsSystem } from './ecs/PhysicsSystem';
 import { CameraSystem } from './ecs/CameraSystem';
 import { LightSystem } from './ecs/LightSystem';
 import { AnimationSystem } from './ecs/AnimationSystem';
-import { ToolSystem } from './tools/ToolSystem';
+import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
 import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
-import { systemRegistry, type FrameContext } from './ecs/SystemRegistry';
+import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
-import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData } from './render/Primitives';
+import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
 import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
+import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { GaussianSplatManager } from './render/GaussianSplatManager';
+import { pluginManager, pluginOwner } from './plugins/PluginManager';
 import RAPIER from '@dimforge/rapier3d-compat';
+import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
 import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl } from './render/types';
 
 interface GltfMapping {
@@ -34,6 +37,8 @@ interface GltfMapping {
 /** App manifest (/apps/<name>/app.json): declares app-specific assets to load. */
 export interface AppManifest {
     name?: string;
+    /** App-scoped plugins to load (unloaded on app switch). */
+    plugins?: string[];
     /** Extra component definition files (merged after common components). */
     components?: string[];
     /** Scene entity data file (default "scene.json"). */
@@ -65,6 +70,10 @@ export interface EngineConfig {
     alphaMode: GPUCanvasAlphaMode;
     systemOrder: string[];
     scriptHooks: string[];
+    /** Root URL of runtime plugins (default '/plugins'). */
+    pluginsRoot?: string;
+    /** Engine-level plugins loaded at init (session lifetime). */
+    plugins?: string[];
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -76,6 +85,8 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     alphaMode: 'premultiplied',
     systemOrder: ['input', 'script', 'physics', 'camera', 'light', 'animation', 'render'],
     scriptHooks: ['init', 'update'],
+    pluginsRoot: '/plugins',
+    plugins: [],
 };
 
 export class Engine {
@@ -104,11 +115,15 @@ export class Engine {
     gltfMapping: GltfMapping | null = null;
     /** Currently loaded app id, or null before first load / after unload. */
     currentApp: string | null = null;
+    /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
+    attachments = new Map<string, { obj: unknown; owner: string }>();
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
     private startTime = 0;
     private lastTime = 0;
+    /** True while loadApp is in flight — frame() skips system updates. */
+    private appLoading = false;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -201,21 +216,7 @@ export class Engine {
         } else {
             console.warn(`[Engine] ${root}/meshes.json not found — no preset mesh catalog loaded`);
         }
-        for (const entry of meshesCatalog) {
-            const gen = meshGenerators[entry.generator];
-            if (!gen) {
-                throw new Error(
-                    `meshes.json entry '${entry.name}' references unknown generator '${entry.generator}' ` +
-                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
-                );
-            }
-            const data = gen(entry.params ?? {});
-            if (isPbrMeshData(data)) {
-                resourceManager.registerPbrMesh(entry.name, data);
-            } else {
-                resourceManager.registerMesh(entry.name, data);
-            }
-        }
+        this.registerMeshCatalog(meshesCatalog);
 
         // gltf-mapping.json is only required by apps that declare glTF assets;
         // loadGltf() throws when it is needed but missing. Malformed → json() throws here.
@@ -255,7 +256,135 @@ export class Engine {
         systemRegistry.registerBuiltin('light', this.lightSystem);
         systemRegistry.registerBuiltin('animation', this.animationSystem);
         systemRegistry.registerBuiltin('render', this.renderGraph);
+
+        // Engine-level plugins (session lifetime). The engine has no compile-time
+        // knowledge of any plugin: ids come from engine-config.json, invocation
+        // goes through the registries populated below.
+        PipelineLoader.pluginsRoot = this.engineConfig.pluginsRoot ?? '/plugins';
+        pluginManager.configure({
+            pluginsRoot: this.engineConfig.pluginsRoot ?? '/plugins',
+            makeCtx: (id, baseUrl) => this.makePluginContext(id, baseUrl),
+            applyDeclarations: (id, plugin) => this.applyPluginDeclarations(id, plugin),
+            sweepOwner: (owner) => this.sweepPluginOwner(owner),
+        });
+        await pluginManager.loadMany(this.engineConfig.plugins ?? [], 'engine');
+
         this.assertSystemsResolve();
+    }
+
+    /** Build the per-plugin context: identity (baseUrl) + owner-tracked registration surface. */
+    private makePluginContext(id: string, baseUrl: string): PluginContext {
+        const owner = pluginOwner(id);
+        void owner; // owner-tagged registration sweeps land with the ownership pass
+        return {
+            device: this.device,
+            scene: this.scene,
+            eventBus: this.eventBus,
+            engineConfig: this.engineConfig,
+            baseUrl,
+            registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys),
+            registerAttachment: (name, obj) => { this.attachments.set(name, { obj, owner }); },
+            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn),
+            registerMeshGenerator: (name, fn) => registerMeshGenerator(name, fn),
+            registerToolType: (name, factory) => registerToolType(name, factory),
+            registerValueAtoms: (ns, atoms) => {
+                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+            },
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
+            getPlugin: <T extends EnginePlugin,>(pid: string) => (pluginManager.get(pid)?.instance ?? null) as T | null,
+        };
+    }
+
+    /** One name, all three hook namespaces (mirrors RenderScriptLoader.loadAll). */
+    private registerRenderHook(name: string, fn: unknown): void {
+        this.renderGraph.registerValueScript(name, fn as never);
+        this.renderGraph.registerGeometryHook(name, fn as never);
+        this.renderGraph.registerComputeHook(name, fn as never);
+    }
+
+    /** Merge a plugin's declaration fields into the engine registries. */
+    private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
+        if (plugin.components) schemaRegistry.registerDefs(plugin.components);
+        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts);
+        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots);
+        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs);
+        if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
+        if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
+        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets);
+        if (plugin.fallbackTextures) resourceManager.loadFallbackTextures(plugin.fallbackTextures);
+        if (plugin.vboPresets) resourceManager.loadVboPresets(plugin.vboPresets);
+        if (plugin.renderTargets) {
+            resourceManager.loadRenderTargets(plugin.renderTargets);
+            this.renderGraph.mergeRenderTargets(plugin.renderTargets);
+        }
+        if (plugin.phases) this.renderGraph.addPhases(plugin.phases);
+        if (plugin.meshes) this.registerMeshCatalog(plugin.meshes);
+        if (plugin.systemDefs) {
+            for (const def of plugin.systemDefs) systemRegistry.addDef(def, pluginOwner(id));
+        }
+        if (plugin.pipelines) {
+            for (const [key, config] of Object.entries(plugin.pipelines)) {
+                PipelineLoader.registerVirtualConfig(key.includes(':') ? key : `${id}:${key}`, config);
+            }
+        }
+        if (plugin.shaders) {
+            for (const [key, src] of Object.entries(plugin.shaders)) {
+                PipelineLoader.registerVirtualShader(key.includes(':') ? key : `${id}:${key}`, src);
+            }
+        }
+        if (plugin.renderHooks) {
+            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn);
+        }
+        if (plugin.meshGenerators) {
+            for (const [name, fn] of Object.entries(plugin.meshGenerators)) registerMeshGenerator(name, fn);
+        }
+        if (plugin.toolTypes) {
+            for (const [name, factory] of Object.entries(plugin.toolTypes)) registerToolType(name, factory);
+        }
+        if (plugin.valueAtoms) {
+            for (const [ns, atoms] of Object.entries(plugin.valueAtoms)) {
+                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+            }
+        }
+    }
+
+    /** Release everything a plugin registered (called on plugin unload). */
+    private sweepPluginOwner(owner: string): void {
+        resourceManager.exitApp(owner);
+        bufferRegistry.exitApp(owner);
+        systemRegistry.removeDefsByOwner(owner);
+        PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
+        for (const [name, entry] of this.attachments) {
+            if (entry.owner === owner) this.attachments.delete(name);
+        }
+        const plugin = pluginManager.get(owner.replace(/^plugin:/, ''));
+        if (plugin) {
+            const inst = plugin.instance;
+            if (inst.phases) this.renderGraph.removePhases(inst.phases.map(p => p.name));
+            if (inst.toolTypes) for (const name of Object.keys(inst.toolTypes)) unregisterToolType(name);
+            if (inst.meshGenerators) for (const name of Object.keys(inst.meshGenerators)) unregisterMeshGenerator(name);
+        }
+        // Full owner sweeps for schema/uniform/vertex/hook/system-instance
+        // registries land with the ownership pass (Phase A3/A4).
+    }
+
+    /** Build meshes from a catalog (meshes.json or a plugin `meshes` field). */
+    private registerMeshCatalog(entries: MeshCatalogEntry[]): void {
+        for (const entry of entries) {
+            const gen = meshGenerators[entry.generator];
+            if (!gen) {
+                throw new Error(
+                    `Mesh catalog entry '${entry.name}' references unknown generator '${entry.generator}' ` +
+                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
+                );
+            }
+            const data = gen(entry.params ?? {});
+            if (isPbrMeshData(data)) {
+                resourceManager.registerPbrMesh(entry.name, data);
+            } else {
+                resourceManager.registerMesh(entry.name, data);
+            }
+        }
     }
 
     private aspect(): number {
@@ -317,6 +446,15 @@ export class Engine {
      * modules and event handlers are all released).
      */
     async loadApp(name: string): Promise<void> {
+        this.appLoading = true;
+        try {
+            await this.loadAppInner(name);
+        } finally {
+            this.appLoading = false;
+        }
+    }
+
+    private async loadAppInner(name: string): Promise<void> {
         this.unloadCurrentApp();
         this.currentApp = name;
         resourceManager.enterApp(name);
@@ -327,6 +465,10 @@ export class Engine {
             throw new Error(`App not found at ${base}/app.json. If you renamed the folder, update the "name" field in app.json to match.`);
         }
         const manifest = await manifestResp.json() as AppManifest;
+
+        // App-scoped plugins (unloaded on app switch). Loaded before systems.json
+        // so plugin-registered systems are resolvable in the app's system order.
+        await pluginManager.loadMany(manifest.plugins ?? [], 'app');
 
         // An app may override the common system order by shipping its own
         // systems.json; absent → keep the common baseline (commonSystems).
@@ -399,6 +541,9 @@ export class Engine {
             await mgr.loadFromScene(this.scene, base);
         }
 
+        // Notify every loaded plugin that the app (scene + render graph) is up.
+        await pluginManager.broadcastAppLoaded(base);
+
         // Every system named in the active list must resolve to a runnable
         // instance (builtin or loaded script); a name that resolves to nothing
         // would otherwise be skipped silently every frame.
@@ -422,6 +567,7 @@ export class Engine {
     unloadCurrentApp(): void {
         if (!this.currentApp) return;
         const appId = this.currentApp;
+        pluginManager.broadcastAppUnloading();
         this.toolSystem.dispose();
         this.scriptSystem.clear();
         this.animationSystem.clear();
@@ -438,6 +584,9 @@ export class Engine {
         schemaRegistry.resetStrings();
         this.renderGraph.exitApp(appId);
         resourceManager.exitApp(appId);
+        // App-scoped plugins unload last: their teardown may release resources
+        // registered under their own owner tag (swept via sweepPluginOwner).
+        pluginManager.unloadAppPlugins();
         this.currentApp = null;
     }
 
@@ -465,6 +614,12 @@ export class Engine {
     private frame = (): void => {
         const now = performance.now();
         if (this.startTime === 0) { this.startTime = now; this.lastTime = now; }
+        // Skip system updates while an app is loading (partial scene/registries).
+        if (this.appLoading) {
+            this.lastTime = now;
+            requestAnimationFrame(this.frame);
+            return;
+        }
         const time = (now - this.startTime) / 1000;
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;

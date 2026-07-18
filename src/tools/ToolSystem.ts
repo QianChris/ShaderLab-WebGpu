@@ -4,13 +4,24 @@ import type { PhysicsSystem } from '../ecs/PhysicsSystem';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
 import { PickTool } from './PickTool';
 
-type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
+export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
 
 /** Registry of builtin tool factories, keyed by config `type`. New builtins
  *  can be added here without touching the dispatch logic. */
 const TOOL_REGISTRY: Record<string, ToolFactory> = {
     pick: (config, ctx) => new PickTool(config, ctx),
 };
+
+/** Register a tool type (plugins). Duplicate names throw (fail-loud). */
+export function registerToolType(type: string, factory: ToolFactory): void {
+    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
+    TOOL_REGISTRY[type] = factory;
+}
+
+/** Remove a tool type (plugin unload). */
+export function unregisterToolType(type: string): void {
+    delete TOOL_REGISTRY[type];
+}
 
 /** Wraps a script-loaded tool module in the SceneTool interface. */
 class ScriptToolAdapter implements SceneTool {
