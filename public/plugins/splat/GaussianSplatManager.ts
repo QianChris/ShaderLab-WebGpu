@@ -1,7 +1,6 @@
-import { resourceManager } from './ResourceManager';
-import { mat4Mul } from '../math';
-import { loadSplatPly, type SplatData } from '../gs/SplatLoader';
-import type { FrameContext, System } from '../ecs/SystemRegistry';
+import { resourceManager, mat4Mul } from '@shaderlab/api';
+import type { FrameContext, System, Scene } from '@shaderlab/api';
+import { loadSplatPly, type SplatData } from './SplatLoader.ts';
 
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -100,7 +99,7 @@ export class GaussianSplatManager implements System {
      *  are not currently supported by the manager. The previous Engine.loadApp
      *  special-case branch is now this single manager method — keeps splat
      *  loading logic next to the splat manager instead of in the Engine. */
-    async loadFromScene(scene: import('../ecs/Scene').Scene, appBase: string): Promise<void> {
+    async loadFromScene(scene: Scene, appBase: string): Promise<void> {
         this.entityEid = null;
         for (const [, eid] of scene.entityKeyMap) {
             if (!scene.hasComponent(eid, 'GsComponent')) continue;

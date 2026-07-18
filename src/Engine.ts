@@ -18,7 +18,6 @@ import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, regist
 import { loadVertexSlots, removeVertexSlotsByOwner, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
-import { GaussianSplatManager } from './render/GaussianSplatManager';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
@@ -111,8 +110,6 @@ export class Engine {
     lightSystem!: LightSystem;
     animationSystem!: AnimationSystem;
     toolSystem!: ToolSystem;
-    /** Splat manager; only instantiated when the active app's systems.json lists the `gaussianSplat` system. */
-    gaussianSplatManager: GaussianSplatManager | null = null;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -262,8 +259,7 @@ export class Engine {
 
         // Register built-in systems with the SystemRegistry so frame() dispatch
         // is data-driven (systems.json drives order + presence, registry maps
-        // names to instances). 'gaussianSplat' is registered conditionally by
-        // loadApp() (app-opted-in); the rest are always-present engine systems.
+        // names to instances). Plugin systems register through the same API.
         systemRegistry.registerBuiltin('input', this.inputSystem);
         systemRegistry.registerBuiltin('script', this.scriptSystem);
         systemRegistry.registerBuiltin('physics', this.physicsSystem);
@@ -618,21 +614,10 @@ export class Engine {
         for (const glb of manifest.gltf ?? []) {
             await this.loadGltf(this.resolveAsset(base, glb));
         }
-        // Splat (3DGS) is an app-opted-in system: only wire the manager + load
-        // GsComponent ply assets when this app's systems.json lists gaussianSplat.
-        // Storage buffers live under the app's resource scope (released on switch).
-        // The heavy lifting (scan scene for GsComponent + async PLY load) is now
-        // a single manager call, keeping splat logic out of the Engine body.
-        if (this.hasSystem('gaussianSplat')) {
-            resourceManager.enterApp(name);
-            const mgr = new GaussianSplatManager();
-            this.gaussianSplatManager = mgr;
-            this.setAttachment('splats', mgr, 'engine');
-            systemRegistry.registerBuiltin('gaussianSplat', mgr);
-            await mgr.loadFromScene(this.scene, base);
-        }
 
-        // Notify every loaded plugin that the app (scene + render graph) is up.
+        // Notify every loaded plugin that the app (scene + render graph) is up
+        // (app-scoped capabilities load their per-scene assets here, e.g. the
+        // splat plugin scans GsComponent entities and loads PLY data).
         await pluginManager.broadcastAppLoaded(base);
 
         // Every system named in the active list must resolve to a runnable
@@ -664,10 +649,6 @@ export class Engine {
         this.animationSystem.clear();
         this.eventBus.clear();
         this.physicsSystem.reset();
-        this.gaussianSplatManager?.dispose();
-        this.gaussianSplatManager = null;
-        this.deleteAttachment('splats');
-        systemRegistry.unregisterBuiltin('gaussianSplat');
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
         this.activeSystems = this.commonSystems;
