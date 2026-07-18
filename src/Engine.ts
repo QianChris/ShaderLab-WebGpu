@@ -15,7 +15,7 @@ import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
 import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
-import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
+import { loadVertexSlots, removeVertexSlotsByOwner, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { GaussianSplatManager } from './render/GaussianSplatManager';
@@ -304,9 +304,10 @@ export class Engine {
 
     /** Merge a plugin's declaration fields into the engine registries. */
     private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
-        if (plugin.components) schemaRegistry.registerDefs(plugin.components);
-        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts);
-        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots);
+        const owner = pluginOwner(id);
+        if (plugin.components) schemaRegistry.registerDefs(plugin.components, owner);
+        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts, owner);
+        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots, owner);
         if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs);
         if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
         if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
@@ -353,6 +354,9 @@ export class Engine {
         resourceManager.exitApp(owner);
         bufferRegistry.exitApp(owner);
         systemRegistry.removeDefsByOwner(owner);
+        schemaRegistry.removeOwner(owner);
+        uniformLayouts.removeOwner(owner);
+        removeVertexSlotsByOwner(owner);
         PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
         for (const [name, entry] of this.attachments) {
             if (entry.owner === owner) this.attachments.delete(name);
@@ -489,7 +493,7 @@ export class Engine {
         bufferRegistry.allocateFor(this.activeSystems, name, this.device);
 
         for (const rel of manifest.components ?? []) {
-            await schemaRegistry.loadMore(this.resolveAsset(base, rel));
+            await schemaRegistry.loadMore(this.resolveAsset(base, rel), `app:${name}`);
         }
 
         const sceneUrl = this.resolveAsset(base, manifest.scene ?? 'scene.json');
@@ -582,6 +586,7 @@ export class Engine {
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
+        schemaRegistry.removeOwner(`app:${appId}`);
         this.renderGraph.exitApp(appId);
         resourceManager.exitApp(appId);
         // App-scoped plugins unload last: their teardown may release resources

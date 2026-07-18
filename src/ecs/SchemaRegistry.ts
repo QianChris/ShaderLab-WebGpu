@@ -33,27 +33,57 @@ export class SchemaRegistry {
 
     expandMap = new Map<string, Map<string, ExpandedField>>();
     stringTables = new Map<string, string[]>();
+    /** Component name → owner tag ('engine' | 'app:<id>' | 'plugin:<id>'). */
+    private owners = new Map<string, string>();
 
-    async load(url: string): Promise<void> {
+    async load(url: string, owner = 'engine'): Promise<void> {
         const defs = await fetchComponentDefs(url);
         this.defs = [];
-        this.register(defs);
+        this.register(defs, owner);
     }
 
     /** Merge additional component definitions (e.g. app-specific) after the base set. */
-    async loadMore(url: string): Promise<void> {
+    async loadMore(url: string, owner = 'engine'): Promise<void> {
         const defs = await fetchComponentDefs(url);
-        this.register(defs);
+        this.register(defs, owner);
     }
 
     /** Register component definitions provided programmatically (plugins). */
-    registerDefs(defs: ComponentDef[]): void {
-        this.register(defs);
+    registerDefs(defs: ComponentDef[], owner = 'engine'): void {
+        this.register(defs, owner);
     }
 
-    private register(defs: ComponentDef[]): void {
+    /** Remove every component registered by `owner` (app/plugin unload).
+     *  Callers must ensure no live entities still carry these components
+     *  (the engine clears the scene before sweeping owners). */
+    removeOwner(owner: string): void {
+        for (const [name, o] of [...this.owners]) {
+            if (o !== owner) continue;
+            this.owners.delete(name);
+            const comp = this.comps.get(name);
+            if (comp) this.nameMap.delete(comp);
+            this.comps.delete(name);
+            this.mandatory.delete(name);
+            this.expandMap.delete(name);
+            this.defs = this.defs.filter(d => d.name !== name);
+            for (const key of [...this.stringTables.keys()]) {
+                if (key.startsWith(`${name}.`)) this.stringTables.delete(key);
+            }
+        }
+    }
+
+    private register(defs: ComponentDef[], owner: string): void {
         for (const def of defs) {
-            if (this.comps.has(def.name)) continue;
+            const existing = this.owners.get(def.name);
+            if (existing !== undefined) {
+                if (existing !== owner) {
+                    throw new Error(
+                        `Component '${def.name}' already declared by ${existing} (attempted by ${owner})`,
+                    );
+                }
+                continue;   // same-owner re-registration (app reload) → keep original
+            }
+            this.owners.set(def.name, owner);
             this.defs.push(def);
             if (def.mandatory) this.mandatory.add(def.name);
 
