@@ -37,6 +37,10 @@ interface PluginHost {
     makeCtx(id: string, baseUrl: string): PluginContext;
     applyDeclarations(id: string, plugin: EnginePlugin): void;
     sweepOwner(owner: string): void;
+    /** Scope GPU-resource ownership to `owner` for the duration of a plugin's
+     *  init/declarations/setup; returns the previous owner to restore. */
+    beginOwner(owner: string): string;
+    endOwner(previous: string): void;
 }
 
 /** Registry owner tag for a plugin id (shared convention across registries). */
@@ -124,9 +128,14 @@ class PluginManager {
             await this.loadOne(dep, scope, [...stack, id]);
         }
         const ctx = this.host.makeCtx(id, baseUrl);
-        await instance.init?.(ctx);
-        this.host.applyDeclarations(id, instance);
-        await instance.setup?.(ctx);
+        const prevOwner = this.host.beginOwner(pluginOwner(id));
+        try {
+            await instance.init?.(ctx);
+            this.host.applyDeclarations(id, instance);
+            await instance.setup?.(ctx);
+        } finally {
+            this.host.endOwner(prevOwner);
+        }
         this.loaded.set(id, { id, instance, scope, baseUrl, ctx });
         this.order.push(id);
     }

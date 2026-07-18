@@ -66,6 +66,12 @@ export class ResourceManager {
     private renderTargetDecls: RenderTargetDecls = {};
     private namedVbos = new Map<string, GPUBuffer>();
     private fallbackTextures = new Map<string, GPUTexture>();
+    /* owner maps for named declaration registries (plugin sweep support) */
+    private bindLayoutOwner = new Map<string, string>();
+    private samplerOwner = new Map<string, string>();
+    private renderTargetOwner = new Map<string, string>();
+    private namedVboOwner = new Map<string, string>();
+    private fallbackTextureOwner = new Map<string, string>();
     /** Cached default (full) views per GPUTexture. GPUTexture objects are stable
      *  (cached by URL/handle/name and only destroyed on app-switch/resize, which
      *  produces a NEW GPUTexture object), so a WeakMap keyed by the texture yields
@@ -116,6 +122,21 @@ export class ResourceManager {
     /** Mark subsequent resource registrations as owned by `appId` ('common' = persistent). */
     enterApp(appId: string): void {
         this.currentOwner = appId;
+    }
+
+    /** Current owner tag for resource registrations. */
+    get currentOwnerId(): string {
+        return this.currentOwner;
+    }
+
+    /** Claim a name in a named-decl registry for the current owner.
+     *  Cross-owner duplicates throw (fail-loud); same-owner reloads pass. */
+    private claimName(owners: Map<string, string>, name: string, kind: string): void {
+        const existing = owners.get(name);
+        if (existing !== undefined && existing !== this.currentOwner) {
+            throw new Error(`${kind} '${name}' already declared by ${existing} (attempted by ${this.currentOwner})`);
+        }
+        owners.set(name, this.currentOwner);
     }
 
     /** Release and forget every resource owned by `appId`. 'common' is never released. */
@@ -181,6 +202,36 @@ export class ResourceManager {
             this.depthTargets.delete(key);
             this.depthTargetOwner.delete(key);
         }
+        /* named-decl registries (populated by common init or plugins) */
+        for (const [name, owner] of this.bindLayoutOwner) {
+            if (owner !== appId) continue;
+            this.bindLayoutDecls.delete(name);
+            this.bindLayouts.delete(name);
+            this.bindLayoutOwner.delete(name);
+        }
+        for (const [name, owner] of this.samplerOwner) {
+            if (owner !== appId) continue;
+            this.samplers.delete(name);
+            this.samplerOwner.delete(name);
+        }
+        for (const [name, owner] of this.namedVboOwner) {
+            if (owner !== appId) continue;
+            this.namedVbos.get(name)?.destroy();
+            this.namedVbos.delete(name);
+            this.namedVboOwner.delete(name);
+        }
+        for (const [name, owner] of this.fallbackTextureOwner) {
+            if (owner !== appId) continue;
+            const tex = this.fallbackTextures.get(name);
+            if (tex) { this.textureViewCache.delete(tex); tex.destroy(); }
+            this.fallbackTextures.delete(name);
+            this.fallbackTextureOwner.delete(name);
+        }
+        for (const [name, owner] of this.renderTargetOwner) {
+            if (owner !== appId) continue;
+            delete this.renderTargetDecls[name];
+            this.renderTargetOwner.delete(name);
+        }
         // Invalidate cached frame bind groups: future user-declared app-scoped
         // UBOs (referenced via `resource: "myAppUbo"` in bind-layouts.json) would
         // leave _frameBg/_frameShadowBg pointing at destroyed buffers. The four
@@ -204,6 +255,7 @@ export class ResourceManager {
 
     loadBindLayouts(decls: BindLayoutDecls): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.claimName(this.bindLayoutOwner, name, 'Bind layout');
             this.bindLayoutDecls.set(name, decl.entries);
             this.bindLayouts.set(name, this.buildBindLayout(name, decl.entries));
         }
@@ -396,6 +448,7 @@ export class ResourceManager {
 
     loadVboPresets(decls: Record<string, { data: number[]; format: string; stride: number }>): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.claimName(this.namedVboOwner, name, 'VBO preset');
             const arr = Float32Array.from(decl.data);
             const buf = this.device.createBuffer({
                 label: `vbo:${name}`,
@@ -676,6 +729,7 @@ export class ResourceManager {
 
     loadSamplers(decls: SamplerDecls): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.claimName(this.samplerOwner, name, 'Sampler');
             this.samplers.set(name, this.device.createSampler({ label: name, ...decl }));
         }
     }
@@ -683,7 +737,10 @@ export class ResourceManager {
     /* ── Named render targets (render-targets.json) ──── */
 
     loadRenderTargets(decls: RenderTargetDecls): void {
-        Object.assign(this.renderTargetDecls, decls);
+        for (const [name, decl] of Object.entries(decls)) {
+            this.claimName(this.renderTargetOwner, name, 'Render target');
+            this.renderTargetDecls[name] = decl;
+        }
     }
 
     /** Resolve a target's actual pixel size from its declaration. */
@@ -706,6 +763,7 @@ export class ResourceManager {
 
     loadFallbackTextures(decls: Record<string, { pixel: number[]; format: GPUTextureFormat }>): void {
         for (const [name, decl] of Object.entries(decls)) {
+            this.claimName(this.fallbackTextureOwner, name, 'Fallback texture');
             const tex = this.device.createTexture({
                 label: `fallback:${name}`,
                 size: { width: 1, height: 1 },

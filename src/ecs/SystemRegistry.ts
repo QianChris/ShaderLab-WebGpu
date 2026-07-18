@@ -146,6 +146,8 @@ class ScriptSystemAdapter implements System {
  */
 class SystemRegistry {
     private builtins = new Map<string, System>();
+    /** Registered system name → owner tag ('engine' | 'plugin:<id>'). */
+    private builtinOwners = new Map<string, string>();
     /** system name → def JSON. Populated by loadDefs; cleared on app switch. */
     private defs = new Map<string, SystemDef>();
     /** Defs injected programmatically by plugins (owner-tagged, swept on plugin unload). */
@@ -154,14 +156,31 @@ class SystemRegistry {
     private scripts = new Map<string, System>();
     private appBase = '';
 
-    /** Register a builtin system instance under `name` (matches systems.json `name`). */
-    registerBuiltin(name: string, sys: System): void {
+    /** Register a system instance under `name` (matches systems.json `name`).
+     *  Cross-owner duplicate names throw (fail-loud). */
+    registerBuiltin(name: string, sys: System, owner = 'engine'): void {
+        const existing = this.builtinOwners.get(name);
+        if (existing !== undefined && existing !== owner && this.builtins.has(name)) {
+            throw new Error(`System '${name}' already registered by ${existing} (attempted by ${owner})`);
+        }
         this.builtins.set(name, sys);
+        this.builtinOwners.set(name, owner);
     }
 
     /** Drop a builtin registration (used when an app-opted-in system is torn down). */
     unregisterBuiltin(name: string): void {
         this.builtins.delete(name);
+        this.builtinOwners.delete(name);
+    }
+
+    /** Dispose + drop every system instance registered by `owner` (plugin unload). */
+    removeSystemsByOwner(owner: string): void {
+        for (const [name, o] of [...this.builtinOwners]) {
+            if (o !== owner) continue;
+            this.builtins.get(name)?.dispose?.();
+            this.builtins.delete(name);
+            this.builtinOwners.delete(name);
+        }
     }
 
     /** Look up a loaded system def by system name (or undefined if not loaded). */

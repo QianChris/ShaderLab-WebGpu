@@ -51,6 +51,7 @@ function buildSlotLayouts(slots: SlotName[]): GPUVertexBufferLayout[] {
 
 export class PipelineLoader {
     private static vertexInputs: VertexInputDecls = {};
+    private static vertexInputOwners = new Map<string, string>();
     private static pipelineSlots = new Map<string, SlotName[]>();
     private static configs = new Map<string, { config: PipelineConfig; format: GPUTextureFormat }>();
     private static shaderModules = new Map<string, GPUShaderModule>();
@@ -59,6 +60,7 @@ export class PipelineLoader {
     private static virtualConfigs = new Map<string, PipelineConfig | ComputePipelineConfig>();
     /** In-memory WGSL sources declared by plugins ('<plugin>:<relpath>' keys). */
     private static virtualShaders = new Map<string, string>();
+    private static blendPresetOwners = new Map<string, string>();
     /** Engine-wide default workgroup size, set from engine-config.json. */
     static defaultWorkgroupSize = 64;
     /** Plugins root URL (from engine-config.json), for '<plugin>:<path>' refs. */
@@ -68,25 +70,55 @@ export class PipelineLoader {
 
     static setVertexInputs(decls: VertexInputDecls): void {
         this.vertexInputs = decls;
+        this.vertexInputOwners.clear();
+        for (const name of Object.keys(decls)) this.vertexInputOwners.set(name, 'engine');
     }
 
-    /** Merge additional vertex inputs (plugins). Duplicate names throw. */
-    static mergeVertexInputs(decls: VertexInputDecls): void {
+    /** Merge additional vertex inputs (plugins). Cross-owner duplicates throw. */
+    static mergeVertexInputs(decls: VertexInputDecls, owner = 'engine'): void {
         for (const [name, decl] of Object.entries(decls)) {
-            if (this.vertexInputs[name]) throw new Error(`Vertex input '${name}' already declared`);
+            const existing = this.vertexInputOwners.get(name);
+            if (existing !== undefined && existing !== owner) {
+                throw new Error(`Vertex input '${name}' already declared by ${existing} (attempted by ${owner})`);
+            }
+            this.vertexInputOwners.set(name, owner);
             this.vertexInputs[name] = decl;
+        }
+    }
+
+    /** Drop vertex inputs registered by `owner` (plugin unload). */
+    static removeInputsByOwner(owner: string): void {
+        for (const [name, o] of [...this.vertexInputOwners]) {
+            if (o !== owner) continue;
+            this.vertexInputOwners.delete(name);
+            delete this.vertexInputs[name];
         }
     }
 
     static loadBlendPresets(decls: Record<string, GPUBlendState>): void {
         this.blendPresets = decls;
+        this.blendPresetOwners.clear();
+        for (const name of Object.keys(decls)) this.blendPresetOwners.set(name, 'engine');
     }
 
-    /** Merge additional blend presets (plugins). Duplicate names throw. */
-    static mergeBlendPresets(decls: Record<string, GPUBlendState>): void {
+    /** Merge additional blend presets (plugins). Cross-owner duplicates throw. */
+    static mergeBlendPresets(decls: Record<string, GPUBlendState>, owner = 'engine'): void {
         for (const [name, decl] of Object.entries(decls)) {
-            if (this.blendPresets[name]) throw new Error(`Blend preset '${name}' already declared`);
+            const existing = this.blendPresetOwners.get(name);
+            if (existing !== undefined && existing !== owner) {
+                throw new Error(`Blend preset '${name}' already declared by ${existing} (attempted by ${owner})`);
+            }
+            this.blendPresetOwners.set(name, owner);
             this.blendPresets[name] = decl;
+        }
+    }
+
+    /** Drop blend presets registered by `owner` (plugin unload). */
+    static removeBlendPresetsByOwner(owner: string): void {
+        for (const [name, o] of [...this.blendPresetOwners]) {
+            if (o !== owner) continue;
+            this.blendPresetOwners.delete(name);
+            delete this.blendPresets[name];
         }
     }
 

@@ -54,17 +54,33 @@ export class RenderGraph implements System {
     private valueScripts = new Map<string, (ctx: ValueContext) => number[] | number>();
     private geometryHooks = new Map<string, GeometryHook>();
     private computeHooks = new Map<string, ComputeHook>();
+    /** Hook name → owner tag ('app' = render.json renderScripts, 'plugin:<id>'). */
+    private hookOwners = new Map<string, string>();
     private scriptFiles: string[] = [];
 
-    /** Register an escape-hatch script (Phase 2/3 populate these). */
-    registerValueScript(name: string, fn: (ctx: ValueContext) => number[] | number): void {
+    /** Register an escape-hatch script (renderScripts or plugins). */
+    registerValueScript(name: string, fn: (ctx: ValueContext) => number[] | number, owner = 'app'): void {
         this.valueScripts.set(name, fn);
+        this.hookOwners.set(name, owner);
     }
-    registerGeometryHook(name: string, fn: GeometryHook): void {
+    registerGeometryHook(name: string, fn: GeometryHook, owner = 'app'): void {
         this.geometryHooks.set(name, fn);
+        this.hookOwners.set(name, owner);
     }
-    registerComputeHook(name: string, fn: ComputeHook): void {
+    registerComputeHook(name: string, fn: ComputeHook, owner = 'app'): void {
         this.computeHooks.set(name, fn);
+        this.hookOwners.set(name, owner);
+    }
+
+    /** Drop every hook registered by `owner` (app switch / plugin unload). */
+    removeHooksByOwner(owner: string): void {
+        for (const [name, o] of [...this.hookOwners]) {
+            if (o !== owner) continue;
+            this.hookOwners.delete(name);
+            this.valueScripts.delete(name);
+            this.geometryHooks.delete(name);
+            this.computeHooks.delete(name);
+        }
     }
 
     setRenderTargets(targets: RenderTargetDecls): void {
@@ -87,9 +103,7 @@ export class RenderGraph implements System {
         // GPUBindGroups dereferenced now rather than after driver GC).
         for (const d of this.drivers) d.dispose();
         this.drivers = [];
-        this.valueScripts.clear();
-        this.geometryHooks.clear();
-        this.computeHooks.clear();
+        this.removeHooksByOwner('app');
         this.particles.clear();
     }
 
@@ -162,12 +176,13 @@ export class RenderGraph implements System {
         this.drivers = [];
 
         // Load escape-hatch render scripts, merge into the hook registries.
+        // Plugin-registered hooks of the same name take precedence (skip).
         if (this.scriptFiles.length > 0) {
             const loader = new RenderScriptLoader(dataBase, this.scriptsSubdir);
             const hooks = await loader.loadAll(this.scriptFiles);
-            for (const [k, v] of hooks.value) if (!this.valueScripts.has(k)) this.valueScripts.set(k, v);
-            for (const [k, v] of hooks.geometry) if (!this.geometryHooks.has(k)) this.geometryHooks.set(k, v);
-            for (const [k, v] of hooks.compute) if (!this.computeHooks.has(k)) this.computeHooks.set(k, v);
+            for (const [k, v] of hooks.value) if (!this.valueScripts.has(k)) this.registerValueScript(k, v, 'app');
+            for (const [k, v] of hooks.geometry) if (!this.geometryHooks.has(k)) this.registerGeometryHook(k, v, 'app');
+            for (const [k, v] of hooks.compute) if (!this.computeHooks.has(k)) this.registerComputeHook(k, v, 'app');
         }
 
         // Load every pipeline listed in the manifest, build a driver from its renderer block.

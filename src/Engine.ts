@@ -89,6 +89,15 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     plugins: [],
 };
 
+/** Tracks what a plugin registered through its ctx / declarations, so the
+ *  open registries (tools, generators, atoms, phases) can be swept on unload. */
+interface PluginLedger {
+    tools: string[];
+    generators: string[];
+    atoms: Array<[string, string]>;
+    phases: string[];
+}
+
 export class Engine {
     device!: GPUDevice;
     context!: GPUCanvasContext;
@@ -117,6 +126,8 @@ export class Engine {
     currentApp: string | null = null;
     /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
     attachments = new Map<string, { obj: unknown; owner: string }>();
+    /** Per-plugin registration ledger (for owner sweeps of open registries). */
+    private pluginLedgers = new Map<string, PluginLedger>();
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
@@ -266,6 +277,12 @@ export class Engine {
             makeCtx: (id, baseUrl) => this.makePluginContext(id, baseUrl),
             applyDeclarations: (id, plugin) => this.applyPluginDeclarations(id, plugin),
             sweepOwner: (owner) => this.sweepPluginOwner(owner),
+            beginOwner: (owner) => {
+                const prev = resourceManager.currentOwnerId;
+                resourceManager.enterApp(owner);
+                return prev;
+            },
+            endOwner: (previous) => resourceManager.enterApp(previous),
         });
         await pluginManager.loadMany(this.engineConfig.plugins ?? [], 'engine');
 
@@ -275,53 +292,73 @@ export class Engine {
     /** Build the per-plugin context: identity (baseUrl) + owner-tracked registration surface. */
     private makePluginContext(id: string, baseUrl: string): PluginContext {
         const owner = pluginOwner(id);
-        void owner; // owner-tagged registration sweeps land with the ownership pass
+        const ledger = this.ledgerFor(owner);
         return {
             device: this.device,
             scene: this.scene,
             eventBus: this.eventBus,
             engineConfig: this.engineConfig,
             baseUrl,
-            registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys),
+            registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
             registerAttachment: (name, obj) => { this.attachments.set(name, { obj, owner }); },
-            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn),
-            registerMeshGenerator: (name, fn) => registerMeshGenerator(name, fn),
-            registerToolType: (name, factory) => registerToolType(name, factory),
+            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn, owner),
+            registerMeshGenerator: (name, fn) => {
+                registerMeshGenerator(name, fn);
+                ledger.generators.push(name);
+            },
+            registerToolType: (name, factory) => {
+                registerToolType(name, factory);
+                ledger.tools.push(name);
+            },
             registerValueAtoms: (ns, atoms) => {
                 atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
             },
             getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
             getPlugin: <T extends EnginePlugin,>(pid: string) => (pluginManager.get(pid)?.instance ?? null) as T | null,
         };
     }
 
+    private ledgerFor(owner: string): PluginLedger {
+        let ledger = this.pluginLedgers.get(owner);
+        if (!ledger) {
+            ledger = { tools: [], generators: [], atoms: [], phases: [] };
+            this.pluginLedgers.set(owner, ledger);
+        }
+        return ledger;
+    }
+
     /** One name, all three hook namespaces (mirrors RenderScriptLoader.loadAll). */
-    private registerRenderHook(name: string, fn: unknown): void {
-        this.renderGraph.registerValueScript(name, fn as never);
-        this.renderGraph.registerGeometryHook(name, fn as never);
-        this.renderGraph.registerComputeHook(name, fn as never);
+    private registerRenderHook(name: string, fn: unknown, owner: string): void {
+        this.renderGraph.registerValueScript(name, fn as never, owner);
+        this.renderGraph.registerGeometryHook(name, fn as never, owner);
+        this.renderGraph.registerComputeHook(name, fn as never, owner);
     }
 
     /** Merge a plugin's declaration fields into the engine registries. */
     private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
         const owner = pluginOwner(id);
+        const ledger = this.ledgerFor(owner);
         if (plugin.components) schemaRegistry.registerDefs(plugin.components, owner);
         if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts, owner);
         if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots, owner);
-        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs);
+        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs, owner);
         if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
         if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
-        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets);
+        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets, owner);
         if (plugin.fallbackTextures) resourceManager.loadFallbackTextures(plugin.fallbackTextures);
         if (plugin.vboPresets) resourceManager.loadVboPresets(plugin.vboPresets);
         if (plugin.renderTargets) {
             resourceManager.loadRenderTargets(plugin.renderTargets);
             this.renderGraph.mergeRenderTargets(plugin.renderTargets);
         }
-        if (plugin.phases) this.renderGraph.addPhases(plugin.phases);
+        if (plugin.phases) {
+            this.renderGraph.addPhases(plugin.phases);
+            for (const p of plugin.phases) ledger.phases.push(p.name);
+        }
         if (plugin.meshes) this.registerMeshCatalog(plugin.meshes);
         if (plugin.systemDefs) {
-            for (const def of plugin.systemDefs) systemRegistry.addDef(def, pluginOwner(id));
+            for (const def of plugin.systemDefs) systemRegistry.addDef(def, owner);
         }
         if (plugin.pipelines) {
             for (const [key, config] of Object.entries(plugin.pipelines)) {
@@ -334,17 +371,24 @@ export class Engine {
             }
         }
         if (plugin.renderHooks) {
-            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn);
+            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn, owner);
         }
         if (plugin.meshGenerators) {
-            for (const [name, fn] of Object.entries(plugin.meshGenerators)) registerMeshGenerator(name, fn);
+            for (const [name, fn] of Object.entries(plugin.meshGenerators)) {
+                registerMeshGenerator(name, fn);
+                ledger.generators.push(name);
+            }
         }
         if (plugin.toolTypes) {
-            for (const [name, factory] of Object.entries(plugin.toolTypes)) registerToolType(name, factory);
+            for (const [name, factory] of Object.entries(plugin.toolTypes)) {
+                registerToolType(name, factory);
+                ledger.tools.push(name);
+            }
         }
         if (plugin.valueAtoms) {
             for (const [ns, atoms] of Object.entries(plugin.valueAtoms)) {
                 atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
             }
         }
     }
@@ -354,22 +398,27 @@ export class Engine {
         resourceManager.exitApp(owner);
         bufferRegistry.exitApp(owner);
         systemRegistry.removeDefsByOwner(owner);
+        systemRegistry.removeSystemsByOwner(owner);
         schemaRegistry.removeOwner(owner);
         uniformLayouts.removeOwner(owner);
         removeVertexSlotsByOwner(owner);
         PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
+        PipelineLoader.removeInputsByOwner(owner);
+        PipelineLoader.removeBlendPresetsByOwner(owner);
+        this.renderGraph.removeHooksByOwner(owner);
         for (const [name, entry] of this.attachments) {
             if (entry.owner === owner) this.attachments.delete(name);
         }
-        const plugin = pluginManager.get(owner.replace(/^plugin:/, ''));
-        if (plugin) {
-            const inst = plugin.instance;
-            if (inst.phases) this.renderGraph.removePhases(inst.phases.map(p => p.name));
-            if (inst.toolTypes) for (const name of Object.keys(inst.toolTypes)) unregisterToolType(name);
-            if (inst.meshGenerators) for (const name of Object.keys(inst.meshGenerators)) unregisterMeshGenerator(name);
+        const ledger = this.pluginLedgers.get(owner);
+        if (ledger) {
+            for (const t of ledger.tools) unregisterToolType(t);
+            for (const g of ledger.generators) unregisterMeshGenerator(g);
+            for (const [ns, name] of ledger.atoms) {
+                if (atomNamespaces[ns]) delete atomNamespaces[ns][name];
+            }
+            if (ledger.phases.length > 0) this.renderGraph.removePhases(ledger.phases);
+            this.pluginLedgers.delete(owner);
         }
-        // Full owner sweeps for schema/uniform/vertex/hook/system-instance
-        // registries land with the ownership pass (Phase A3/A4).
     }
 
     /** Build meshes from a catalog (meshes.json or a plugin `meshes` field). */
