@@ -4,6 +4,7 @@ import { ScriptSystem } from './ScriptSystem.ts';
 import { CameraSystem } from './CameraSystem.ts';
 import { LightSystem } from './LightSystem.ts';
 import { AnimationSystem } from './AnimationSystem.ts';
+import * as paramsHooks from './hooks/params.ts';
 
 /**
  * Core capability plugin: the six baseline systems every stock app composes
@@ -27,6 +28,12 @@ export default class CorePlugin extends EnginePlugin {
         { name: 'animation', source: 'plugin:core', components: ['SpriteSheetComponent', 'SpriteAnimationComponent'], ubos: [], buffers: [], needs: [] },
         { name: 'render', source: 'plugin:core', components: [], ubos: [], buffers: [], needs: ['camera', 'light', 'animation', 'gaussianSplat'] },
     ];
+
+    /** Escape-hatch hooks addressable from pipeline JSON as script:params.<fn>. */
+    renderHooks = {
+        'params.point': paramsHooks.point,
+        'params.edge': paramsHooks.edge,
+    };
 
     private script: ScriptSystem | null = null;
     private animation: AnimationSystem | null = null;

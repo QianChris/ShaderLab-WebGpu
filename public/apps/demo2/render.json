@@ -1,25 +1,24 @@
 {
   "name": "Demo2RenderGraph",
   "clearColor": [0.04, 0.05, 0.09, 1.0],
-  "renderScripts": ["render/params.js", "render/physics.js", "render/particles.js"],
   "phases": {
     "Preprocess": [],
     "Compute": [],
     "Opaque": [
-      { "name": "Grid",        "pipeline": "pipelines/GridPipeline.json",        "enabled": true },
-      { "name": "Mesh",        "pipeline": "pipelines/TestMeshPipeline.json",    "enabled": true },
-      { "name": "Edge",        "pipeline": "pipelines/TestEdgePipeline.json",    "enabled": true },
-      { "name": "PhysicsDebug","pipeline": "pipelines/PhysicsDebugPipeline.json","enabled": false }
+      { "name": "Grid",        "pipeline": "core:pipelines/GridPipeline.json",        "enabled": true },
+      { "name": "Mesh",        "pipeline": "core:pipelines/TestMeshPipeline.json",    "enabled": true },
+      { "name": "Edge",        "pipeline": "core:pipelines/TestEdgePipeline.json",    "enabled": true },
+      { "name": "PhysicsDebug","pipeline": "physics:pipelines/PhysicsDebugPipeline.json","enabled": false }
     ],
     "Transparent": [
       {
         "name": "Sparks",
-        "pipeline": "pipelines/ParticlePipeline.json",
+        "pipeline": "particles:pipelines/ParticlePipeline.json",
         "enabled": true
       }
     ],
     "Skybox": [
-      { "name": "Skybox", "pipeline": "pipelines/SkyboxPipeline.json", "enabled": true }
+      { "name": "Skybox", "pipeline": "core:pipelines/SkyboxPipeline.json", "enabled": true }
     ],
     "Postprocess": []
   }

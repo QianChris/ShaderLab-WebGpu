@@ -11,7 +11,7 @@ const problems = [];
 const note = (msg) => problems.push(msg);
 
 /** Plugin static analysis: existence + registerSystem('name')/components names
- *  (regex-level — runtime fail-loud remains the authority). */
+ *  + renderHook keys (regex-level — runtime fail-loud remains the authority). */
 function pluginInfo(id) {
     const dir = join(PLUGINS, id);
     const entry = ['index.ts', 'index.js'].map(f => join(dir, f)).find(existsSync);
@@ -22,7 +22,8 @@ function pluginInfo(id) {
         .join('\n');
     const systems = [...sources.matchAll(/registerSystem\(\s*['"]([^'"]+)['"]/g)].map(m => m[1]);
     const components = [...sources.matchAll(/name:\s*['"]([A-Za-z0-9_]+Component)['"]/g)].map(m => m[1]);
-    return { systems, components };
+    const hooks = [...sources.matchAll(/['"]([A-Za-z0-9_]+\.[A-Za-z0-9_]+)['"]\s*:/g)].map(m => m[1]);
+    return { systems, components, hooks };
 }
 
 // generators registered in Primitives.ts
@@ -42,17 +43,22 @@ for (const m of J(join(PLUGINS, 'core', 'meshes.json'))) {
     if (!GENERATORS.includes(m.generator)) note(`common/meshes.json '${m.name}': unknown generator '${m.generator}'`);
 }
 
-// pipeline helper: load pipeline JSON from common or app dir
+// pipeline helper: resolve '<plugin>:rest', app-relative, or absolute refs
 function loadPipeline(appDir, rel) {
-    const p1 = join(COMMON, rel);
+    const m = /^([A-Za-z0-9_-]+):(?!\/)(.+)$/.exec(rel);
+    if (m) {
+        const p = join(PLUGINS, m[1], m[2]);
+        return existsSync(p) ? { path: p, cfg: J(p) } : null;
+    }
+    const p1 = rel.startsWith('/') ? join(ROOT, rel) : null;
+    if (p1 && existsSync(p1)) return { path: p1, cfg: J(p1) };
     const p2 = appDir ? join(appDir, rel) : null;
-    if (existsSync(p1)) return { path: p1, cfg: J(p1) };
     if (p2 && existsSync(p2)) return { path: p2, cfg: J(p2) };
     return null;
 }
 
 function checkPipeline(appName, appComponents, rel, cfgEntry) {
-    if (!cfgEntry) { note(`${appName}: pipeline '${rel}' not found in common or app dir`); return; }
+    if (!cfgEntry) { note(`${appName}: pipeline '${rel}' not found (plugin/app/absolute)`); return; }
     const { cfg } = cfgEntry;
     const decl = cfg.renderer;
     if (!decl) return;
@@ -224,7 +230,8 @@ for (const s of J(join(COMMON, 'systems.json'))) {
     }
 }
 
-// hook/script value refs: verify exported names exist in the script files (textual check)
+// hook/script value refs: hooks are plugin-registered (renderHooks) or come
+// from legacy app renderScripts. Build per-app availability sets.
 const scriptFileCache = new Map();
 function scriptExports(file) {
     if (scriptFileCache.has(file)) return scriptFileCache.get(file);
@@ -235,33 +242,29 @@ function scriptExports(file) {
     scriptFileCache.set(file, names);
     return names;
 }
-// Build per-app map baseName -> file from that app's render.json renderScripts
-const appScripts = new Map();
+const appHookSets = new Map();
 for (const app of readdirSync(APPS)) {
-    const render = J(join(APPS, app, 'render.json'));
-    const m = new Map();
+    const manifest = J(join(APPS, app, 'app.json'));
+    const render = J(join(APPS, app, manifest.render ?? 'render.json'));
+    const hooks = new Set();
+    for (const id of [...enginePlugins, ...(manifest.plugins ?? [])]) {
+        for (const h of pluginInfo(id)?.hooks ?? []) hooks.add(h);
+    }
     for (const f of render.renderScripts ?? []) {
         const base = f.replace(/^[^/]+\//, '').replace(/\.js$/, '');
-        m.set(base, f);
+        for (const fn of scriptExports(f) ?? []) hooks.add(`${base}.${fn}`);
     }
-    appScripts.set(app, m);
+    appHookSets.set(app, hooks);
 }
-const baseFor = (appName, base) => appScripts.get(appName)?.get(base);
 for (const { appName, rel, hook } of hookRefs) {
-    const dot = hook.indexOf('.');
-    const base = hook.slice(0, dot), fn = hook.slice(dot+1);
-    const file = baseFor(appName, base);
-    if (!file) { note(`${appName}/${rel}: hook '${hook}' — no renderScript provides base '${base}' (WILL THROW at frame)`); continue; }
-    const exps = scriptExports(file);
-    if (exps && !exps.includes(fn)) note(`${appName}/${rel}: hook '${hook}' — '${fn}' not exported by ${file} (WILL THROW at frame)`);
+    if (!appHookSets.get(appName)?.has(hook)) {
+        note(`${appName}/${rel}: hook '${hook}' not provided by any loaded plugin or renderScript (WILL THROW at frame)`);
+    }
 }
 for (const { appName, rel, name } of scriptValueRefs) {
-    const dot = name.indexOf('.');
-    const base = name.slice(0, dot), fn = name.slice(dot+1);
-    const file = baseFor(appName, base);
-    if (!file) { note(`${appName}/${rel}: value script '${name}' — no renderScript provides base '${base}' (WILL THROW at frame)`); continue; }
-    const exps = scriptExports(file);
-    if (exps && !exps.includes(fn)) note(`${appName}/${rel}: value script '${name}' — '${fn}' not exported by ${file} (WILL THROW at frame)`);
+    if (!appHookSets.get(appName)?.has(name)) {
+        note(`${appName}/${rel}: value script '${name}' not provided by any loaded plugin or renderScript (WILL THROW at frame)`);
+    }
 }
 
 if (problems.length === 0) {

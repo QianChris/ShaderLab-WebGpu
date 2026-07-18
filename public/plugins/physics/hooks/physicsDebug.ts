@@ -1,9 +1,11 @@
 // Physics debug geometry hook (script:physics.debug).
 // Draws the Rapier debug line buffers straight from the physics system.
 // Group 0 (frame) is already bound by the render graph.
+import type { GeometryHookContext } from '@shaderlab/api';
+import type { PhysicsSystem } from '../PhysicsSystem.ts';
 
-export function debug(pass, ctx) {
-    const physics = ctx.attachments.physics;
+export function debug(pass: GPURenderPassEncoder, ctx: GeometryHookContext): void {
+    const physics = ctx.attachments.physics as PhysicsSystem | undefined;
     if (!physics) return;
     const count = physics.debugVertexCount;
     if (count === 0 || !physics.debugPosBuffer || !physics.debugColBuffer) return;

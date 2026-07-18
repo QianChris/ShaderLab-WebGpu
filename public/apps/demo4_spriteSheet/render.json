@@ -4,7 +4,7 @@
   "phases": {
     "Opaque": [],
     "Transparent": [
-      { "name": "Sprites", "pipeline": "pipelines/SpritePipeline.json", "enabled": true }
+      { "name": "Sprites", "pipeline": "core:pipelines/SpritePipeline.json", "enabled": true }
     ]
   }
 }

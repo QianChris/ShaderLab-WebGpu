@@ -1,5 +1,6 @@
 import { EnginePlugin, type PluginContext } from '@shaderlab/api';
 import { ParticleManager } from './ParticleManager.ts';
+import * as particleHooks from './hooks/particles.ts';
 
 /**
  * GPU particle capability. Publishes the ParticleManager as the 'particles'
@@ -12,6 +13,12 @@ import { ParticleManager } from './ParticleManager.ts';
  */
 export default class ParticlesPlugin extends EnginePlugin {
     readonly meta = { id: 'particles' };
+
+    /** script:particles.simulate (compute) + script:particles.draw (geometry). */
+    renderHooks = {
+        'particles.simulate': particleHooks.simulate,
+        'particles.draw': particleHooks.draw,
+    };
 
     private manager: ParticleManager | null = null;
 

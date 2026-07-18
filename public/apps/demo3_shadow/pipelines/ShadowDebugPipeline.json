@@ -1,7 +1,7 @@
 {
   "name": "ShadowDebugPipeline",
-  "vertex": { "shader": "../../../common/shaders/ShadowDebug.wgsl", "entryPoint": "vs" },
-  "fragment": { "shader": "../../../common/shaders/ShadowDebug.wgsl", "entryPoint": "fs" },
+  "vertex": { "shader": "../shaders/ShadowDebug.wgsl", "entryPoint": "vs" },
+  "fragment": { "shader": "../shaders/ShadowDebug.wgsl", "entryPoint": "fs" },
   "primitive": { "topology": "triangle-list", "cullMode": "none", "frontFace": "ccw" },
   "depthStencil": { "format": "depth24plus", "depthWriteEnabled": false, "depthCompare": "always" },
   "blend": "opaque",

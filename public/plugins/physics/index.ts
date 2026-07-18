@@ -1,6 +1,7 @@
 import { EnginePlugin, RAPIER, type PluginContext, type ToolConfig, type ToolContext } from '@shaderlab/api';
 import { PhysicsSystem } from './PhysicsSystem.ts';
 import { PickTool } from './PickTool.ts';
+import * as physicsHooks from './hooks/physicsDebug.ts';
 
 /**
  * Rapier3D physics capability (engine-scoped via engine-config.json `plugins`).
@@ -27,6 +28,11 @@ export default class PhysicsPlugin extends EnginePlugin {
             requires: ['wasm:rapier'],
         },
     ];
+
+    /** script:physics.debug — Rapier debug-line geometry hook. */
+    renderHooks = {
+        'physics.debug': physicsHooks.debug,
+    };
 
     private system: PhysicsSystem | null = null;
 

@@ -19,8 +19,8 @@
     "geometry": { "hook": "particles.draw" },
     "compute": { "script": "particles.simulate" },
     "aux": {
-      "emit": "pipelines/ParticleEmitPipeline.json",
-      "simulate": "pipelines/ParticleSimPipeline.json"
+      "emit": "particles:pipelines/ParticleEmitPipeline.json",
+      "simulate": "particles:pipelines/ParticleSimPipeline.json"
     }
   }
 }

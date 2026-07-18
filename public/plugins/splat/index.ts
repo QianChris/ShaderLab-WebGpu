@@ -1,5 +1,6 @@
 import { EnginePlugin, type PluginContext } from '@shaderlab/api';
 import { GaussianSplatManager } from './GaussianSplatManager.ts';
+import * as splatHooks from './hooks/splatDraw.ts';
 
 /**
  * 3D Gaussian Splatting capability (app-scoped: declared by an app's
@@ -24,6 +25,11 @@ export default class SplatPlugin extends EnginePlugin {
             },
         },
     ];
+
+    /** script:splat.draw — instanced splat quad geometry hook. */
+    renderHooks = {
+        'splat.draw': splatHooks.draw,
+    };
 
     systemDefs = [
         {
