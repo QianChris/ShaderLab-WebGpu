@@ -4,6 +4,7 @@ import { resourceManager } from '../render/ResourceManager';
 import { uniformLayouts, type UniformLayout } from '../render/UniformLayout';
 import { mat4LookAt, mat4Mul, mat4OrthographicSym, mat4Perspective, quatRotateVec3 } from '../math';
 import type { Scene } from './Scene';
+import type { FrameContext, System } from './SystemRegistry';
 
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -61,7 +62,7 @@ export interface ShadowPassDesc {
  * Point-light 6 face VPs are uploaded to the separate pointShadowFaceUBO
  * (`pointShadowFaces` layout), indexed by shadowMapIndex*6 + face.
  */
-export class LightSystem {
+export class LightSystem implements System {
     private scene!: Scene;
     private data: Float32Array = new Float32Array(0);
     private faceData: Float32Array = new Float32Array(0);
@@ -78,7 +79,7 @@ export class LightSystem {
         this.faceData = this.faceLayout.createBuffer();
     }
 
-    update(): void {
+    update(_ctx: FrameContext): void {
         const scene = this.scene;
         const buf = this.data;
         buf.fill(0);

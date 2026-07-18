@@ -62,8 +62,11 @@ export class RenderScriptLoader {
                 console.error(`[RenderScriptLoader] ${err}`);
                 continue;
             }
-            const prefix = `${this.scriptsSubdir}/`;
-            const baseName = file.startsWith(prefix) ? file.slice(prefix.length).replace(/\.js$/, '') : file.replace(/\.js$/, '');
+            // Derive the hook key base from the file's basename: strip the
+            // leading sub-namespace dir (e.g. "render/" in "render/particles.js")
+            // and the .js suffix, so the registered key is "particles.simulate"
+            // regardless of which sub-namespace under <scriptsSubdir>/ is used.
+            const baseName = file.replace(/^[^/]+\//, '').replace(/\.js$/, '');
             for (const [name, fn] of Object.entries(exports)) {
                 if (typeof fn !== 'function') continue;
                 const key = `${baseName}.${name}`;

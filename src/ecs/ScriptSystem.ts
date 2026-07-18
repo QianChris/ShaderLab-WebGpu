@@ -3,6 +3,7 @@ import { schemaRegistry } from './SchemaRegistry';
 import type { Scene } from './Scene';
 import type { EventBus } from '../events/EventBus';
 import type { PhysicsSystem } from './PhysicsSystem';
+import type { FrameContext, System } from './SystemRegistry';
 
 export interface ScriptContext {
     eid: number;
@@ -26,7 +27,7 @@ interface ScriptModule {
     [key: string]: unknown;
 }
 
-export class ScriptSystem {
+export class ScriptSystem implements System {
     private scene!: Scene;
     private bus: EventBus;
     private baseDir: string;
@@ -71,7 +72,9 @@ export class ScriptSystem {
         this.loading.clear();
     }
 
-    update(time: number, dt: number): void {
+    update(ctx: FrameContext): void {
+        const time = ctx.time;
+        const dt = ctx.dt;
         for (const eid of this.query(this.scene.world)) {
             const enabled = schemaRegistry.getScalar(schemaRegistry.get('ScriptComponent')!, eid, 'enabled');
             if (enabled !== 1) continue;

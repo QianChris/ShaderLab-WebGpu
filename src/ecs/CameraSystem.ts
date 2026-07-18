@@ -1,6 +1,7 @@
 import { resourceManager } from '../render/ResourceManager';
 import { uniformLayouts } from '../render/UniformLayout';
 import type { Scene } from './Scene';
+import type { FrameContext, System } from './SystemRegistry';
 
 const layout = uniformLayouts;
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
@@ -10,8 +11,14 @@ const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0
  * matrices to the shared camera UBO (@group(0) @binding(0)).
  *
  * UBO layout: declared in uniform-layouts.json as "camera" (vp, ivp, pos, view, proj).
+ *
+ * In multi-view mode (render.json `multiView: true`), RenderGraph handles the
+ * per-camera UBO uploads itself via its own scratch buffer (one writeBuffer →
+ * one submit per camera). This class still writes the primary camera's matrices
+ * via `update` so off-pipeline consumers (splat sort, the editor gizmo) see a
+ * valid view, and tracks `lastView`/`lastPos` from that primary camera.
  */
-export class CameraSystem {
+export class CameraSystem implements System {
     private scene!: Scene;
     private data: Float32Array = new Float32Array(0);
     /** Last frame's view matrix + position (for splat sort / off-pipeline use). */
@@ -23,8 +30,8 @@ export class CameraSystem {
         this.data = layout.get('camera').createBuffer();
     }
 
-    update(aspect: number): void {
-        const cam = this.scene.getActiveCamera(aspect);
+    update(ctx: FrameContext): void {
+        const cam = this.scene.getActiveCamera(ctx.aspect);
         const buf = this.data;
         const camLayout = layout.get('camera');
         if (cam) {

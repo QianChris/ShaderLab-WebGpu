@@ -1,5 +1,6 @@
 import { meshEdges, type MeshData, type PbrMeshData } from './Primitives';
 import { uniformLayouts } from './UniformLayout';
+import { bufferRegistry } from './BufferRegistry';
 import type { SlotName } from './vertexSlots';
 import type { PipelineEntry, BindLayoutDecls, BindEntryDecl, SamplerDecls } from './types';
 import type { RenderTargetDecls, RenderTargetSize } from './rendererDecl';
@@ -65,14 +66,15 @@ export class ResourceManager {
     private renderTargetDecls: RenderTargetDecls = {};
     private namedVbos = new Map<string, GPUBuffer>();
     private fallbackTextures = new Map<string, GPUTexture>();
+    /** Cached default (full) views per GPUTexture. GPUTexture objects are stable
+     *  (cached by URL/handle/name and only destroyed on app-switch/resize, which
+     *  produces a NEW GPUTexture object), so a WeakMap keyed by the texture yields
+     *  the correct cache behaviour: a recreated texture misses the cache and gets
+     *  a fresh view, while a stable texture reuses one view across all frames.
+     *  Without this, every `tex.createView()` in the per-entity / per-pass paths
+     *  would allocate a new GPUTextureView each frame — a severe object leak. */
+    private textureViewCache = new WeakMap<GPUTexture, GPUTextureView>();
 
-    private _camUBO: GPUBuffer | null = null;
-    private _lightUBO: GPUBuffer | null = null;
-    private _pointShadowFaceUBO: GPUBuffer | null = null;
-    private _timeInputUBO: GPUBuffer | null = null;
-    private _depthTex: GPUTexture | null = null;
-    private _depthW = 0;
-    private _depthH = 0;
     private _shadow2D: GPUTexture | null = null;
     private _shadow2DW = 0;
     private _shadow2DH = 0;
@@ -81,6 +83,28 @@ export class ResourceManager {
     private _shadowPointW = 0;
     private _shadowPointH = 0;
     private _shadowPointLayers = 0;
+    /** Cached 2d-array views of the shadow maps (invalidated when the
+     *  underlying textures are recreated by ensureShadowTextures). */
+    private _shadow2DArrayView: GPUTextureView | null = null;
+    private _shadowPoint2DArrayView: GPUTextureView | null = null;
+    /** Cached per-layer / per-face views of the shadow maps (used by the
+     *  shadow render passes). Lazily filled by index, invalidated alongside
+     *  the array views when the shadow textures are recreated. */
+    private _shadow2DLayerViews: (GPUTextureView | null)[] = [];
+    private _shadowPointFaceViews: (GPUTextureView | null)[] = [];
+    /** Cached frame bind groups. Content-stable across frames (UBOs are
+     *  updated in place via writeBuffer; shadow textures only change on
+     *  resize), so rebuild only when shadow textures are recreated. Without
+     *  this cache, every entity×driver×frame would create a new GPUBindGroup
+     *  plus two new shadow TextureViews — a severe GPU-object leak. */
+    private _frameBg: GPUBindGroup | null = null;
+    private _frameShadowBg: GPUBindGroup | null = null;
+    /** Cached per-face shadow bind groups (@group(2) selector UBO wrapper).
+     *  Each wraps a stable `shadowPass_${i}` UBO buffer (contents updated in
+     *  place each frame); the bind group object itself never changes, so it
+     *  is cached per passIndex. Cleared on app switch (the UBO buffers are
+     *  app-owned and destroyed in exitApp). */
+    private _shadowPassBindGroups = new Map<number, GPUBindGroup>();
     private _shadowPassScratch: Uint32Array = new Uint32Array(4);
 
     init(device: GPUDevice): void {
@@ -128,7 +152,13 @@ export class ResourceManager {
         }
         for (const [key, owner] of this.textureOwner) {
             if (owner !== appId) continue;
-            this.textures.get(key)?.destroy();
+            const tex = this.textures.get(key);
+            if (tex) {
+                // Drop the cached view promptly so it is GC-eligible without
+                // waiting for the destroyed GPUTexture to be collected.
+                this.textureViewCache.delete(tex);
+                tex.destroy();
+            }
             this.textures.delete(key);
             this.textureOwner.delete(key);
             const handle = this.textureKeyToHandle.get(key);
@@ -139,16 +169,27 @@ export class ResourceManager {
         }
         for (const [key, owner] of this.colorTargetOwner) {
             if (owner !== appId) continue;
-            this.colorTargets.get(key)?.tex.destroy();
+            const entry = this.colorTargets.get(key);
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             this.colorTargets.delete(key);
             this.colorTargetOwner.delete(key);
         }
         for (const [key, owner] of this.depthTargetOwner) {
             if (owner !== appId) continue;
-            this.depthTargets.get(key)?.tex.destroy();
+            const entry = this.depthTargets.get(key);
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             this.depthTargets.delete(key);
             this.depthTargetOwner.delete(key);
         }
+        // Invalidate cached frame bind groups: future user-declared app-scoped
+        // UBOs (referenced via `resource: "myAppUbo"` in bind-layouts.json) would
+        // leave _frameBg/_frameShadowBg pointing at destroyed buffers. The four
+        // legacy engine UBOs are common-scoped so this is a no-op for them today,
+        // but invalidating eagerly keeps the cache correct under app-scoped growth.
+        this._frameBg = null;
+        this._frameShadowBg = null;
+        // Note: shadow-pass selector UBOs + bind groups are common-owned (not
+        // app-scoped) so they survive reload — do not clear _shadowPassBindGroups.
         this.currentOwner = 'common';
     }
 
@@ -376,60 +417,26 @@ export class ResourceManager {
         return buf;
     }
 
+    /** Camera UBO. Backed by BufferRegistry (declared in camera.json `ubos`). */
     get cameraUBO(): GPUBuffer {
-        if (!this._camUBO) {
-            this._camUBO = this.device.createBuffer({
-                size: uniformLayouts.get('camera').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._camUBO;
+        return bufferRegistry.get('camera');
     }
 
+    /** Light UBO. Backed by BufferRegistry (declared in light.json `ubos`). */
     get lightUBO(): GPUBuffer {
-        if (!this._lightUBO) {
-            this._lightUBO = this.device.createBuffer({
-                size: uniformLayouts.get('light').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._lightUBO;
+        return bufferRegistry.get('light');
     }
 
     /** Per-point-light cube-face view-projection array (6 faces × up to 4 point lights).
-     *  Written by LightSystem; read by the shadow-depth pass (vertex) and PBR (fragment). */
+     *  Written by LightSystem; read by the shadow-depth pass (vertex) and PBR (fragment).
+     *  Backed by BufferRegistry (declared in light.json `ubos`). */
     get pointShadowFaceUBO(): GPUBuffer {
-        if (!this._pointShadowFaceUBO) {
-            this._pointShadowFaceUBO = this.device.createBuffer({
-                size: uniformLayouts.get('pointShadowFaces').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._pointShadowFaceUBO;
+        return bufferRegistry.get('pointShadowFaces');
     }
 
+    /** TimeInput UBO. Backed by BufferRegistry (declared in input.json `ubos`). */
     get timeInputUBO(): GPUBuffer {
-        if (!this._timeInputUBO) {
-            this._timeInputUBO = this.device.createBuffer({
-                size: uniformLayouts.get('timeInput').byteSize,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            });
-        }
-        return this._timeInputUBO;
-    }
-
-    depthView(width: number, height: number): GPUTextureView {
-        if (!this._depthTex || this._depthW !== width || this._depthH !== height) {
-            this._depthTex?.destroy();
-            this._depthTex = this.device.createTexture({
-                size: { width, height },
-                format: 'depth24plus',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT,
-            });
-            this._depthW = width;
-            this._depthH = height;
-        }
-        return this._depthTex.createView();
+        return bufferRegistry.get('timeInput');
     }
 
     /** Create (or reuse) the two shadow depth textures from render-targets.json:
@@ -450,6 +457,11 @@ export class ResourceManager {
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             });
             this._shadow2DW = s2D.w; this._shadow2DH = s2D.h; this._shadow2DLayers = layers2D;
+            // Invalidate caches that reference the old texture's views.
+            this._shadow2DArrayView = null;
+            this._shadow2DLayerViews.length = 0;
+            this._frameBg = null;
+            this._frameShadowBg = null;
         }
         const declPoint = this.renderTargetDecls['shadowPoint2D'];
         const sPoint = this.resolveTargetSize('shadowPoint2D', 1, 1);
@@ -463,36 +475,63 @@ export class ResourceManager {
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             });
             this._shadowPointW = sPoint.w; this._shadowPointH = sPoint.h; this._shadowPointLayers = layersPoint;
+            // Invalidate caches that reference the old texture's views.
+            this._shadowPoint2DArrayView = null;
+            this._shadowPointFaceViews.length = 0;
+            this._frameBg = null;
+            this._frameShadowBg = null;
         }
     }
 
     /** Full 2d-array view of the directional shadow map (for PBR sampling). */
     shadowDepth2DArrayView(): GPUTextureView {
         this.ensureShadowTextures();
-        return this._shadow2D!.createView({ dimension: '2d-array' });
+        if (!this._shadow2DArrayView) {
+            this._shadow2DArrayView = this._shadow2D!.createView({ dimension: '2d-array' });
+        }
+        return this._shadow2DArrayView;
     }
 
     /** Single-layer 2D view of one directional shadow map (for the shadow render pass). */
     shadowDepth2DLayerView(layer: number): GPUTextureView {
         this.ensureShadowTextures();
-        return this._shadow2D!.createView({ dimension: '2d', baseArrayLayer: layer, arrayLayerCount: 1 });
+        let v = this._shadow2DLayerViews[layer];
+        if (!v) {
+            v = this._shadow2D!.createView({ dimension: '2d', baseArrayLayer: layer, arrayLayerCount: 1 });
+            this._shadow2DLayerViews[layer] = v;
+        }
+        return v;
     }
 
     /** Full 2d-array view of the point-light shadow map (for PBR sampling). */
     shadowPoint2DArrayView(): GPUTextureView {
         this.ensureShadowTextures();
-        return this._shadowPoint!.createView({ dimension: '2d-array' });
+        if (!this._shadowPoint2DArrayView) {
+            this._shadowPoint2DArrayView = this._shadowPoint!.createView({ dimension: '2d-array' });
+        }
+        return this._shadowPoint2DArrayView;
     }
 
     /** Single 2D face view of one point-light shadow face (for the shadow render pass).
      *  `faceSlot` = pointShadowMapIndex * 6 + face (0..23). */
     shadowPoint2DFaceView(faceSlot: number): GPUTextureView {
         this.ensureShadowTextures();
-        return this._shadowPoint!.createView({ dimension: '2d', baseArrayLayer: faceSlot, arrayLayerCount: 1 });
+        let v = this._shadowPointFaceViews[faceSlot];
+        if (!v) {
+            v = this._shadowPoint!.createView({ dimension: '2d', baseArrayLayer: faceSlot, arrayLayerCount: 1 });
+            this._shadowPointFaceViews[faceSlot] = v;
+        }
+        return v;
     }
 
     /** Named depth target view; distinct depth textures keyed by name (data-driven targets).
-     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'. */
+     *  Format comes from render-targets.json if declared; falls back to 'depth24plus'.
+     *
+     *  Note: WebGPU requires the depth attachment's size to exactly match the color
+     *  attachment's base plane size, so a viewport-sized depth target MUST be
+     *  reallocated on every canvas resize. The old GPUTextureView cannot be freed
+     *  eagerly (no destroy()), so each resize leaves one stale view until GC — this
+     *  is a WebGPU/browser limitation, not an engine bug. */
     namedDepthTargetView(name: string, viewportW: number, viewportH: number): GPUTextureView {
         const { w, h } = this.resolveTargetSize(name, viewportW, viewportH);
         const decl = this.renderTargetDecls[name];
@@ -500,7 +539,7 @@ export class ResourceManager {
             ? decl.format : 'depth24plus') as GPUTextureFormat;
         let entry = this.depthTargets.get(name);
         if (!entry || entry.w !== w || entry.h !== h || entry.format !== format) {
-            entry?.tex.destroy();
+            if (entry) { this.textureViewCache.delete(entry.tex); entry.tex.destroy(); }
             const tex = this.device.createTexture({
                 label: `depth:${name}`,
                 size: { width: w, height: h },
@@ -511,7 +550,7 @@ export class ResourceManager {
             this.depthTargets.set(name, entry);
             this.depthTargetOwner.set(name, this.currentOwner);
         }
-        return entry.tex.createView();
+        return this.textureView(entry.tex);
     }
 
     getUniform(key: string, data: number[] | Float32Array, byteSize: number): GPUBuffer {
@@ -616,7 +655,7 @@ export class ResourceManager {
     colorTarget(key: string, w: number, h: number, format: GPUTextureFormat): GPUTexture {
         const prev = this.colorTargets.get(key);
         if (!prev || prev.w !== w || prev.h !== h || prev.format !== format) {
-            prev?.tex.destroy();
+            if (prev) { this.textureViewCache.delete(prev.tex); prev.tex.destroy(); }
             const tex = this.device.createTexture({
                 size: { width: w, height: h },
                 format,
@@ -703,11 +742,16 @@ export class ResourceManager {
         if (name.startsWith('sampler:')) {
             return this.namedSampler(name.slice(8));
         }
+        // Buffer resources (UBOs + storage buffers) — registered by name in
+        // BufferRegistry (declared via system.json `ubos`/`buffers` fields).
+        // The name matches the uniform-layouts.json layout name (for UBOs) or
+        // the explicit `name` field (for storage buffers).
+        if (bufferRegistry.has(name)) {
+            return { buffer: bufferRegistry.get(name) };
+        }
+        // Shadow texture resources — still special-cased here pending a
+        // TextureViewRegistry (Step 9 cleanup).
         switch (name) {
-            case 'cameraUBO':          return { buffer: this.cameraUBO };
-            case 'lightUBO':           return { buffer: this.lightUBO };
-            case 'timeInputUBO':       return { buffer: this.timeInputUBO };
-            case 'pointShadowFaceUBO':  return { buffer: this.pointShadowFaceUBO };
             case 'shadowDepth2DArray':  return this.shadowDepth2DArrayView();
             case 'shadowPoint2DArray':  return this.shadowPoint2DArrayView();
             default: throw new Error(`Unknown frame resource '${name}' in bind-layouts.json`);
@@ -728,19 +772,29 @@ export class ResourceManager {
     }
 
     frameBindGroup(): GPUBindGroup {
-        return this.buildFrameBindGroup('frame');
+        if (!this._frameBg) this._frameBg = this.buildFrameBindGroup('frame');
+        return this._frameBg;
     }
 
     /** Frame bind group for the shadow render pass: UBOs only (camera/light/time +
      *  pointShadowFaces), no shadow textures (they are the render targets). */
     frameShadowBindGroup(): GPUBindGroup {
-        return this.buildFrameBindGroup('frameShadow');
+        if (!this._frameShadowBg) this._frameShadowBg = this.buildFrameBindGroup('frameShadow');
+        return this._frameShadowBg;
     }
 
     /** Per-face shadow-pass bind group: {lightIdx, face} selecting the current shadow
      *  light and (for point lights) the cube face. Distinct tiny UBOs per pass index
      *  (each written once per frame) avoid the write-after-write hazard of updating a
-     *  single shared UBO between render passes in one command buffer. */
+     *  single shared UBO between render passes in one command buffer.
+     *  The bind group wraps the per-passIndex UBO buffer (stable object; its
+     *  {lightIdx, face} contents are rewritten each frame via writeBuffer), so the
+     *  bind group object is cached per passIndex — only built once, then reused.
+     *
+     *  The UBO + bind group are common-owned (not app-scoped): the passIndex →
+     *  lightIdx/face mapping is rewritten every frame, so they survive app reload
+     *  without going stale. This avoids recreating them on every reload (the
+     *  browser does not promptly GC GPUBindGroup). */
     shadowPassBindGroup(passIndex: number, lightIdx: number, face: number): GPUBindGroup {
         const key = `shadowPass_${passIndex}`;
         let buf = this.uniformBuffers.get(key);
@@ -750,7 +804,7 @@ export class ResourceManager {
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
             this.uniformBuffers.set(key, buf);
-            this.uniformOwner.set(key, this.currentOwner);
+            this.uniformOwner.set(key, 'common');
         }
         const layout = uniformLayouts.get('shadowPass');
         const scratch = this._shadowPassScratch;
@@ -758,10 +812,15 @@ export class ResourceManager {
         layout.writeU32(scratch, 'lightIdx', lightIdx);
         layout.writeU32(scratch, 'face', face);
         this.device.queue.writeBuffer(buf, 0, scratch.buffer, scratch.byteOffset, scratch.byteLength);
-        return this.device.createBindGroup({
-            layout: this.namedLayout('shadowPass'),
-            entries: [{ binding: 0, resource: { buffer: buf } }],
-        });
+        let bg = this._shadowPassBindGroups.get(passIndex);
+        if (!bg) {
+            bg = this.device.createBindGroup({
+                layout: this.namedLayout('shadowPass'),
+                entries: [{ binding: 0, resource: { buffer: buf } }],
+            });
+            this._shadowPassBindGroups.set(passIndex, bg);
+        }
+        return bg;
     }
 
     objectBindGroup(uniformBuffer: GPUBuffer): GPUBindGroup {
@@ -821,10 +880,23 @@ export class ResourceManager {
         });
     }
 
+    /** Cached default view of a GPUTexture. Reused across frames for stable
+     *  textures (UBO buffers, shadow maps, render targets, fallback 1x1
+     *  textures, loaded asset textures); a fresh view is created only when the
+     *  underlying GPUTexture object changes (recreate-on-resize / app switch). */
+    textureView(tex: GPUTexture): GPUTextureView {
+        let v = this.textureViewCache.get(tex);
+        if (!v) {
+            v = tex.createView();
+            this.textureViewCache.set(tex, v);
+        }
+        return v;
+    }
+
     /** Fallback 1x1 texture view by name (from fallback-textures.json), else white. */
     fallbackTextureView(name?: string): GPUTextureView {
         const tex = this.fallbackTextures.get(name ?? 'white') ?? this.defaultWhite;
-        return tex.createView();
+        return this.textureView(tex);
     }
 
     /** Named color render target view (offscreen). Size resolved from render-targets.json.
@@ -837,7 +909,7 @@ export class ResourceManager {
             ? (decl.format as GPUTextureFormat)
             : fallbackFormat;
         const { w, h } = this.resolveTargetSize(name, viewportW, viewportH);
-        return this.colorTarget(name, w, h, format).createView();
+        return this.textureView(this.colorTarget(name, w, h, format));
     }
 
     /** Sampleable view of a named render target for a pipeline that READS it (e.g. a

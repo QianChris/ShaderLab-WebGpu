@@ -1,6 +1,7 @@
 import { resourceManager } from './ResourceManager';
 import { mat4Mul } from '../math';
 import { loadSplatPly, type SplatData } from '../gs/SplatLoader';
+import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -19,10 +20,13 @@ const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0
  * the splat referenced by a GsComponent entity via load() and disposes on app
  * switch.
  */
-export class GaussianSplatManager {
+export class GaussianSplatManager implements System {
     count = 0;
     ready = false;
     splatScale = 1.0;
+    /** Active GsComponent entity (the splat's Transform source). Null until
+     *  loadFromScene finds one. Was previously Engine.gsEntityEid. */
+    entityEid: number | null = null;
 
     private centersBuf: GPUBuffer | null = null;
     private colorsBuf: GPUBuffer | null = null;
@@ -74,6 +78,34 @@ export class GaussianSplatManager {
         this.modelUBO = resourceManager.getUniform('gsSplatUniform', this.uniformData, 80);
         this.cpuModel = IDENTITY_MAT4;
         this.ready = true;
+    }
+
+    /** System interface: refresh model UBO + re-sort splats against the active camera. */
+    update(ctx: FrameContext): void {
+        if (this.entityEid === null) return;
+        this.setModel(ctx.scene.getModelMatrix(this.entityEid), ctx.cw, ctx.ch);
+        this.sort(ctx.camera.lastView, ctx.camera.lastPos);
+    }
+
+    /** Scan the scene for GsComponent entities and load each one's PLY asset.
+     *  Sets `entityEid` to the (last) found entity; multiple splat entities
+     *  are not currently supported by the manager. The previous Engine.loadApp
+     *  special-case branch is now this single manager method — keeps splat
+     *  loading logic next to the splat manager instead of in the Engine. */
+    async loadFromScene(scene: import('../ecs/Scene').Scene, appBase: string): Promise<void> {
+        this.entityEid = null;
+        for (const [, eid] of scene.entityKeyMap) {
+            if (!scene.hasComponent(eid, 'GsComponent')) continue;
+            const ply = scene.getField(eid, 'GsComponent', 'ply') as string;
+            if (!ply) continue;
+            const url = ply.startsWith('/') ? ply : `${appBase}/${ply}`;
+            await this.load(url);
+            scene.setField(eid, 'GsComponent', 'count', this.count);
+            if (this.entityEid !== null) {
+                console.warn('[GaussianSplatManager] multiple GsComponent entities; manager serves one — using the last');
+            }
+            this.entityEid = eid;
+        }
     }
 
     /**

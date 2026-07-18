@@ -12,6 +12,8 @@ import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
 import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
+import { systemRegistry, type FrameContext } from './ecs/SystemRegistry';
+import { bufferRegistry } from './render/BufferRegistry';
 import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData } from './render/Primitives';
 import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
 import { GltfLoader } from './gltf/GltfLoader';
@@ -91,8 +93,6 @@ export class Engine {
     toolSystem!: ToolSystem;
     /** Splat manager; only instantiated when the active app's systems.json lists the `gaussianSplat` system. */
     gaussianSplatManager: GaussianSplatManager | null = null;
-    /** eid of the active GsComponent entity (the gaussian object's Transform source). */
-    gsEntityEid: number | null = null;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -167,6 +167,17 @@ export class Engine {
         loadVertexSlots(vertexSlotsData);
         uniformLayouts.load(uniformLayoutsData);
 
+        // Load common system defs so BufferRegistry can see what UBOs/storage
+        // buffers each common system declares. (loadDefs is idempotent — the
+        // subsequent call in loadApp skips already-loaded common defs.)
+        await systemRegistry.loadDefs(this.commonSystems, root, '');
+        // Allocate every common-scoped buffer declared by common systems' defs
+        // (the four legacy engine UBOs — camera / light / timeInput /
+        // pointShadowFaces — are declared in camera.json / light.json /
+        // input.json). Persists for the engine lifetime; app-scoped buffers
+        // declared by an app's own system defs are allocated in loadApp.
+        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
+
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
         }
@@ -213,6 +224,18 @@ export class Engine {
         this.animationSystem.attach(this.scene);
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
         this.scriptSystem.provide(this.physicsSystem, () => this.aspect());
+
+        // Register built-in systems with the SystemRegistry so frame() dispatch
+        // is data-driven (systems.json drives order + presence, registry maps
+        // names to instances). 'gaussianSplat' is registered conditionally by
+        // loadApp() (app-opted-in); the rest are always-present engine systems.
+        systemRegistry.registerBuiltin('input', this.inputSystem);
+        systemRegistry.registerBuiltin('script', this.scriptSystem);
+        systemRegistry.registerBuiltin('physics', this.physicsSystem);
+        systemRegistry.registerBuiltin('camera', this.cameraSystem);
+        systemRegistry.registerBuiltin('light', this.lightSystem);
+        systemRegistry.registerBuiltin('animation', this.animationSystem);
+        systemRegistry.registerBuiltin('render', this.renderGraph);
     }
 
     private aspect(): number {
@@ -292,6 +315,14 @@ export class Engine {
             this.activeSystems = this.commonSystems;
         }
 
+        // Pre-load each system's def JSON + any script systems referenced by
+        // `source: "<path>.js"` so resolve() in the frame loop is synchronous.
+        await systemRegistry.loadDefs(this.activeSystems, this.engineConfig.dataRoot, base);
+
+        // Allocate every UBO/storage buffer declared in the active systems' defs
+        // (`ubos`/`buffers` fields). App-scoped: released on app switch.
+        bufferRegistry.allocateFor(this.activeSystems, name, this.device);
+
         for (const rel of manifest.components ?? []) {
             await schemaRegistry.loadMore(this.resolveAsset(base, rel));
         }
@@ -325,6 +356,7 @@ export class Engine {
         }
 
         if (manifest.tools) {
+            this.toolSystem.setBase(base);
             await this.toolSystem.loadFromFile(this.resolveAsset(base, manifest.tools));
         }
         for (const glb of manifest.gltf ?? []) {
@@ -333,23 +365,15 @@ export class Engine {
         // Splat (3DGS) is an app-opted-in system: only wire the manager + load
         // GsComponent ply assets when this app's systems.json lists gaussianSplat.
         // Storage buffers live under the app's resource scope (released on switch).
+        // The heavy lifting (scan scene for GsComponent + async PLY load) is now
+        // a single manager call, keeping splat logic out of the Engine body.
         if (this.hasSystem('gaussianSplat')) {
             resourceManager.enterApp(name);
             const mgr = new GaussianSplatManager();
             this.gaussianSplatManager = mgr;
             this.renderGraph.splats = mgr;
-            this.gsEntityEid = null;
-            for (const [, eid] of this.scene.entityKeyMap) {
-                if (!this.scene.hasComponent(eid, 'GsComponent')) continue;
-                const ply = this.scene.getField(eid, 'GsComponent', 'ply') as string;
-                if (!ply) continue;
-                await mgr.load(this.resolveAsset(base, ply));
-                this.scene.setField(eid, 'GsComponent', 'count', mgr.count);
-                if (this.gsEntityEid !== null) {
-                    console.warn('[Engine] multiple GsComponent entities; splat manager currently serves one — using the last');
-                }
-                this.gsEntityEid = eid;
-            }
+            systemRegistry.registerBuiltin('gaussianSplat', mgr);
+            await mgr.loadFromScene(this.scene, base);
         }
     }
 
@@ -367,7 +391,9 @@ export class Engine {
         this.gaussianSplatManager?.dispose();
         this.gaussianSplatManager = null;
         this.renderGraph.splats = null;
-        this.gsEntityEid = null;
+        systemRegistry.unregisterBuiltin('gaussianSplat');
+        systemRegistry.clearScripts();
+        bufferRegistry.exitApp(appId);
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
@@ -404,32 +430,65 @@ export class Engine {
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
+        const ctx: FrameContext = {
+            scene: this.scene,
+            time, dt,
+            aspect: this.aspect(),
+            cw: this.canvas.width,
+            ch: this.canvas.height,
+            canvas: this.canvas,
+            device: this.device,
+            context: this.context,
+            format: this.format,
+            eventBus: this.eventBus,
+            physics: this.physicsSystem,
+            camera: this.cameraSystem,
+            light: this.lightSystem,
+            animation: this.animationSystem,
+            input: this.inputSystem,
+            script: this.scriptSystem,
+            splats: this.gaussianSplatManager,
+            renderGraph: this.renderGraph,
+            // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
+            getBuffer: (name: string) => bufferRegistry.get(name),
+            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
+            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
+                this.dispatchCompute(pipelineName, count, entries);
+            },
+        };
+
         for (const sys of this.activeSystems) {
-            switch (sys.name) {
-                case 'input':      this.inputSystem.update(time, dt); break;
-                case 'script':     this.scriptSystem.update(time, dt); break;
-                case 'physics':    this.physicsSystem.update(time, dt); break;
-                case 'camera':     this.cameraSystem.update(this.aspect()); break;
-                case 'light':      this.lightSystem.update(); break;
-                case 'animation':  this.animationSystem.update(time, dt); break;
-                case 'gaussianSplat':
-                    if (this.gaussianSplatManager && this.gsEntityEid !== null) {
-                        this.gaussianSplatManager.setModel(this.scene.getModelMatrix(this.gsEntityEid), this.canvas.width, this.canvas.height);
-                    }
-                    if (this.gaussianSplatManager) {
-                        this.gaussianSplatManager.sort(this.cameraSystem.lastView, this.cameraSystem.lastPos);
-                    }
-                    break;
-                case 'render':
-                    this.renderGraph.execute(this.device, this.context, this.format, this.scene, time, dt);
-                    break;
-            }
+            const impl = systemRegistry.resolve(sys);
+            impl?.update(ctx);
         }
         requestAnimationFrame(this.frame);
     };
 
     startLoop(): void {
         requestAnimationFrame(this.frame);
+    }
+
+    /** Dispatch a preloaded compute pipeline by name (script-system escape hatch).
+     *  Opens a per-call command encoder + submit — functional but not optimal;
+     *  batching multiple dispatches per frame is a future optimization. */
+    private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void {
+        const pipeline = this.renderGraph.getComputePipeline(pipelineName);
+        if (!pipeline) throw new Error(`compute pipeline '${pipelineName}' not loaded`);
+        const meta = PipelineLoader.getComputeMeta(pipelineName);
+        const tgs = meta?.workgroupSize ?? this.engineConfig.computeTgs;
+        const encoder = this.device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        if (entries && entries.length > 0) {
+            const bg = this.device.createBindGroup({
+                layout: pipeline.getBindGroupLayout(0),
+                entries,
+            });
+            pass.setBindGroup(0, bg);
+        }
+        pass.dispatchWorkgroups(Math.ceil(count / tgs));
+        pass.end();
+        this.device.queue.submit([encoder.finish()]);
     }
 
     exportScene(): object {

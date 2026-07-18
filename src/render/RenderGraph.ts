@@ -5,12 +5,22 @@ import { ParticleManager } from './ParticleManager';
 import { PipelineDriver, type GeometryHook, type ComputeHook } from './PipelineDriver';
 import { RenderScriptLoader } from './RenderScriptLoader';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
+import { uniformLayouts } from './UniformLayout';
 import { type RenderGraphData, type PhaseMap, type PhaseDecl } from './types';
 import type { RenderTargetDecls } from './rendererDecl';
 import type { ValueContext } from './valueResolver';
-import type { Scene } from '../ecs/Scene';
+import type { Scene, CameraView } from '../ecs/Scene';
+import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const SCREEN = 'screen';
+
+/** Pixel rect for a camera's on-screen viewport (scissor + viewport). */
+interface ViewportRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
 
 /**
  * Data-driven render graph. Owns no per-pipeline draw logic. Each render
@@ -18,7 +28,7 @@ const SCREEN = 'screen';
  * bind groups); a generic PipelineDriver executes it. Pipelines self-declare
  * their phase; render.json is just the load manifest + defaults.
  */
-export class RenderGraph {
+export class RenderGraph implements System {
     name = '';
     phases: PhaseMap = {};
     physics: import('../ecs/PhysicsSystem').PhysicsSystem | null = null;
@@ -36,6 +46,10 @@ export class RenderGraph {
     private format: GPUTextureFormat = 'bgra8unorm';
     private particles = new ParticleManager();
     private sceneIsScreen = true;
+    /** Multi-view split-screen toggle (from render.json `multiView: true`). */
+    private multiView = false;
+    /** Scratch buffer for per-camera UBO uploads in multi-view mode. */
+    private cameraData: Float32Array = new Float32Array(0);
 
     private valueScripts = new Map<string, (ctx: ValueContext) => number[] | number>();
     private geometryHooks = new Map<string, GeometryHook>();
@@ -60,6 +74,10 @@ export class RenderGraph {
     /** Release app-owned state: drivers, escape-hatch hooks, particle GPU buffers.
      *  Common pipelines / shader modules are kept for reuse across apps. */
     exitApp(_appId: string): void {
+        // Drop per-entity bind-group caches promptly (the driver objects will be
+        // GC'd eventually, but explicitly clearing the cache makes the cached
+        // GPUBindGroups dereferenced now rather than after driver GC).
+        for (const d of this.drivers) d.dispose();
         this.drivers = [];
         this.valueScripts.clear();
         this.geometryHooks.clear();
@@ -95,6 +113,7 @@ export class RenderGraph {
             const def = schemaRegistry.getFieldDefault('EnvironmentComponent', 'clearColor') as number[] | undefined;
             if (def) this.clearColor = [def[0], def[1], def[2], def[3]];
         }
+        this.multiView = data.multiView ?? false;
         this.phases = {};
         for (const phase of this.phaseList) {
             const list = data.phases[phase.name] ?? [];
@@ -157,6 +176,30 @@ export class RenderGraph {
                 this.drivers.push(driver);
             }
         }
+
+        // Multi-view cannot share a command buffer with the postprocess ping-pong
+        // chain (each camera owns its own command buffer; the chain routes through
+        // a single shared screen target). Fail loud at compile so the conflict is
+        // surfaced as a config error, not a silent frame drop.
+        if (this.multiView) {
+            const postPhase = this.phaseList.find(p => p.behavior === 'postprocess-chain');
+            const postEnabled = postPhase
+                ? this.drivers.some(d => d.entry.enabled && d.decl.phase === postPhase.name)
+                : false;
+            if (postEnabled) {
+                throw new Error(
+                    `Render graph '${this.name}' declares multiView:true but has an enabled ` +
+                    `postprocess-chain driver in phase '${postPhase!.name}' — these are mutually ` +
+                    `exclusive. Disable multiView or the post-process pipeline.`,
+                );
+            }
+        }
+
+        // Lazily allocate the per-camera UBO scratch buffer now that the camera
+        // layout size is known (from uniform-layouts.json).
+        if (this.multiView && this.cameraData.length === 0) {
+            this.cameraData = uniformLayouts.get('camera').createBuffer();
+        }
     }
 
     /** Try loading a render pipeline from commonBase first, then appBase on 404. */
@@ -189,11 +232,38 @@ export class RenderGraph {
         }
     }
 
+    /** System interface: run the render graph for this frame. */
+    update(ctx: FrameContext): void {
+        this.execute(ctx.device, ctx.context, ctx.format, ctx.scene, ctx.time, ctx.dt);
+    }
+
     execute(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat, scene: Scene, time: number, dt: number): void {
         const tex = context.getCurrentTexture();
         const cw = tex.width;
         const ch = tex.height;
+        const canvasAspect = cw / Math.max(1, ch);
 
+        // Multi-view is opt-in via render.json `multiView: true`. When enabled
+        // AND more than one Camera is active, each camera renders the whole
+        // scene into its own on-screen viewport (Camera.viewport). The shared
+        // camera UBO is re-written per camera, so each camera must own its own
+        // command buffer (writeBuffer → submit) — a single command buffer
+        // cannot safely re-write a shared UBO between render passes.
+        const cameras = scene.getActiveCameras(canvasAspect);
+        const swapView = tex.createView();
+        if (this.multiView && cameras.length > 1) {
+            this.executeMultiView(device, scene, time, dt, cw, ch, format, swapView, cameras);
+            return;
+        }
+        this.executeSingle(device, scene, time, dt, cw, ch, format, swapView);
+    }
+
+    /** Single-camera (or zero-camera) path: the original render-graph execute.
+     *  The camera UBO is assumed already written by CameraSystem.update. */
+    private executeSingle(
+        device: GPUDevice, scene: Scene, time: number, dt: number,
+        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
+    ): void {
         const frame = {
             time, dt, cw, ch,
             physics: this.physics,
@@ -230,15 +300,118 @@ export class RenderGraph {
         this.sceneIsScreen = !hasPost;
 
         // ── group drivers by phase, then by (color,depth) target run ──
-        const swapView = tex.createView();
         const cleared = new Set<string>();
         for (const phase of this.phaseList) {
+            if (phase.behavior === 'shadow-clear') {
+                // Always clear shadow faces (when there are shadow-casting
+                // lights), even if the shadow pipeline is disabled — otherwise
+                // PBR would sample stale depth and shadows would not disappear.
+                this.runShadowPhase(
+                    encoder,
+                    this.drivers.filter(d => d.decl.phase === phase.name),
+                    scene, frame,
+                );
+                continue;
+            }
             const inPhase = this.drivers.filter(d => d.entry.enabled && d.decl.phase === phase.name);
             if (inPhase.length === 0) continue;
-            this.runPhase(encoder, phase, inPhase, scene, frame, cw, ch, format, swapView, cleared);
+            this.runPhase(encoder, phase, inPhase, scene, frame, cw, ch, format, swapView, cleared, null);
         }
 
         device.queue.submit([encoder.finish()]);
+    }
+
+    /** Multi-view path: render every active camera into its own viewport.
+     *  Compute + shadow run once (camera-independent); then per camera:
+     *  write the camera UBO, open one command buffer, run all non-shadow /
+     *  non-postprocess phases with that camera's viewport, submit. */
+    private executeMultiView(
+        device: GPUDevice, scene: Scene, time: number, dt: number,
+        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
+        cameras: CameraView[],
+    ): void {
+        const frame = {
+            time, dt, cw, ch,
+            physics: this.physics,
+            particles: this.particles,
+            splats: this.splats,
+            computePipelines: this.computePipelines,
+        };
+
+        // Multi-view does not support the postprocess chain (it routes through a
+        // single screen target). The scene target IS the screen here. The
+        // conflict is validated out at compile(), so the skip below is defensive.
+        this.sceneIsScreen = true;
+
+        // ── stage 1: compute + shadow (camera-independent), one submit ──
+        const enc0 = device.createCommandEncoder();
+        for (const d of this.drivers) {
+            if (!d.entry.enabled) continue;
+            d.compute(enc0, {
+                scene, time, dt,
+                computePipelines: this.computePipelines,
+                particles: this.particles,
+            });
+        }
+        const shadowPhase = this.phaseList.find(p => p.behavior === 'shadow-clear');
+        if (shadowPhase) {
+            // Pass all shadow-phase drivers (enabled or not); runShadowPhase
+            // picks the first enabled one to record, and clears every face
+            // regardless — so a disabled shadow pipeline yields no shadows.
+            this.runShadowPhase(
+                enc0,
+                this.drivers.filter(d => d.decl.phase === shadowPhase.name),
+                scene, frame,
+            );
+        }
+        device.queue.submit([enc0.finish()]);
+
+        // ── stage 2: one command buffer per camera ──
+        // cleared is shared across cameras so the first camera clears the screen
+        // target and subsequent cameras load it (preserving prior viewports).
+        const cleared = new Set<string>();
+        for (const cam of cameras) {
+            this.writeCameraUBO(cam);
+            // Pixel rect, clamped to the framebuffer so 1px rounding on odd
+            // canvas sizes can't overflow the scissor/viewport (WebGPU validation).
+            let vx = Math.round(cam.viewport[0] * cw);
+            let vy = Math.round(cam.viewport[1] * ch);
+            let vw = Math.round(cam.viewport[2] * cw);
+            let vh = Math.round(cam.viewport[3] * ch);
+            if (vx < 0) { vw += vx; vx = 0; }
+            if (vy < 0) { vh += vy; vy = 0; }
+            if (vx + vw > cw) vw = cw - vx;
+            if (vy + vh > ch) vh = ch - vy;
+            if (vw <= 0 || vh <= 0) continue;
+            const vp: ViewportRect = { x: vx, y: vy, w: vw, h: vh };
+            const enc = device.createCommandEncoder();
+            for (const phase of this.phaseList) {
+                // shadow-clear already ran in stage 1; postprocess-chain is
+                // validated out at compile(). Any other behavior falls through
+                // to runPhase (which itself dispatches by behavior).
+                if (phase.behavior === 'shadow-clear') continue;
+                if (phase.behavior === 'postprocess-chain') continue;
+                const inPhase = this.drivers.filter(d => d.entry.enabled && d.decl.phase === phase.name);
+                if (inPhase.length === 0) continue;
+                this.runPhase(enc, phase, inPhase, scene, frame, cw, ch, format, swapView, cleared, vp);
+            }
+            device.queue.submit([enc.finish()]);
+        }
+    }
+
+    /** Upload one camera's matrices to the shared camera UBO. Used by the
+     *  multi-view path only; the single-camera path relies on CameraSystem.update
+     *  having already written the primary camera's matrices. */
+    private writeCameraUBO(cam: CameraView): void {
+        const buf = this.cameraData;
+        const camLayout = uniformLayouts.get('camera');
+        camLayout.write(buf, 'vp', cam.vp);
+        camLayout.write(buf, 'ivp', cam.ivp);
+        camLayout.write(buf, 'pos', cam.pos);
+        camLayout.write(buf, 'view', cam.view);
+        camLayout.write(buf, 'proj', cam.proj);
+        const ubo = resourceManager.cameraUBO;
+        resourceManager.device.queue.writeBuffer(ubo, 0, buf.buffer, buf.byteOffset, buf.byteLength);
     }
 
     private runPhase(
@@ -254,7 +427,7 @@ export class RenderGraph {
             computePipelines: Map<string, GPUComputePipeline>;
         },
         cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
-        cleared: Set<string>,
+        cleared: Set<string>, viewport: ViewportRect | null,
     ): void {
         // Post-process phase: ping-pong fullscreen chain.
         if (phase.behavior === 'postprocess-chain') {
@@ -294,7 +467,7 @@ export class RenderGraph {
             cleared.add(key);
             this.openPassAndRecord(
                 encoder, colors, depthName, drivers.slice(i, j),
-                scene, frame, cw, ch, format, swapView, clear,
+                scene, frame, cw, ch, format, swapView, clear, viewport,
             );
             i = j;
         }
@@ -304,7 +477,9 @@ export class RenderGraph {
      *  casters into each shadow light's depth face. The ShadowPipeline driver
      *  auto-binds group 0 (frameShadow) and group 1 (object) per entity; the
      *  per-face selector at group 2 (shadowPass) is set here once per pass.
-     *  Each face is cleared via loadOp regardless of whether a driver runs. */
+     *  Each face is cleared via loadOp regardless of whether a driver runs —
+     *  so disabling the shadow pipeline makes shadows disappear (PBR samples
+     *  depth=1 = lit) instead of leaving stale depth from the previous frame. */
     private runShadowPhase(
         encoder: GPUCommandEncoder,
         drivers: PipelineDriver[],
@@ -319,7 +494,9 @@ export class RenderGraph {
     ): void {
         const passes = this.lightSystem?.shadowPassList ?? [];
         if (passes.length === 0) return;
-        const driver = drivers[0];
+        // First ENABLED shadow driver records depth; when none is enabled the
+        // passes still run (clear-only) so consumers read a cleared shadow map.
+        const driver = drivers.find(d => d.entry.enabled);
         const pipeline = driver ? this.pipelines.get(driver.path) : undefined;
         for (let i = 0; i < passes.length; i++) {
             const p = passes[i];
@@ -354,6 +531,7 @@ export class RenderGraph {
             computePipelines: Map<string, GPUComputePipeline>;
         },
         cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView, clear: boolean,
+        viewport: ViewportRect | null,
     ): void {
         const isDepthOnly = colorNames.length === 1 && colorNames[0] === 'none';
 
@@ -380,6 +558,8 @@ export class RenderGraph {
         };
 
         if (depthName && depthName !== 'none') {
+            // Multi-view cameras share the full-screen depth target; scissor
+            // restricts each camera's writes to its own viewport region.
             const depthView = resourceManager.namedDepthTargetView(depthName, cw, ch);
             desc.depthStencilAttachment = {
                 view: depthView,
@@ -390,6 +570,10 @@ export class RenderGraph {
         }
 
         const pass = encoder.beginRenderPass(desc);
+        if (viewport) {
+            pass.setViewport(viewport.x, viewport.y, viewport.w, viewport.h, 0, 1);
+            pass.setScissorRect(viewport.x, viewport.y, viewport.w, viewport.h);
+        }
         for (const d of drivers) {
             const pipeline = this.pipelines.get(d.path);
             if (!pipeline) continue;
@@ -454,7 +638,13 @@ export class RenderGraph {
         for (const phase of this.phaseList) {
             phases[phase.name] = (this.phases[phase.name] ?? []).map(e => ({ ...e }));
         }
-        return { name: this.name, clearColor: [...this.clearColor], phases };
+        return { name: this.name, clearColor: [...this.clearColor], phases, multiView: this.multiView };
+    }
+
+    /** Look up a loaded compute pipeline by name (for script systems that
+     *  want to dispatch their own compute via ctx.dispatchCompute). */
+    getComputePipeline(name: string): GPUComputePipeline | undefined {
+        return this.computePipelines.get(name);
     }
 
     rebuildPipeline(device: GPUDevice, pipelinePath: string): void {

@@ -1,0 +1,10 @@
+{
+    "name": "orbit",
+    "source": "scripts/orbit.js",
+    "components": ["Transform"],
+    "ubos": [],
+    "buffers": [
+        { "name": "orbitScratch", "size": 64, "usage": ["storage", "copy_dst"] }
+    ],
+    "needs": []
+}

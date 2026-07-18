@@ -1,0 +1,6 @@
+{
+  "name": "demo7_multiView",
+  "scene": "scene.json",
+  "render": "render.json",
+  "gltf": ["../../assets/models/DamagedHelmet.glb"]
+}

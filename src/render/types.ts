@@ -112,8 +112,13 @@ export interface BindEntryDecl {
     viewDimension?: GPUTextureViewDimension;
     storageTexture?: { format: GPUTextureFormat; access?: GPUStorageTextureAccess };
     /** Runtime resource name for frame bind group auto-assembly.
-     *  Valid values: "cameraUBO", "lightUBO", "timeInputUBO", "pointShadowFaceUBO",
-     *  "shadowDepth2DArray", "shadowPoint2DArray", "sampler:<samplerName>". */
+     *  - "sampler:<samplerName>" → named sampler from samplers.json
+     *  - "<uboName>" → UBO registered by BufferRegistry (declared via
+     *    system.json `ubos` field, name matches uniform-layouts.json layout)
+     *  - "<storageBufferName>" → storage buffer registered by BufferRegistry
+     *    (declared via system.json `buffers[].name`)
+     *  - "shadowDepth2DArray" / "shadowPoint2DArray" → legacy shadow map views
+     *    (still special-cased pending TextureViewRegistry). */
     resource?: string;
 }
 
@@ -125,8 +130,11 @@ export interface PipelineEntry {
     name: string;
     pipeline: string;
     enabled: boolean;
-    /** Legacy/optional kind hint; compute-only entries may still set "compute". */
-    kind?: 'scene' | 'fullscreen' | 'compute' | 'skybox' | 'grid' | 'physics-debug' | 'particles';
+    /** Legacy/optional kind hint. Loosened from a closed enum to an open
+     *  string so apps can use their own kind tags without TS changes. The
+     *  only special value consumed by the engine is "compute" (loads the
+     *  entry as a compute pipeline instead of a render pipeline). */
+    kind?: string;
     /** Post-process params passed to fullscreenParam bind group. */
     params?: Record<string, number[]>;
     /** Optional texture asset (legacy). */
@@ -142,4 +150,8 @@ export interface RenderGraphData {
     /** Scene pass clear color [r,g,b,a]; defaults to a dark blue if omitted. */
     clearColor?: [number, number, number, number];
     phases: Partial<PhaseMap>;
+    /** Enable multi-view split-screen rendering. When true, every active Camera
+     *  entity renders into its own on-screen `Camera.viewport` rect per frame.
+     *  When false (default), only the primary (first active) Camera renders. */
+    multiView?: boolean;
 }

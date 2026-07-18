@@ -2,6 +2,7 @@ import { defineQuery } from 'bitecs/legacy';
 import { schemaRegistry } from './SchemaRegistry';
 import { resourceManager } from '../render/ResourceManager';
 import type { Scene } from './Scene';
+import type { FrameContext, System } from './SystemRegistry';
 
 interface SheetAnimation {
     name: string;
@@ -33,12 +34,13 @@ interface SheetData {
  *   "loop"     – wrap around (0,1,…,n-1,0,1,…)
  *   "once"     – play forward once then stop (sets playing=0)
  */
-export class AnimationSystem {
+export class AnimationSystem implements System {
     private scene!: Scene;
     private baseDir = '';
     private sheets = new Map<string, SheetData | null>();
     private texHandles = new Map<string, number>();
     private loading = new Set<string>();
+    private texLoading = new Set<string>();
     private initialized = false;
     private query: (w: import('bitecs').World) => readonly number[] = () => [];
 
@@ -54,11 +56,13 @@ export class AnimationSystem {
         this.sheets.clear();
         this.texHandles.clear();
         this.loading.clear();
+        this.texLoading.clear();
         this.initialized = false;
         this.query = () => [];
     }
 
-    update(_time: number, dt: number): void {
+    update(ctx: FrameContext): void {
+        const dt = ctx.dt;
         if (!this.initialized) {
             this.initialized = true;
             const sheetComp = schemaRegistry.get('SpriteSheetComponent');
@@ -78,6 +82,15 @@ export class AnimationSystem {
 
             scene.setField(eid, 'SpriteSheetComponent', 'columns', sheet.columns);
             scene.setField(eid, 'SpriteSheetComponent', 'rows', sheet.rows);
+
+            // Drive the texture load from update() (mirrors getSheet's retry
+            // pattern): if the sheet is loaded but the texture handle is still
+            // missing and no load is in flight, (re)start it. This self-heals
+            // transient texture-load failures (fetch/createImageBitmap hiccups)
+            // instead of leaving the sprite permanently on the white fallback.
+            if (!this.texHandles.has(sheetPath) && !this.texLoading.has(sheetPath)) {
+                this.loadTexture(sheetPath, sheet);
+            }
 
             const handle = this.texHandles.get(sheetPath) ?? 0;
             scene.setField(eid, 'SpriteSheetComponent', 'texHandle', handle);
@@ -157,11 +170,11 @@ export class AnimationSystem {
                 })
                 .then(data => {
                     this.sheets.set(path, data as SheetData);
-                    this.loadTexture(path, data as SheetData);
                 })
                 .catch(err => {
-                    console.error(`[AnimationSystem] failed to load sheet '${path}':`, err);
-                    this.sheets.set(path, null);
+                    console.error(`[AnimationSystem] failed to load sheet '${path}' (will retry):`, err);
+                    // Do NOT cache the failure — leave sheets.get(path) undefined so
+                    // the next update() tick retries (mirrors ScriptSystem's pattern).
                 })
                 .finally(() => { this.loading.delete(path); });
         }
@@ -170,14 +183,24 @@ export class AnimationSystem {
 
     private loadTexture(sheetPath: string, data: SheetData): void {
         const texPath = data.texture;
-        if (!texPath) return;
+        if (!texPath) {
+            // Sheet declares no texture: record handle 0 (white fallback) so
+            // update() does not retry every frame.
+            this.texHandles.set(sheetPath, 0);
+            this.texLoading.delete(sheetPath);
+            return;
+        }
         const texUrl = texPath.startsWith('/') ? texPath : `${this.baseDir}/${texPath}`;
+        this.texLoading.add(sheetPath);
         resourceManager.loadTexture(texUrl)
             .then(() => {
                 this.texHandles.set(sheetPath, resourceManager.textureHandle(texUrl));
             })
             .catch(err => {
-                console.error(`[AnimationSystem] failed to load texture '${texUrl}':`, err);
-            });
+                console.error(`[AnimationSystem] failed to load texture '${texUrl}' (will retry):`, err);
+                // ResourceManager.loadTexture does not cache on failure, so the
+                // next update() tick will re-fetch + re-decode and self-heal.
+            })
+            .finally(() => { this.texLoading.delete(sheetPath); });
     }
 }
