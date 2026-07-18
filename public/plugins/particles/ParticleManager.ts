@@ -1,7 +1,5 @@
-import { resourceManager } from './ResourceManager';
-import { uniformLayouts, type UniformLayout } from './UniformLayout';
-import { quatRotateVec3 } from '../math';
-import type { Scene } from '../ecs/Scene';
+import { resourceManager, uniformLayouts, quatRotateVec3 } from '@shaderlab/api';
+import type { UniformLayout, Scene } from '@shaderlab/api';
 
 const SHAPE_ENUM: Record<string, number> = { point: 0, sphere: 1, box: 2 };
 const FIELD_ENUM: Record<string, number> = { point: 0, vortex: 1, directional: 2, drag: 3 };

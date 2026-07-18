@@ -1,7 +1,6 @@
 import { defineQuery } from 'bitecs/legacy';
 import { resourceManager } from './ResourceManager';
 import { PipelineLoader } from './PipelineLoader';
-import { ParticleManager } from './ParticleManager';
 import { PipelineDriver, type GeometryHook, type ComputeHook } from './PipelineDriver';
 import { RenderScriptLoader } from './RenderScriptLoader';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
@@ -45,7 +44,6 @@ export class RenderGraph implements System, IRenderer {
     private dataBase = '/common';
     private scriptsSubdir = 'scripts';
     private format: GPUTextureFormat = 'bgra8unorm';
-    private particles = new ParticleManager();
     private sceneIsScreen = true;
     /** Multi-view split-screen toggle (from render.json `multiView: true`). */
     private multiView = false;
@@ -65,12 +63,6 @@ export class RenderGraph implements System, IRenderer {
         this.registerPhaseBehavior('normal', normalBehavior, 'engine');
         this.registerPhaseBehavior('shadow-clear', shadowClearBehavior, 'engine');
         this.registerPhaseBehavior('postprocess-chain', postProcessChainBehavior, 'engine');
-    }
-
-    /** Particle manager (engine-owned until the particles plugin lands);
-     *  published to hooks as the 'particles' attachment. */
-    get particleManager(): ParticleManager {
-        return this.particles;
     }
 
     /** Register a pass strategy under a behavior name (phases.json `behavior`). */
@@ -138,7 +130,6 @@ export class RenderGraph implements System, IRenderer {
         for (const d of this.drivers) d.dispose();
         this.drivers = [];
         this.removeHooksByOwner('app');
-        this.particles.clear();
     }
 
     /** Names of render escape-hatch scripts to load at compile (e.g. "render/pbr.js"). */

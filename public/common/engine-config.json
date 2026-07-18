@@ -6,5 +6,7 @@
     "computeTgs": 64,
     "alphaMode": "premultiplied",
     "systemOrder": ["input", "script", "physics", "camera", "light", "animation", "render"],
-    "scriptHooks": ["init", "update"]
+    "scriptHooks": ["init", "update"],
+    "pluginsRoot": "/plugins",
+    "plugins": ["particles"]
 }

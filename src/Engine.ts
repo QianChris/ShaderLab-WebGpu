@@ -251,7 +251,6 @@ export class Engine {
         this.physicsSystem = new PhysicsSystem();
         this.physicsSystem.attach(this.scene, this.eventBus);
         this.setAttachment('physics', this.physicsSystem, 'engine');
-        this.setAttachment('particles', this.renderGraph.particleManager, 'engine');
         this.cameraSystem = new CameraSystem();
         this.cameraSystem.attach(this.scene);
         this.lightSystem = new LightSystem();

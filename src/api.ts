@@ -50,8 +50,8 @@ export type {
 /* ── Render mechanisms (usage surface) ─────────────────────────── */
 export { resourceManager } from './render/ResourceManager';
 export { bufferRegistry } from './render/BufferRegistry';
-export { uniformLayouts } from './render/UniformLayout';
-export type { UniformLayoutDecls } from './render/UniformLayout';
+export { uniformLayouts, UniformLayout } from './render/UniformLayout';
+export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './render/UniformLayout';
 export { PipelineLoader } from './render/PipelineLoader';
 export { VERTEX_SLOTS, SLOT_ORDER, isSlotName } from './render/vertexSlots';
 export type { SlotName, SlotDef, VertexSlotDecls } from './render/vertexSlots';
