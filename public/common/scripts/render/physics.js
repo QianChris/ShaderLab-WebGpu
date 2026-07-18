@@ -3,7 +3,7 @@
 // Group 0 (frame) is already bound by the render graph.
 
 export function debug(pass, ctx) {
-    const physics = ctx.physics;
+    const physics = ctx.attachments.physics;
     if (!physics) return;
     const count = physics.debugVertexCount;
     if (count === 0 || !physics.debugPosBuffer || !physics.debugColBuffer) return;

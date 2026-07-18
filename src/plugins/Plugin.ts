@@ -9,9 +9,11 @@ import type {
     PipelineConfig,
     ComputePipelineConfig,
     PhaseDecl,
+    PhaseBehavior,
     VertexInputDecls,
     BindLayoutDecls,
     SamplerDecls,
+    IRenderer,
 } from '../render/types';
 import type { RenderTargetDecls } from '../render/rendererDecl';
 import type { GeometryHook, ComputeHook } from '../render/PipelineDriver';
@@ -52,6 +54,8 @@ export interface PluginContext {
     engineConfig: EngineConfig;
     /** '/plugins/<id>' — base for fetching co-located assets. */
     baseUrl: string;
+    /** The active renderer (built-in RenderGraph unless replaced). */
+    renderer: IRenderer;
 
     /** Register a frame system under `name` (referenced by systems.json). */
     registerSystem(name: string, sys: System): void;
@@ -60,9 +64,13 @@ export interface PluginContext {
     /** Register a render escape-hatch hook addressable as `script:<name>`
      *  (value / geometry / compute — same name space as renderScripts). */
     registerRenderHook(name: string, fn: GeometryHook | ComputeHook | ValueHook): void;
+    /** Register a pass-execution strategy (phases.json `behavior` names it). */
+    registerPhaseBehavior(name: string, behavior: PhaseBehavior): void;
     registerMeshGenerator(name: string, fn: MeshGenerator): void;
     registerToolType(name: string, factory: ToolFactory): void;
     registerValueAtoms(ns: string, atoms: Record<string, AtomResolver>): void;
+    /** Renderer seam: replace the whole renderer (rare; see IRenderer). */
+    replaceRenderer(renderer: IRenderer): void;
 
     /** Cross-plugin collaboration: look up a system registered by any plugin.
      *  Contract is structural — declare a local interface for what you need. */

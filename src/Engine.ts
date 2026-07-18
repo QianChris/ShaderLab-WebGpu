@@ -22,7 +22,7 @@ import { GaussianSplatManager } from './render/GaussianSplatManager';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
 import RAPIER from '@dimforge/rapier3d-compat';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
-import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl } from './render/types';
+import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl, IRenderer } from './render/types';
 
 interface GltfMapping {
     transform: { component: string; fields: Record<string, string> };
@@ -126,8 +126,13 @@ export class Engine {
     currentApp: string | null = null;
     /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
     attachments = new Map<string, { obj: unknown; owner: string }>();
+    /** Plain-object view of attachments handed to FrameContext / hooks. */
+    private attachmentsView: Record<string, unknown> = {};
     /** Per-plugin registration ledger (for owner sweeps of open registries). */
     private pluginLedgers = new Map<string, PluginLedger>();
+    /** Replacement renderer installed via ctx.replaceRenderer (null = built-in). */
+    private customRenderer: IRenderer | null = null;
+    private customRendererOwner: string | null = null;
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
@@ -245,12 +250,12 @@ export class Engine {
         this.inputSystem.attach();
         this.physicsSystem = new PhysicsSystem();
         this.physicsSystem.attach(this.scene, this.eventBus);
-        this.renderGraph.physics = this.physicsSystem;
+        this.setAttachment('physics', this.physicsSystem, 'engine');
+        this.setAttachment('particles', this.renderGraph.particleManager, 'engine');
         this.cameraSystem = new CameraSystem();
         this.cameraSystem.attach(this.scene);
         this.lightSystem = new LightSystem();
         this.lightSystem.attach(this.scene);
-        this.renderGraph.lightSystem = this.lightSystem;
         this.animationSystem = new AnimationSystem();
         this.animationSystem.attach(this.scene);
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
@@ -299,9 +304,20 @@ export class Engine {
             eventBus: this.eventBus,
             engineConfig: this.engineConfig,
             baseUrl,
+            renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
-            registerAttachment: (name, obj) => { this.attachments.set(name, { obj, owner }); },
+            registerAttachment: (name, obj) => this.setAttachment(name, obj, owner),
             registerRenderHook: (name, fn) => this.registerRenderHook(name, fn, owner),
+            registerPhaseBehavior: (name, behavior) => this.renderGraph.registerPhaseBehavior(name, behavior, owner),
+            replaceRenderer: (r) => {
+                // Renderer seam: swap the 'render' system dispatch target. The
+                // built-in graph stays idle; data-plane calls (loadRenderGraphData,
+                // editor) keep targeting the replacement via Engine.renderer.
+                this.customRenderer = r;
+                this.customRendererOwner = owner;
+                systemRegistry.unregisterBuiltin('render');
+                systemRegistry.registerBuiltin('render', r, owner);
+            },
             registerMeshGenerator: (name, fn) => {
                 registerMeshGenerator(name, fn);
                 ledger.generators.push(name);
@@ -406,8 +422,15 @@ export class Engine {
         PipelineLoader.removeInputsByOwner(owner);
         PipelineLoader.removeBlendPresetsByOwner(owner);
         this.renderGraph.removeHooksByOwner(owner);
+        this.renderGraph.removePhaseBehaviorsByOwner(owner);
+        if (this.customRendererOwner === owner) {
+            // The replacement renderer is gone — restore the built-in graph.
+            this.customRenderer = null;
+            this.customRendererOwner = null;
+            systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
+        }
         for (const [name, entry] of this.attachments) {
-            if (entry.owner === owner) this.attachments.delete(name);
+            if (entry.owner === owner) this.deleteAttachment(name);
         }
         const ledger = this.pluginLedgers.get(owner);
         if (ledger) {
@@ -440,8 +463,24 @@ export class Engine {
         }
     }
 
+    /** The active renderer: a plugin replacement when installed, else the built-in graph. */
+    get renderer(): IRenderer {
+        return this.customRenderer ?? this.renderGraph;
+    }
+
     private aspect(): number {
         return this.canvas.width / Math.max(1, this.canvas.height);
+    }
+
+    /** Publish an opaque object under `name` (owner-tagged for sweeps). */
+    setAttachment(name: string, obj: unknown, owner: string): void {
+        this.attachments.set(name, { obj, owner });
+        this.attachmentsView[name] = obj;
+    }
+
+    deleteAttachment(name: string): void {
+        this.attachments.delete(name);
+        delete this.attachmentsView[name];
     }
 
     loadSceneData(json: SceneData): void {
@@ -589,7 +628,7 @@ export class Engine {
             resourceManager.enterApp(name);
             const mgr = new GaussianSplatManager();
             this.gaussianSplatManager = mgr;
-            this.renderGraph.splats = mgr;
+            this.setAttachment('splats', mgr, 'engine');
             systemRegistry.registerBuiltin('gaussianSplat', mgr);
             await mgr.loadFromScene(this.scene, base);
         }
@@ -628,7 +667,7 @@ export class Engine {
         this.physicsSystem.reset();
         this.gaussianSplatManager?.dispose();
         this.gaussianSplatManager = null;
-        this.renderGraph.splats = null;
+        this.deleteAttachment('splats');
         systemRegistry.unregisterBuiltin('gaussianSplat');
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
@@ -689,14 +728,8 @@ export class Engine {
             context: this.context,
             format: this.format,
             eventBus: this.eventBus,
-            physics: this.physicsSystem,
-            camera: this.cameraSystem,
-            light: this.lightSystem,
-            animation: this.animationSystem,
-            input: this.inputSystem,
-            script: this.scriptSystem,
-            splats: this.gaussianSplatManager,
-            renderGraph: this.renderGraph,
+            attachments: this.attachmentsView,
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
             // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
             getBuffer: (name: string) => bufferRegistry.get(name),
             writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),

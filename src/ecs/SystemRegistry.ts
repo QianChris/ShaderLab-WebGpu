@@ -1,24 +1,14 @@
 import type { Scene } from './Scene';
 import type { EventBus } from '../events/EventBus';
-import type { InputSystem } from './InputSystem';
-import type { ScriptSystem } from './ScriptSystem';
-import type { PhysicsSystem } from './PhysicsSystem';
-import type { CameraSystem } from './CameraSystem';
-import type { LightSystem } from './LightSystem';
-import type { AnimationSystem } from './AnimationSystem';
-import type { RenderGraph } from '../render/RenderGraph';
-import type { GaussianSplatManager } from '../render/GaussianSplatManager';
 import type { SystemEntry } from '../Engine';
 
 /**
- * Ambient frame state passed to every System.update(). Built-in systems pull
- * what they need from this single context object; cross-system references
- * (camera/light/physics/…) are exposed transitively for systems that read
- * another system's output (e.g. gaussianSplat reads camera.lastView).
- *
- * The cross-system fields are transitional — once a script system can register
- * itself and be looked up by name, the hard-typed fields will be replaced by
- * `systemRegistry.get(name)`.
+ * Ambient frame state passed to every System.update(). Contains only engine
+ * mechanisms — no concrete system types. Cross-system references go through
+ * `getSystem(name)` with structural typing at the call site, and opaque
+ * plugin-published objects travel in `attachments`. This keeps the engine
+ * free of compile-time dependencies on any system implementation (systems
+ * are plugin-provided).
  */
 export interface FrameContext {
     scene: Scene;
@@ -32,28 +22,19 @@ export interface FrameContext {
     context: GPUCanvasContext;
     format: GPUTextureFormat;
     eventBus: EventBus;
-    physics: PhysicsSystem;
-    camera: CameraSystem;
-    light: LightSystem;
-    animation: AnimationSystem;
-    input: InputSystem;
-    script: ScriptSystem;
-    splats: GaussianSplatManager | null;
-    renderGraph: RenderGraph;
+    /** Opaque objects published by plugins via ctx.registerAttachment
+     *  (e.g. 'particles', 'physics', 'splats'). */
+    attachments: Record<string, unknown>;
+    /** Cross-system lookup. Declare a local structural interface for the
+     *  fields you consume; missing system → null (caller decides severity). */
+    getSystem<T = System>(name: string): T | null;
 
     /* ── Script-system GPU access ──────────────────────────────────────
      * The following helpers expose BufferRegistry + compute dispatch to
      * script-loaded systems (`source: "scripts/x.js"`). They let a user
      * write a JS system that writes to declared UBOs/storage buffers and
      * dispatches compute pipelines — no TypeScript changes required to
-     * add a new GPU-driven simulation system.
-     *
-     * Limitations (Step 6 minimal):
-     *   - dispatchCompute opens its own command encoder + submit (slow path);
-     *     lifting the encoder to frame scope for batched compute is a future
-     *     refactor (see PLAN.md Step 6).
-     *   - bind groups for dispatched compute must be passed in by the script
-     *     (no auto-assembly from a layout). */
+     * add a new GPU-driven simulation system. */
 
     /** Look up a named GPU buffer (UBO or storage) declared by a system.json
      *  `ubos` / `buffers` field. The buffer is allocated by BufferRegistry. */

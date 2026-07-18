@@ -20,6 +20,12 @@ const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0
  * the splat referenced by a GsComponent entity via load() and disposes on app
  * switch.
  */
+/** Structural contract for the camera system fields the splat sort consumes. */
+interface CameraFeed {
+    lastView: Float32Array | null;
+    lastPos: Float32Array | null;
+}
+
 export class GaussianSplatManager implements System {
     count = 0;
     ready = false;
@@ -83,8 +89,10 @@ export class GaussianSplatManager implements System {
     /** System interface: refresh model UBO + re-sort splats against the active camera. */
     update(ctx: FrameContext): void {
         if (this.entityEid === null) return;
+        const camera = ctx.getSystem<CameraFeed>('camera');
+        if (!camera) throw new Error(`gaussianSplat requires the 'camera' system (splat sort reads its view matrix)`);
         this.setModel(ctx.scene.getModelMatrix(this.entityEid), ctx.cw, ctx.ch);
-        this.sort(ctx.camera.lastView, ctx.camera.lastPos);
+        this.sort(camera.lastView, camera.lastPos);
     }
 
     /** Scan the scene for GsComponent entities and load each one's PLY asset.

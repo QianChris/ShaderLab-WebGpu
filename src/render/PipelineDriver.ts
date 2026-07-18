@@ -19,9 +19,8 @@ export interface GeometryHookContext {
     dt: number;
     cw: number;
     ch: number;
-    physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-    particles: import('./ParticleManager').ParticleManager;
-    splats: import('./GaussianSplatManager').GaussianSplatManager | null;
+    /** Opaque plugin-published objects (registerAttachment): particles/physics/splats/…. */
+    attachments: Record<string, unknown>;
     computePipelines: Map<string, GPUComputePipeline>;
 }
 
@@ -31,7 +30,8 @@ export interface ComputeHookContext {
     time: number;
     dt: number;
     computePipelines: Map<string, GPUComputePipeline>;
-    particles: import('./ParticleManager').ParticleManager;
+    /** Opaque plugin-published objects (registerAttachment). */
+    attachments: Record<string, unknown>;
     /** Extra pipeline names declared on the entry (e.g. particle emit/sim). */
     aux: Record<string, string | undefined>;
     /** Look up compute pipeline metadata (workgroupSize, bindings) by config path. */
@@ -116,13 +116,7 @@ export class PipelineDriver {
         pass: GPURenderPassEncoder,
         scene: Scene,
         pipeline: GPURenderPipeline,
-        frame: {
-            time: number; dt: number; cw: number; ch: number;
-            physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-            particles: import('./ParticleManager').ParticleManager;
-            splats: import('./GaussianSplatManager').GaussianSplatManager | null;
-            computePipelines: Map<string, GPUComputePipeline>;
-        },
+        frame: import('./types').DriverFrame,
     ): void {
         const geom = this.decl.geometry;
         const entities = this.query ? this.query(scene.world) : [];
@@ -150,8 +144,7 @@ export class PipelineDriver {
             hook(pass, {
                 scene, entities, pipeline,
                 time: frame.time, dt: frame.dt, cw: frame.cw, ch: frame.ch,
-                physics: frame.physics, particles: frame.particles,
-                splats: frame.splats,
+                attachments: frame.attachments,
                 computePipelines: frame.computePipelines,
             });
             return;

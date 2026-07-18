@@ -5,7 +5,7 @@
 // opaque meshes (Opaque phase) correctly occlude / are occluded by splats.
 
 export function draw(pass, ctx) {
-    const splats = ctx.splats;
+    const splats = ctx.attachments.splats;
     if (!splats || !splats.ready || splats.count === 0) return;
     const bg = splats.bindGroup();
     if (!bg) return;
