@@ -1,5 +1,32 @@
 # PLAN_Plugin.md — 插件化整改（v4：内置 Renderer + 虚接口反转）
 
+## 执行状态（2026-07）
+
+| 阶段 | 状态 | Commits |
+| --- | --- | --- |
+| A1 api 面 + 构建管道 | ✅ | `8c3f64e` |
+| A2 基类 + PluginManager 装载链 + Engine 接线 | ✅ | `87a0990` |
+| A3 Schema/UniformLayout/vertexSlots owner 化 | ✅ | `622f426` |
+| A4 全注册表 owner 化 + 插件资源作用域 + ledger | ✅ | `3e3c90e` |
+| A5 接口反转（FrameContext 去类型化、PhaseBehavior、IRenderer） | ✅ | `89c48e5` |
+| A6 首个真插件 orbit + demo8 迁移 + 冒烟/校验脚本 | ✅ | `2180dca` |
+| B1 particles 插件化 | ✅ | `1f6b46a` |
+| B2 splat 插件化（Engine 特判清零） | ✅ | `c32e41a` |
+| B3 physics 插件化（RAPIER 入插件、pick 工具随迁） | ✅ | `9e9021d` |
+| C1 六个核心系统迁 core 插件、builtin: 退役 | ✅ | `92dd1d9` |
+| C2 12 个声明 JSON 迁 core 插件 | ✅ | `707fac8` |
+| C3 pipelines/shaders/hooks 按归属分发、common 退役为组合层 | ✅ | `7c13363` |
+| C4 清理 + 文档（AGENTS.md 重写、计划勾账） | ✅ | 本 commit |
+| Phase D（热重载 / CI / 编辑器插件面板 / npm 依赖开放 / IRenderer 示范） | ⏳ 未开始 | — |
+
+已知残留（记录在案，非阻塞）：
+- `common/` 仍保留组合层与共享资产：engine-config.json、systems.json（默认顺序）、gltf-mapping.json、textures/（`asset:` 引用按 dataRoot 解析）。
+- `PRESET_MESHES`/`PRESET_PBR_MESHES`（triangle/cube 等生成器直出网格）仍在引擎 Primitives.ts 注册（meshGenerators 注册表本身是机制；预置项是 core 的候选迁移物）。
+- app 级 `renderScripts` 逃生舱机制保留（RenderScriptLoader），但 common/scripts 已清空，官方 hook 全部由插件 `renderHooks` 提供。
+- 浏览器端全链路（Blob import / dev `/src/api.ts` 单例 / prod engine-api.js）已按标准行为实现并有 Node 冒烟覆盖，但**未经真实浏览器手测**——首次 `npm run dev` 跑 8 个 demo 是下一步必做验证。
+
+---
+
 ## 设计公理（用户裁定）
 
 1. **插件易用性 > 纯数据驱动纯度**。简单场景纯 JSON 组合已有插件；复杂场景用户写 TS 插件（schema + 行为）。

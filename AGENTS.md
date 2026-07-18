@@ -2,250 +2,130 @@
 
 ## 项目目标
 
-构建一个**数据驱动的图形引擎**。所有渲染管线、组件结构、场景数据均由 JSON 配置文件驱动，运行时从 `public/common/` 加载，无需硬编码。核心原则：**配置即逻辑，数据即场景**。
+**插件驱动的图形引擎**。引擎（src/）只提供**机制**（ECS 存储、渲染图执行器、GPU 资源管理、插件装载器、注册表）；一切**能力**（系统、组件 Schema、管线、着色器、相位、工具、渲染 hook）来自 `public/plugins/<id>/` 下的**运行时装载插件**；一切**组合**（选插件、排系统顺序、摆场景、挂管线）是 `public/apps/<name>/` 与 `public/common/` 下的纯 JSON。
 
-引擎 TS 代码只提供**机制**（解析器、调度器、执行器），不提供**内容**（固定值、闭枚举、固定流程分支）。所有可变参数、资源规格、执行顺序、绘制流程均由 JSON 声明。
+三条硬规则：
+1. **引擎不依赖任何插件**：src/ 对 public/plugins/ 零 import、零类型引用。引擎→插件调用只经虚接口（`System`/`PhaseBehavior`/hook/`ToolFactory`/`MeshGenerator`/`AtomResolver`/`IRenderer`/生命周期）+ 注册表分发；插件→引擎只 import `@shaderlab/api` 一个面（运行时被重写到 dev `/src/api.ts` / prod `/assets/engine-api.js`）。
+2. **所有插件平等**：无 `builtin:` 特权。core（六个基线系统）与用户插件走同一条装载链。
+3. **fail-loud**：缺文件、重名声明、未注册的 system/behavior/hook/组件一律 throw，不静默回退。
 
-## 构建 / 运行 / 测试
+## 构建 / 运行 / 校验
 
-| 命令               | 用途                                         |
-| ------------------ | -------------------------------------------- |
-| `npm run dev`      | 启动 Vite 开发服务器（自动打开浏览器）       |
-| `run.bat`          | Windows 下等同于 `npm run dev`               |
-| `npm run build`    | `tsc` 类型检查，然后 `vite build` 到 `dist/` |
-| `npm run preview`  | 本地预览生产构建                             |
+| 命令 | 用途 |
+| --- | --- |
+| `npm run dev` / `run.bat` | Vite 开发服务器 |
+| `npm run build` | `tsc`（src/ 类型检查）+ `vite build`（产出 main + 固定名 `assets/engine-api.js`） |
+| `npm run check:plugins` | `tsc -p public/plugins`（插件 TS 类型检查，经 `@shaderlab/api`→src 源码映射） |
+| `node scripts/validate-config.mjs` | 静态校验组合层（场景组件、管线引用、hook 可达、插件存在等） |
+| `node scripts/smoke-plugin-loader.mjs` | Node 冒烟：对真实插件跑 转译→import 重写→装载→实例化 全链 |
 
-当前**没有配置测试运行器、Linter 或格式化工具**。唯一的静态检查是 `tsc`（通过 `npm run build`）。添加新代码后，至少确保 `npm run build` 通过。
+**改完任何代码后至少跑 build + check:plugins + validate + smoke 四件套。** 无 Linter/格式化工具/浏览器测试自动化。
 
-## 项目架构
-
-深度设计文档见 `ARCHITECTURE.md`（子系统细节）。以下是 agent 常踩坑的结构要点。
+## 目录结构
 
 ```
-src/
-  main.ts             入口 — 启动引擎、两个编辑器面板、标签页、渲染循环
-  Engine.ts           核心协调器：GPU 初始化 + 装配所有系统 + 帧循环（system order 由 engine-config.json 驱动）
-  math.ts             mat4 / TRS / 相机矩阵纯函数
-  ecs/
-    Scene.ts          bitecs world 封装、实体 CRUD、字段读写、相机矩阵
-    SchemaRegistry.ts  组件 Schema 注册表（模块单例）
-    ScriptSystem.ts    .js 资产脚本（hooks 由 engine-config.json 声明）
-    InputSystem.ts     指针/键盘输入 → EventBus + TimeInput UBO
-    PhysicsSystem.ts   Rapier3D 物理（Transform ↔ 刚体同步、射线拾取、debug draw）
-    CameraSystem.ts    收集 active Camera → cameraUBO（布局由 uniform-layouts.json 声明）
-    LightSystem.ts     收集 LightComponent + ambient → lightUBO（含 shadow viewProj）
-    AnimationSystem.ts 关键帧动画资产系统（setBaseDir/clear，assets 相对 app base）
-  render/
-    types.ts          渲染图 / 管线类型定义（PhaseDecl、PipelineEntry、ComputeBindingDecl 等）
-    rendererDecl.ts   renderer 声明块类型（geometry/steps/bindings/compute 等）
-    RenderGraph.ts    渲染图执行引擎（相位调度由 phases.json 驱动）
-    ResourceManager.ts GPU 资源管理（模块单例）
-    PipelineLoader.ts  从 JSON 加载渲染 / 计算管线（含 blend-presets 加载）
-    UniformLayout.ts  std140 uniform 块布局（模块单例 uniformLayouts，支持 write/writeU32）
-    Primitives.ts     网格生成器 + meshGenerators 注册表
-    vertexSlots.ts    SoA 顶点槽定义（从 vertex-slots.json 加载）
-    PipelineDriver.ts 声明式管线执行器（draw steps、bind groups）
-    ParticleManager.ts GPU 粒子系统（UBO 布局由 uniform-layouts.json 声明）
-    GaussianSplatManager.ts 3DGS 高斯泼溅管理器（PLY→storage buf + radix 排序 + model UBO）
-    RenderScriptLoader.ts 渲染逃生舱脚本加载器
-    valueResolver.ts  值源 mini-DSL（pack/const/script/transform/builtin/tag）
-  events/
-    EventBus.ts       轻量发布订阅（on/emit）
-    eventTypes.ts     事件类型常量集中定义（EVENT_TYPES）
-  tools/              可选交互工具（ToolSystem + SceneTool + PickTool）
-  gltf/               GltfLoader（.glb → 网格 + PBR 材质 + 纹理）
-  gs/                 3DGS PLY 解析器（SplatLoader.ts → centers/colors/covariances GPU 数组）
-  editor/
-    EditorPanel.ts    场景编辑器面板；PipelinePanel.ts 渲染图面板；dom.ts 工厂
-  types/bitecs-legacy.d.ts  bitecs/legacy 环境类型声明
-public/
-  common/             引擎共用资产（所有 app 共享）
-    engine-config.json  引擎级配置（路径、默认 app、computeTgs、alphaMode、systemOrder、scriptHooks）
-    components.json   ECS 组件 Schema 定义（基础集，app 可 loadMore 追加）
-    phases.json       渲染相位定义（name + order + behavior）
-    vertex-slots.json SoA 顶点槽定义（location/format/stride/components）
-    vertex-inputs.json 命名顶点输入布局（管线 vertex.input 引用）
-    bind-layouts.json  命名 GPUBindGroupLayout（管线 bindLayout 引用）
-    uniform-layouts.json 命名 uniform 块布局（含 camera/light/timeInput/particle* 引擎 UBO）
-    samplers.json     命名 GPUSampler 描述符（fail-loud：未声明则 throw）
-    render-targets.json 命名 render target（color/depth + size 声明 + transient 标志）
-    blend-presets.json 命名混合状态（opaque/alpha/additive，可扩展）
-    fallback-textures.json 命名 1x1 fallback 纹理（white/normal，可扩展）
-    vbo-presets.json  命名 VBO（quad 等）
-    meshes.json       预置网格目录（name + generator + params）
-    gltf-mapping.json glTF → 组件字段映射声明
-    systems.json      声明式 system 有序清单（name + def 指向 systems/<name>.json，数组顺序=帧运行顺序；app 可覆盖）
-    systems/*.json    system 定义（source/components/ubos/buffers/needs）
-    pipelines/*.json   管线配置（渲染 + 计算，内嵌 renderer 声明块）
-    shaders/*.wgsl     WGSL 着色器
-    scripts/render/*.js 渲染逃生舱脚本（value/geometry/compute 钩子）
-    textures/*.png     纹理资产
-  apps/<name>/        app-specific 资产（每个 demo 一套）
-    app.json          app 清单（components/scene/render/systems/tools/gltf 声明）
-    scene.json        场景实体数据
-    render.json       渲染图配置（加载清单 + renderScripts + clearColor + post-process input/output）
-    systems.json      app system 顺序覆盖（整体取代 common 列表；缺失 = 用 common 默认）
-    systems/*.json    app 专属 system 定义（如 demo6 的 gaussianSplat）
-    tools.json        可选交互工具配置（缺失 = 无工具，全部 opt-in）
-    components.json   app 追加的组件定义（可选，如 demo6 的 GsComponent）
-    scripts/*.js       app 脚本资产（导出 update(ctx)）
-assets/               源素材（glb/skybox）— 不会被 serve！必须复制到 public/ 下才能加载
+src/                          引擎 = 宿主 + 机制（对插件零知识）
+  main.ts                     入口：Engine + 两个编辑器面板 + rAF
+  Engine.ts                   宿主：GPU 初始化、engine-config、插件装卸编排、app 装卸、
+                              帧循环（时间 + FrameContext 组装 + systems.json 顺序分发）、
+                              attachments 表、插件 ctx/声明注入/owner 清扫、loadGltf
+  api.ts                      @shaderlab/api 唯一公开面（基类+类型+机制单例+math+RAPIER/bitecs 再导出）
+  plugins/
+    Plugin.ts                 EnginePlugin 基类 + PluginContext + 声明字段类型
+    PluginManager.ts          装载链：fetch → sucrase 剥类型 → es-module-lexer 重写 import
+                              （相对→Blob 递归；@shaderlab/api→api URL；裸导入 throw）→
+                              Blob import → meta.dependencies 拓扑 → init/applyDecls/setup；
+                              卸载：teardown → 各注册表按 owner 'plugin:<id>' 清扫
+  ecs/                        Scene(bitecs 封装) / SchemaRegistry / SystemRegistry / （皆 owner 化）
+  render/                     RenderGraph(相位调度执行器) / PipelineDriver(声明式 draw) /
+                              PipelineLoader(管线编译，含 '<plugin>:' 虚拟/文件源) /
+                              ResourceManager(GPU 资源+owner) / UniformLayout(std140) /
+                              vertexSlots / valueResolver(mini-DSL) / phaseBehaviors(默认三行为) /
+                              BufferRegistry / RenderScriptLoader(app 级逃生舱，官方 hook 已插件化)
+  tools/ ToolSystem(机制) + SceneTool 类型      events/ EventBus + EVENT_TYPES
+  gltf/ GltfLoader            editor/ 面板（读注册表，纯 DOM）
 
-app 切换：URL `?app=<name>`（默认由 engine-config.json 的 defaultApp 指定）；引擎 `loadApp(name)` 读 `/apps/<name>/app.json`。
-common 资产始终从 `/common/` 加载，app 资产从 `/apps/<name>/` 加载。
-scene 里 ScriptComponent.script 用 web 根绝对路径（如 `apps/demo2/scripts/game.js`）。
+public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发，改动无需重构引擎）
+  index.ts                    default export class extends EnginePlugin；meta.id=目录名
+  tsconfig.json               (根目录级) paths 映射 @shaderlab/api → ../../src/api.ts
+  core/                       基线：input/script/camera/light/animation/render(薄包装) 六系统 +
+                              12 个声明 JSON(components/uniform-layouts/bind-layouts/vertex-slots/
+                              vertex-inputs/samplers/blend/fallback/vbo/meshes/render-targets/phases，
+                              init() fetch 共置文件) + 12 条管线 + WGSL + params hook
+  physics/                    Rapier：PhysicsSystem + PickTool('pick' 工具) + debug 管线/hook；
+                              RAPIER.init() 在 setup（不载即不付 WASM 成本）
+  particles/                  ParticleManager('particles' attachment) + 3 管线 + hooks
+  splat/                      3DGS：GaussianSplatManager + SplatLoader + GsComponent +
+                              gaussianSplat 系统 + splat.draw hook（app 级，demo6 声明）
+  orbit/                      示例：自定义组件 + OrbitSystem（demo8 声明）
+
+public/common/                组合层残留：engine-config.json（含 pluginsRoot + plugins 引擎级清单）、
+                              systems.json（默认帧顺序，bare name 数组）、gltf-mapping.json、textures/
+public/apps/<name>/           app：app.json（plugins/components/scene/render/systems/tools/gltf）、
+                              scene.json、render.json（管线清单，'<plugin>:pipelines/X.json' 引用）、
+                              systems.json（顺序覆盖）、tools.json、scripts/、私有 pipelines/shaders
 ```
 
-
-## TypeScript / 代码风格
-
-### 导入
-
-- **仅相对导入** — 没有配置路径别名（`@/` 等）。
-- 类型专用导入使用 `import type`：
-  ```ts
-  import type { Scene } from '../ecs/Scene';
-  import { Engine } from './Engine';
-  ```
-- 导入顺序：外部库 → 内部模块 → 类型专用导入。
-
-### 格式化
-
-- **4 空格缩进**（不用 Tab）。
-- 字符串使用**单引号**，语句末尾必须有分号。
-- 多行对象/数组末尾加逗号。
-- 行宽无硬限制，但建议保持在 ~120 列以内。
-
-### 类型
-
-- **`interface`** 用于数据结构和配置对象（如 `FieldDef`、`PipelineConfig`）。
-- **`type`** 仅用于联合类型或映射/记录类型（如 `SceneData`）。
-- 尽量避免 `any`，优先用 `unknown` + 类型守卫。
-- 类型断言使用 `as`（禁止尖括号写法）。
-- 非空断言 `!` 用于在 `init()` 方法中初始化的字段（两阶段初始化模式）。
-
-### 命名
-
-| 分类           | 命名规范                  | 示例                          |
-| -------------- | ------------------------- | ----------------------------- |
-| 类             | PascalCase                | `RenderGraph`、`Engine`       |
-| 接口           | PascalCase                | `PipelineConfig`              |
-| 变量/参数      | camelCase                 | `errorEl`、`entityData`       |
-| 模块单例       | camelCase export const    | `resourceManager`、`schemaRegistry` |
-| 常量           | UPPER_SNAKE_CASE          | `CENTERED_TRI`、`EDGE_SEGMENTS` |
-| 文件名（类）   | PascalCase                | `RenderGraph.ts`、`Engine.ts` |
-
-### 类结构
-
-成员排列顺序：公有字段 → 私有字段 → 构造函数 → 公有方法 → 私有方法。公有方法不显式写 `public`（默认即公有）。
+## 插件写法（用户视角）
 
 ```ts
-export class Example {
-    device!: GPUDevice;          // ! 表示两阶段初始化
-    private canvas: HTMLCanvasElement;
+// public/plugins/myfx/index.ts —— 目录名 = meta.id，engine 零改动
+import { EnginePlugin, type PluginContext, type FrameContext } from '@shaderlab/api';
 
-    constructor(canvas: HTMLCanvasElement) { ... }
+class MySystem { update(ctx: FrameContext): void { /* TS，补全+check:plugins */ } }
 
-    async init(): Promise<void> { ... }
-
-    private frame = (): void => { ... };  // 箭头函数绑定 this 给 rAF 回调
+export default class MyFxPlugin extends EnginePlugin {
+    readonly meta = { id: 'myfx', dependencies: ['core'] };
+    components = [{ name: 'MyComponent', fields: { speed: { type: 'f32', default: 1 } } }];
+    // 可选声明字段：uniformLayouts/bindLayouts/pipelines('myfx:Name')/shaders/phases/
+    // renderTargets/samplers/blendPresets/fallbackTextures/vboPresets/meshes/systemDefs/
+    // renderHooks('myfx.draw')/meshGenerators/toolTypes/valueAtoms —— TS 字面量或 init() fetch 共置 JSON
+    setup(ctx: PluginContext): void { ctx.registerSystem('myfx', new MySystem()); }
+    // 生命周期：init(声明注入前) / setup(依赖就绪) / appLoaded(场景就绪,拿 appBase) /
+    //          appUnloading / teardown（注册表按 owner 自动清扫）
 }
 ```
 
-### 错误处理
+- 组合：engine-config.json `plugins`（引擎级常驻）或 app.json `plugins`（app 级，切 app 逆拓扑卸载）；systems.json 里列 `{ "name": "myfx" }` 决定帧顺序（**顺序权永远在 systems.json，插件只提供实现**）。
+- 跨插件协作：`ctx.getSystem<T>(name)` / `ctx.getPlugin(id)` / attachments —— **结构类型契约**（本地声明 interface），运行时 fail-loud。
+- 插件 TS 限"可剥离语法"；运行时只剥类型不检查——类型错误靠编辑器 + `check:plugins` 抓。
+- 相对导入支持多文件（Blob 递归重写）；禁止裸导入（除 `@shaderlab/api`）；循环相对导入 throw。
+- 插件内 fetch 资产用 `ctx.baseUrl`；管线/着色器可为文件（`'<id>:pipelines/X.json'` → `/plugins/<id>/...`，shader 相对管线文件解析）或内存声明（`pipelines`/`shaders` 字段，同名 key）。
 
-- 入口函数用 `try/catch` 包裹最外层（`main.ts`）。
-- 不可恢复的错误用 `throw new Error(...)`（不使用自定义错误类）。
+## 引擎侧关键机制（改代码前须知）
 
-### ECS（bitecs）模式
+- **帧循环**（Engine.frame）：计时 → 组装 `FrameContext`（scene/time/dt/尺寸/device/eventBus/**attachments**/**getSystem**/getBuffer/writeBuffer/dispatchCompute，**无任何具体系统类型**）→ 按 systems.json 顺序 `systemRegistry.resolve(name).update(ctx)` → rAF。`appLoading` 期间跳帧。
+- **PhaseBehavior**：phases.json 每相位 `behavior` 名 → RenderGraph 注册表查表执行。引擎默认 `normal`（按 target 合并 pass）/`shadow-clear`/`postprocess-chain` 三个实现（src/render/phaseBehaviors.ts），经与插件相同的 `registerPhaseBehavior` 注册。行为拿到窄门面 `PhaseBehaviorContext`（encoder/drivers/frame/pipelineFor/runDefault/getSystem/transientTargets…）。`perCamera:false` 的行为在 multiView 走每帧一次的 stage1。
+- **attachments**：插件 `ctx.registerAttachment(name, obj)` 发布不透明对象（'particles'/'physics'/'splats'）；FrameContext 与 hook ctx 透传，引擎不调用。
+- **owner 清扫**：一切注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/tools/generators/atoms）带 owner 标签（'engine' | 'app:<id>' | 'plugin:<id>'）；跨 owner 重名 throw；插件卸载=按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 unloadCurrentApp 自动逆序卸载）。
+- **IRenderer 缝**：Engine.renderer 默认= RenderGraph；插件可 `ctx.replaceRenderer(r)`（重注册 'render' 分派目标）。编辑器 PipelinePanel 依赖 to/fromData 数据面。
+- **buffers**：system 元数据（`ubos`/`buffers`/`needs`）由插件 `systemDefs` 声明（SystemRegistry.injectedDefs），BufferRegistry 按 systems.json 清单分配（common/app scope）。
+- **api.ts 是契约**：给插件加能力=在 api 加导出（宁窄勿宽）；**严禁 api 导入 public/plugins 下任何东西**。
+- **dev/prod 单例**：dev 下 Blob 模块 import `/src/api.ts` 与主包同 URL 同实例；prod 下 `engine-api.js` 与 main 共享 Rollup chunk。改 vite.config 的 entry 配置前先理解这一点。
 
-- 组件通过 `bitecs/legacy` 的 `defineComponent(schema)` 定义。
-- 实体存储采用 Structure-of-Arrays 布局 — 直接索引类型化数组：`(comp as any)[scalarName][eid]`。
-- 查询通过 `defineQuery([...components])` 构建，返回 `(world) => EntityId[]`。
-- 字符串通过整数索引存储到字符串表中（bitecs 不原生支持字符串）。
-- 复合类型会被展开：`vec3` → `_x`、`_y`、`_z` 三个独立的 `f32` 标量。
-- 字段可带 `role` 元数据（如 `"role": "color"` / `"extra"`）；renderer 通过 `schemaRegistry.getFieldByRole()` 按语义取字段，`isRenderTag()` 判定是否渲染 tag，故新增渲染 tag 组件无需改 `Scene.ts`。
-- 组件默认值在 `components.json` 中声明，`SchemaRegistry.getFieldDefault(compName, field)` 可读取——TS 中**不要重复硬编码默认值**。
+## TypeScript / 代码风格
 
-### 模块单例
+- 4 空格缩进、单引号、分号、多行尾逗号；`import type` 分离类型；仅相对导入（src 内）/仅 `@shaderlab/api`+相对（插件内）。
+- 类成员序：公有字段→私有字段→构造→公有→私有；两阶段初始化用 `!`；rAF 回调用箭头字段。
+- 接口用 `interface`，联合/映射用 `type`；`as` 断言；避免 `any`（用 `unknown`+守卫或结构接口）。
+- ECS：bitecs SoA；字符串走字符串表；vec3 展开 `_x/_y/_z`；组件默认值只在 components.json（`schemaRegistry.getFieldDefault` 读，TS 不重复硬编码）；字段 `role` 元数据供 renderer 泛型取用。
+- 模块单例：`schemaRegistry`/`resourceManager`/`uniformLayouts`/`systemRegistry`/`bufferRegistry`/`pluginManager` 直接 import 使用。
+- 错误处理：不可恢复 `throw new Error`；main.ts 最外层 try/catch 显示错误浮层。
+- 编辑器纯原生 DOM（`ce()` 工厂），无框架。
 
-`SchemaRegistry`、`ResourceManager`、`uniformLayouts`（UniformLayout.ts）在模块作用域以单例导出。直接导入使用，无需再实例化。其他类（Scene、RenderGraph、Engine、各 System）按会话实例化。
+## 添加新功能（速查）
 
-### WebGPU
+1. **新能力（系统/组件/管线/hook）**：写一个插件目录，app.json 或 engine-config 声明 —— 引擎零改动。
+2. **新渲染相位**：插件 `phases` 字段 +（如需新策略）`registerPhaseBehavior`。
+3. **新 uniform/bind/slot/target/blend/sampler/fallback/vbo/mesh**：插件对应声明字段（core 的 12 个 JSON 是范例）。
+4. **改系统顺序**：改 common/systems.json 或 app systems.json（纯 JSON）。
+5. **给插件开新引擎能力**：api.ts 加导出（这是契约变更，慎重+文档）。
+6. **机制级改动**（RenderGraph/ResourceManager/PluginManager…）：动 src/，勿引入内容/插件知识。
+7. 收尾必跑四件套（见上）。
 
-- **引擎级配置**：`engine-config.json` 声明 `dataRoot`、`appsRoot`、`defaultApp`、`computeTgs`（引擎默认 workgroup size）、`alphaMode`、`renderScriptsSubdir`（渲染逃生舱脚本子目录）、`systemOrder`（**遗留回退**：仅当 `systems.json` 缺失时被 `Engine.init()` 用作默认顺序；正常运行顺序已由 `common/systems.json` + app `systems.json` 覆盖，见下文 Systems 节）、`scriptHooks`（脚本生命周期钩子名）。Engine.init() 最先加载。
-- **渲染相位**：`phases.json` 声明相位 `name` + `order` + `behavior`（`normal`/`shadow-clear`/`postprocess-chain`）。RenderGraph 按 `order` 排序迭代，按 `behavior` tag 分派特殊逻辑。`RenderPhase` 为 `string`，新增相位只加 JSON 不改 TS。
-- **顶点槽**：`vertex-slots.json` 声明每个槽的 `location`/`format`/`stride`/`components`。`vertexSlots.ts` 从 JSON 加载到 `VERTEX_SLOTS` / `SLOT_ORDER`。`SlotName` 为 `string`。WGSL `@location` 必须与 JSON 一致。
-- 管线绑定组布局二选一：简单管线用 `"layout": "auto"`；PBR/材质管线用 `"bindLayout": ["frame", "object", ...]` 引用 `bind-layouts.json` 里的命名布局（按 `@group` 顺序）。
-- **frame bind group 绑定**：PipelineDriver 按 `bindLayout[0]` 名绑定——`"frame"` → `frameBindGroup()`，`"frameShadow"` → `frameShadowBindGroup()`。RenderGraph 不再特例 `setBindGroup(0,...)`。几何 hook 调用前也会先 `bindGroups()` 确保 frame 绑定。
-- **uniform 块布局数据驱动**：CPU 端字节偏移**不要手写魔数**，在 `uniform-layouts.json` 声明成员（std140 对齐由 `UniformLayout` 计算），各 System 用 `uniformLayouts.get(name).write(buf, 'field', value)` 按名写入。引擎 UBO（camera/light/timeInput/particle*）全部走此机制。u32 字段用 `layout.writeU32(u32View, 'field', value)`。
-- **render target size 声明**：`render-targets.json` 条目支持 `size: { type: "viewport", scale?: number }` 或 `{ type: "fixed", w, h }`。省略 = viewport 全尺寸。`transient: true` 标记后处理乒乓用临时目标。shadow map 走声明路径（`shadowDepth` 条目带 fixed size）。
-- **混合状态**：`blend-presets.json` 声明命名混合状态，`PipelineLoader.loadBlendPresets()` 加载，`PipelineLoader.resolveBlend(name)` 按名查表。`BlendPreset` 为 `string`。
-- **fallback 纹理**：`fallback-textures.json` 声明 1x1 纹理（pixel + format），`ResourceManager.loadFallbackTextures()` 加载，`fallbackTextureView(name)` 按名取。`fallback` 字段为 `string`。
-- **命名 VBO**：`vbo-presets.json` 声明顶点数据，`ResourceManager.loadVboPresets()` 加载，`getNamedVBO(name)` 按名取。
-- **网格目录**：`meshes.json` 声明 `name` + `generator` + `params`，`meshGenerators` 注册表（Primitives.ts）提供生成器函数。app 可追加 `meshes.json`。
-- **sampler fail-loud**：`namedSampler(name)` 未在 `samplers.json` 声明则 throw（不再静默回退）。
-- **几何声明式 draw steps**：`renderer.geometry` 用 `steps: [{ vertexBuffers, indexBuffer, draw }]` 声明绘制流程，或 `hook: "name"` 用逃生舱。`PipelineDriver.emitGeometry` 泛型迭代 steps，无 switch 分支。`source` 闭枚举已移除。
-- **后处理链动态路由**：`runPostChain` 动态路由——第一个启用的 pass 从 `scene` 读，最后一个写 `screen`，中间 pass 在 transient 目标间交替。render.json 条目的 `input`/`output` 为可选提示，不影响运行时路由。`sceneIsScreen` 由是否有 post-process 派生。
-- **COMPUTE_TGS 单一源**：引擎默认 workgroup size 在 `engine-config.json` 的 `computeTgs`，`PipelineLoader.defaultWorkgroupSize` 设此值。管线 JSON 的 `workgroupSize` 覆盖之。TS 中**不要硬编码 `/64`**——用 `PipelineLoader.getComputeMeta(path).workgroupSize`。
-- **compute 声明式绑定**：pipeline JSON 声明 `workgroupSize`、`countField`、`bindings[]`（`source`: `storage`/`uniform`/`timeInput`，storage 用 `key`+`stride` 或 `strideLayout`）。`strideLayout` 引用 `uniform-layouts.json` 布局名的 `byteSize` 作为 per-item 大小。
-- 缓冲区使用 `COPY_DST` 标志以便 `writeBuffer` 更新。
-- 着色器放在 `public/common/shaders/*.wgsl`，管线配置放在 `public/common/pipelines/*.json`。
+## 已知残留 / 陷阱
 
-### Systems（声明式 system 注册）
-
-- `common/systems.json` 是**有序数组**，每项 `{ name, def }`，`def` 指向 `common/systems/<name>.json`（省略 = 同）。**数组顺序 = 帧循环运行顺序**，重排数组即控制系统更新次序。
-- **app 可覆盖**：app 在 `app.json` 声明 `systems`（默认 `systems.json`），文件存在则**整体取代** common 的列表作为该 app 的运行顺序（app 只列自己想跑的 system；引用 common 的用 bare `{ "name": "input" }`，省略 `def` 即解析到 common；app 自己的 system 用相对 `def`）。文件缺失 = 用 common 默认；`unloadCurrentApp()` 恢复 common。
-- system 定义 JSON 字段：`source`（`builtin:<id>` 内置 / `scripts/<path>.js` 自定义）、`components`（声明依赖的 Component 名）、`ubos`（拥有/写入的命名 UBO，名引自 `uniform-layouts.json`）、`buffers`（拥有的命名 storage buffer）、`needs`（必须先于此运行的其它 system 名）、可选 `requires`（如 `wasm:rapier`）。
-- common 默认 7 个 system：`input`/`script`/`physics`/`camera`/`light`/`animation`/`render`。
-- **接线状态**：`Engine.init()` 已加载 `common/systems.json`、`loadApp()` 已按 app `systems.json` 覆盖、`Engine.frame()` 按 `activeSystems` 名分派（仍硬编码 `switch(sys.name)`，内置 system 写死在 `src/ecs/*System.ts`，用户接受内置硬编码）。`engine-config.json.systemOrder` 仅作 systems.json 缺失时的回退。**`def` 元数据（components/ubos/buffers/needs）尚未被引擎消费**（仅声明，供文档与未来校验）；`source:"scripts/..."` 的**自定义 system 加载器**（仿 ScriptSystem 的 Blob URL）尚未实现，需新建 `SystemRegistry`。
-- 内置 system 的 `update` 签名不统一（`CameraSystem.update(aspect)`、`LightSystem.update()`、其它 `update(time,dt)`），`Engine.frame()` 的 `switch` 按 `case` 分派。统一 `System` 接口 + 注册表是后续重构项。
-- `gaussianSplat` 是"app 专属 system"的范例：不在 common 默认集合，由 `demo6_3dgsViewer` 的 `systems.json` 引入（详见"动画与高斯泼溅"节）。
-
-### 相机与灯光（专用 System）
-
-- `CameraSystem` 每帧收集 active `Camera` 实体 → 写 `cameraUBO`（布局声明在 `uniform-layouts.json` 的 `camera` 条目）；`LightSystem` 收集所有 `LightComponent`（数量由 `uniform-layouts.json` 的 `light` 条目中 `lightN_*` 成员数派生）+ `EnvironmentComponent` ambient → 写 `lightUBO`。两者在 `Engine.frame()` 中于 `renderGraph.execute()` **之前**调用（系统顺序当前由 `engine-config.json` 的 `systemOrder` 驱动，设计上改由 `systems.json` 驱动，见 Systems 节）。
-- 灯光方向/位置**从 Transform 派生**（本地 -Z 轴经四元数旋转），编辑器 gizmo、shadow 相机、光照方向三者共用同一数据源。
-- `LightComponent` 每盏灯的 UBO 已预留 `viewProj: mat4x4f`（方向光用 `mat4LookAt + mat4OrthographicSym` 算 light-space 矩阵），为后续 ShadowMap pass 铺路。`shadowStrategy` 字段声明阴影相机策略（`origin-look`/`follow-entity`/`cube-map`）。
-
-### 动画与高斯泼溅（专用 System）
-
-- `AnimationSystem`（`ecs/AnimationSystem.ts`）是关键帧动画资产系统，在 common `systems.json` 中位于 `light` 与 `render` 之间。与 `ScriptSystem` 同样按 app base 解析资产（`setBaseDir(base)` / `clear()`），app 切换时由 `unloadCurrentApp()` 清空。
-- **高斯泼溅（3DGS）是 app 专属功能（`demo6_3dgsViewer`），不在 common 默认 system 集合中**。跨三个模块：`gs/SplatLoader.ts` 解析 3DGS PLY（binary little-endian；输出 `centers`/`colors`/`covariances` GPU-ready 数组，SH 解码与协方差已在 CPU 端算好）；`render/GaussianSplatManager.ts` 持有 storage buffers（centers/colors/cov）+ radix 排序 index buffer + model UBO，挂到 `RenderGraph.splats`（与 `RenderGraph.physics` 同模式）；`GsComponent`（`ply`/`count` 字段）声明在 `apps/demo6_3dgsViewer/components.json`（**app 专属组件，非 common**），由 demo6 的 `app.json` `components` 字段加载。
-- demo6 通过自己的 `systems.json` 覆盖 common 顺序，加入 `gaussianSplat` system（`needs:["camera"]`）。`Engine.loadApp()` 仅当 `activeSystems` 含 `gaussianSplat` 时才实例化 `GaussianSplatManager` + 设置 `renderGraph.splats` + 遍历 GsComponent 实体加载 ply；其它 app 这部分全为 null，零开销。
-- frame 循环有独立 `case 'gaussianSplat'`：`setModel(Transform)` + `sort(cameraView, cameraPos)`，排在 `render` 之前、`camera` 之后（splat 排序依赖 `CameraSystem.lastView/lastPos`）。
-- **单 splat 限制**：`Engine.gsEntityEid` 只跟踪一个 GsComponent 实例；场景含多个时 manager 用最后一个并 warn。新增多 splat 支持需改 manager，非纯 JSON。
-- 渲染端走命名 `"splat"` bind group layout（`read-only-storage`）+ model UBO（binding 4），渲染逃生舱脚本见 `common/scripts/render/splat.js`（`!splats || !splats.ready` 守卫，故非 splat app 零影响）。运行时依赖 `@d5techs/d5-gaussian-splat-lib`（仅类型/语义对齐，加载走自有 `SplatLoader`）。参考 app：`demo6_3dgsViewer`。
-
-### 物理（Rapier3D）
-
-- `@dimforge/rapier3d-compat` 是 WASM，必须 `await RAPIER.init()`（在 `Engine.init()` 中）后才能用。
-- 由 `ColliderComponent`（+ 可选 `RigidBodyComponent`）驱动；`PhysicsControllerComponent` 单例控制 gravity/timestep/ground/debug。
-- **默认值从 schema 读**：`PhysicsSystem.defaultParams()` 从 `schemaRegistry.getFieldDefault('PhysicsControllerComponent', ...)` 读取，不重复硬编码。
-- **shape/bodyType 查找表**：`BODY_DESC_BUILDERS` / `COLLIDER_BUILDERS` 按名字查表，不 switch。新增 shape 只加表项。
-- 固定步长累加器推进；`dynamic`/`kinematicVelocity` 刚体把位姿写回 `Transform`，`fixed`/`kinematicPosition` 从 `Transform` 读入。改组件字段会触发 `signature()` 变化并重建刚体。
-
-### 脚本与事件
-
-- 脚本 `.js` 资产通过 `fetch` 文本 → Blob URL → 动态 `import(/* @vite-ignore */ ...)` 加载（绕过 Vite transform），故必须写标准 ES module。
-- **脚本钩子声明化**：钩子名由 `engine-config.json` 的 `scriptHooks` 声明（默认 `["init", "update"]`）。ScriptSystem 按声明遍历钩子，新增 `lateUpdate` 等只需改 JSON。
-- `ScriptContext` 提供 `on(type, handler)` 订阅 `EventBus`；输入（`InputSystem`）与工具（`PickTool`）都通过 `EventBus` 通信，不直接耦合。
-- **事件类型集中化**：`src/events/eventTypes.ts` 的 `EVENT_TYPES` 常量是引擎内部事件的单一来源（`MOUSE_MOVE`/`MOUSE_DOWN`/`MOUSE_UP`/`WHEEL`/`COLLISION`）。emitter/consumer 引用常量，不写字面量。
-
-### 无框架原则
-
-编辑器 UI 是纯原生 DOM 命令式实现。使用 `EditorPanel.ts` 中的工厂函数 `ce(tag, cls?, text?)` 创建元素。不使用 React/Vue/Svelte。
-
-## 添加新功能
-
-1. **新组件类型**：在 `public/common/components.json`（或 app 的 `components.json`）中添加定义，`SchemaRegistry` 会自动解析。
-2. **新渲染相位**：在 `public/common/phases.json` 加条目（`name` + `order` + `behavior`），零 TS 改动。
-3. **新顶点槽**：在 `vertex-slots.json` 加定义 + `vertex-inputs.json` 引用，零 TS 改动。
-4. **新混合模式 / fallback 纹理 / VBO / mesh preset**：加对应 JSON 条目，零 TS 改动。
-5. **新 uniform 块**：在 `uniform-layouts.json` 声明成员，用 `uniformLayouts.get(name).write(...)`，同步改 WGSL struct。
-6. **新引擎 UBO**：在 `uniform-layouts.json` 加条目，改对应 System 用 `layout.write()`，ResourceManager UBO getter 用 `layout.byteSize`。零魔数。
-7. **新 render target**：在 `render-targets.json` 加条目（带 `size` 声明），零 TS 改动。
-8. **新绘制方式**：在管线 JSON 的 `renderer.geometry.steps` 声明 vertexBuffers + indexBuffer + draw。`PipelineDriver.emitGeometry` 泛型执行，无 switch。
-9. **新脚本钩子**：在 `engine-config.json` 的 `scriptHooks` 加名字，脚本导出同名函数。
-10. **改系统顺序 / 加 system**：重排 `common/systems.json` 数组即可（纯 JSON、零 TS 改动）；app 在自己的 `systems.json` 覆盖顺序（如 demo6 加 `gaussianSplat`）。**新增内置 system** 仍须在 `Engine.frame()` 的 `switch(sys.name)` 加 `case`（无 case 的名字静默跳过）；`source:"scripts/..."` 的自定义 system 加载器尚未实现（需 `SystemRegistry`）。
-11. 任何改动后，运行 `npm run build` 通过类型检查。
+- `common/textures` 是共享资产池（`asset:` 按 dataRoot 解析）；`PRESET_MESHES` 仍在 Primitives.ts；`RenderScriptLoader` app 级逃生舱保留但 common/scripts 已空 —— 见 PLAN_Plugin.md 残留清单。
+- ScriptComponent 游戏脚本（scene 挂 .js，Blob import）与 SystemRegistry 的 `source:"scripts/*.js"` 无构建系统仍可用，属内容层逃生舱，非推荐主路径。
+- gaussianSplat 单实例限制仍在（多 GsComponent 用最后一个并 warn）。
+- 深度设计文档 ARCHITECTURE.md 反映的是插件化以前的旧结构，细节以本文与 PLAN_Plugin.md 为准。

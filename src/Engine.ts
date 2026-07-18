@@ -4,17 +4,17 @@ import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
-import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
+import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
 import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
-import { loadVertexSlots, removeVertexSlotsByOwner, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
+import { loadVertexSlots, removeVertexSlotsByOwner, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
-import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl, IRenderer } from './render/types';
+import type { RenderGraphData, IRenderer } from './render/types';
 
 interface GltfMapping {
     transform: { component: string; fields: Record<string, string> };
