@@ -196,8 +196,7 @@ class SystemRegistry {
             // Pre-load script systems (builtin: needs no async work).
             if (def.source && !def.source.startsWith('builtin:')) {
                 if (!this.scripts.has(def.source)) {
-                    const adapter = await this.loadScriptSystem(def.source);
-                    if (adapter) this.scripts.set(def.source, adapter);
+                    this.scripts.set(def.source, await this.loadScriptSystem(def.source));
                 }
             }
         }
@@ -228,23 +227,28 @@ class SystemRegistry {
     }
 
     /** Fetch → Blob URL → dynamic import a JS system script (mirrors ScriptSystem).
-     *  Path resolution: absolute (leading /) → as-is; relative → appBase. */
-    private async loadScriptSystem(source: string): Promise<ScriptSystemAdapter | null> {
+     *  Path resolution: absolute (leading /) → as-is; relative → appBase.
+     *  Throws on any failure (missing file, syntax error) — a system declared in
+     *  systems.json that cannot load is a config bug, not a skippable condition. */
+    private async loadScriptSystem(source: string): Promise<ScriptSystemAdapter> {
         const url = source.startsWith('/') ? source : `${this.appBase}/${source}`;
         // Cache-bust so dev-server edits to the system script reload cleanly.
         const cacheBust = `${url}?t=${Date.now()}`;
+        const resp = await fetch(cacheBust);
+        if (!resp.ok) {
+            throw new Error(`System script '${source}' not found (HTTP ${resp.status} for ${url})`);
+        }
+        const src = await resp.text();
+        const blob = new Blob([src], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
         try {
-            const resp = await fetch(cacheBust);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const src = await resp.text();
-            const blob = new Blob([src], { type: 'text/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
-            const mod = await import(/* @vite-ignore */ blobUrl).finally(() => URL.revokeObjectURL(blobUrl));
+            const mod = await import(/* @vite-ignore */ blobUrl);
             const systemMod = (mod.default ?? mod) as SystemScriptModule;
             return new ScriptSystemAdapter(systemMod);
         } catch (err) {
-            console.error(`[SystemRegistry] failed to load system script '${source}':`, err);
-            return null;
+            throw new Error(`System script '${source}' failed to import: ${err}`);
+        } finally {
+            URL.revokeObjectURL(blobUrl);
         }
     }
 

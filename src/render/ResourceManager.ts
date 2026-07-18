@@ -893,9 +893,12 @@ export class ResourceManager {
         return v;
     }
 
-    /** Fallback 1x1 texture view by name (from fallback-textures.json), else white. */
+    /** Fallback 1x1 texture view by name (from fallback-textures.json); no name → white. */
     fallbackTextureView(name?: string): GPUTextureView {
-        const tex = this.fallbackTextures.get(name ?? 'white') ?? this.defaultWhite;
+        if (name && !this.fallbackTextures.has(name)) {
+            throw new Error(`Fallback texture '${name}' not declared in fallback-textures.json`);
+        }
+        const tex = name ? this.fallbackTextures.get(name)! : this.defaultWhite;
         return this.textureView(tex);
     }
 

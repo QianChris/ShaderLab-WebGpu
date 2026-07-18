@@ -114,6 +114,17 @@ export class RenderGraph implements System {
             if (def) this.clearColor = [def[0], def[1], def[2], def[3]];
         }
         this.multiView = data.multiView ?? false;
+        // Every phase key in render.json must exist in phases.json — entries
+        // under an unknown phase name would otherwise be dropped silently.
+        const known = new Set(this.phaseList.map(p => p.name));
+        for (const key of Object.keys(data.phases)) {
+            if (!known.has(key)) {
+                throw new Error(
+                    `Render graph '${data.name}' declares phase '${key}' which is not in phases.json ` +
+                    `(known: ${[...known].join(', ')})`,
+                );
+            }
+        }
         this.phases = {};
         for (const phase of this.phaseList) {
             const list = data.phases[phase.name] ?? [];
@@ -172,7 +183,15 @@ export class RenderGraph implements System {
                 const driver = new PipelineDriver(entry.pipeline, decl, entry, this.valueScripts, this.geometryHooks, this.computeHooks);
                 driver.dataBase = dataBase;
                 driver.aux = decl.aux ?? {};
-                if (decl.query) driver.query = defineQuery(decl.query.map(name => schemaRegistry.get(name)!));
+                if (decl.query) {
+                    driver.query = defineQuery(decl.query.map(name => {
+                        const comp = schemaRegistry.get(name);
+                        if (!comp) {
+                            throw new Error(`Pipeline '${entry.pipeline}': renderer.query component '${name}' is not registered (components.json)`);
+                        }
+                        return comp;
+                    }));
+                }
                 this.drivers.push(driver);
             }
         }
@@ -498,6 +517,9 @@ export class RenderGraph implements System {
         // passes still run (clear-only) so consumers read a cleared shadow map.
         const driver = drivers.find(d => d.entry.enabled);
         const pipeline = driver ? this.pipelines.get(driver.path) : undefined;
+        if (driver && !pipeline) {
+            throw new Error(`Shadow pipeline '${driver.path}' was not compiled`);
+        }
         for (let i = 0; i < passes.length; i++) {
             const p = passes[i];
             const pass = encoder.beginRenderPass({
@@ -576,7 +598,7 @@ export class RenderGraph implements System {
         }
         for (const d of drivers) {
             const pipeline = this.pipelines.get(d.path);
-            if (!pipeline) continue;
+            if (!pipeline) throw new Error(`Pipeline '${d.path}' was not compiled (compile() must load every manifest entry)`);
             d.record(pass, scene, pipeline, frame);
         }
         pass.end();
@@ -611,7 +633,7 @@ export class RenderGraph implements System {
                 ? swapView
                 : resourceManager.namedColorTargetView(output, cw, ch, format);
             const pipeline = this.pipelines.get(drivers[i].path);
-            if (!pipeline) { prevOutput = output; continue; }
+            if (!pipeline) throw new Error(`Post-process pipeline '${drivers[i].path}' was not compiled`);
 
             const pass = encoder.beginRenderPass({
                 colorAttachments: [{ view: dstView, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }],

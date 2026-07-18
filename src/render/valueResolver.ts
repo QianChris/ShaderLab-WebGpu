@@ -1,4 +1,5 @@
 import { normalMatrix as computeNormalMatrix } from '../math';
+import { schemaRegistry } from '../ecs/SchemaRegistry';
 import type { Scene } from '../ecs/Scene';
 
 /** Runtime context passed to value sources when resolving a bind-group write. */
@@ -73,17 +74,29 @@ export function resolveValue(src: string, ctx: ValueContext): number | number[] 
             return rest.split(',').map(s => Number(s.trim()));
         case 'script': {
             const fn = ctx.scripts.get(rest);
-            return fn ? fn(ctx) : 0;
+            if (!fn) {
+                throw new Error(
+                    `Value script '${rest}' not found — is its file listed in render.json "renderScripts" ` +
+                    `and does it export that function?`,
+                );
+            }
+            return fn(ctx);
         }
         default:
             return resolveAtom(src, ctx);
     }
 }
 
-/** Resolve a single (non-prefixed) atom: dotted path, builtin, tag, or const. */
+/** Resolve a single (non-prefixed) atom: numeric literal, dotted path, builtin, or tag. */
 function resolveAtom(src: string, ctx: ValueContext): number | number[] {
+    // Numeric literal first, so values like '0.5' never parse as Comp.field.
+    const asNum = Number(src);
+    if (!Number.isNaN(asNum)) return asNum;
+
     const dot = src.indexOf('.');
-    if (dot < 0) return Number(src) || 0;
+    if (dot < 0) {
+        throw new Error(`Cannot resolve value atom '${src}' (expected number, Comp.field, builtin.*, transform.* or tag.*)`);
+    }
 
     const head = src.slice(0, dot);
     const field = src.slice(dot + 1);
@@ -92,10 +105,17 @@ function resolveAtom(src: string, ctx: ValueContext): number | number[] {
     const ns = atomNamespaces[head];
     if (ns) {
         const fn = ns[field];
-        return fn ? fn(ctx) : 0;
+        if (!fn) {
+            throw new Error(`Unknown value atom '${src}' (known ${head}.*: ${Object.keys(ns).join(', ')})`);
+        }
+        return fn(ctx);
     }
 
-    // Comp.field
+    // Comp.field — an unregistered component name is a config typo (fail loud);
+    // an entity merely lacking the component resolves to 0 (legitimate absence).
+    if (!schemaRegistry.get(head)) {
+        throw new Error(`Value source '${src}' references unknown component '${head}'`);
+    }
     const v = ctx.scene.getField(ctx.eid, head, field);
     if (Array.isArray(v)) return v.map(Number);
     return Number(v ?? 0);

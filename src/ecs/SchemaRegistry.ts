@@ -35,17 +35,14 @@ export class SchemaRegistry {
     stringTables = new Map<string, string[]>();
 
     async load(url: string): Promise<void> {
-        const resp = await fetch(url);
-        const defs = await resp.json() as ComponentDef[];
+        const defs = await fetchComponentDefs(url);
         this.defs = [];
         this.register(defs);
     }
 
     /** Merge additional component definitions (e.g. app-specific) after the base set. */
     async loadMore(url: string): Promise<void> {
-        const resp = await fetch(url);
-        if (!resp.ok) return;
-        const defs = await resp.json() as ComponentDef[];
+        const defs = await fetchComponentDefs(url);
         this.register(defs);
     }
 
@@ -216,6 +213,16 @@ export class SchemaRegistry {
     getScalarNames(compName: string, field: string): string[] {
         return this.expandMap.get(compName)?.get(field)?.scalars ?? [];
     }
+}
+
+/** Fetch a component-defs JSON file, failing loud on 404 / Vite SPA-fallback HTML. */
+async function fetchComponentDefs(url: string): Promise<ComponentDef[]> {
+    const resp = await fetch(url);
+    const ct = resp.headers.get('content-type') ?? '';
+    if (!resp.ok || !(ct.includes('json') || ct.includes('application'))) {
+        throw new Error(`Component schema not found: ${url}`);
+    }
+    return await resp.json() as ComponentDef[];
 }
 
 export const schemaRegistry = new SchemaRegistry();

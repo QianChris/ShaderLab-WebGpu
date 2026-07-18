@@ -116,18 +116,25 @@ export class Engine {
     }
 
     async init(): Promise<void> {
-        try {
-            const resp = await fetch('/common/engine-config.json');
-            if (resp.ok) this.engineConfig = await resp.json() as EngineConfig;
-        } catch { /* fall back to defaults */ }
+        // Missing engine-config.json is a documented fallback (built-in defaults),
+        // but a present-yet-malformed file must fail loud (json() throws below).
+        const configResp = await fetch('/common/engine-config.json');
+        if (this.isJson(configResp)) {
+            this.engineConfig = await configResp.json() as EngineConfig;
+        } else {
+            console.warn('[Engine] /common/engine-config.json not found — using built-in defaults');
+        }
 
         const root = this.engineConfig.dataRoot;
         // Load the default system order (common/systems.json). Falls back to
-        // engine-config.systemOrder for back-compat when the file is absent.
-        try {
-            const sr = await fetch(`${root}/systems.json`);
-            if (sr.ok) this.commonSystems = await sr.json() as SystemEntry[];
-        } catch { /* fall back below */ }
+        // engine-config.systemOrder for back-compat when the file is absent;
+        // a malformed file throws (fail loud) instead of silently falling back.
+        const sysResp = await fetch(`${root}/systems.json`);
+        if (this.isJson(sysResp)) {
+            this.commonSystems = await sysResp.json() as SystemEntry[];
+        } else {
+            console.warn(`[Engine] ${root}/systems.json not found — falling back to engine-config systemOrder`);
+        }
         if (this.commonSystems.length === 0) {
             this.commonSystems = this.engineConfig.systemOrder.map(name => ({ name }));
         }
@@ -185,12 +192,23 @@ export class Engine {
             resourceManager.registerPbrMesh(name, data);
         }
 
-        const meshesCatalog = await fetch(`${root}/meshes.json`)
-            .then(r => r.json() as Promise<Array<{ name: string; generator: string; params?: Record<string, number> }>>)
-            .catch(() => []);
+        // meshes.json is optional (warn when absent), but a malformed file or a
+        // reference to an unregistered generator is a config bug — fail loud.
+        const meshesResp = await fetch(`${root}/meshes.json`);
+        let meshesCatalog: Array<{ name: string; generator: string; params?: Record<string, number> }> = [];
+        if (this.isJson(meshesResp)) {
+            meshesCatalog = await meshesResp.json();
+        } else {
+            console.warn(`[Engine] ${root}/meshes.json not found — no preset mesh catalog loaded`);
+        }
         for (const entry of meshesCatalog) {
             const gen = meshGenerators[entry.generator];
-            if (!gen) continue;
+            if (!gen) {
+                throw new Error(
+                    `meshes.json entry '${entry.name}' references unknown generator '${entry.generator}' ` +
+                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
+                );
+            }
             const data = gen(entry.params ?? {});
             if (isPbrMeshData(data)) {
                 resourceManager.registerPbrMesh(entry.name, data);
@@ -199,9 +217,10 @@ export class Engine {
             }
         }
 
-        this.gltfMapping = await fetch(`${root}/gltf-mapping.json`)
-            .then(r => r.ok ? r.json() as Promise<GltfMapping> : null)
-            .catch(() => null);
+        // gltf-mapping.json is only required by apps that declare glTF assets;
+        // loadGltf() throws when it is needed but missing. Malformed → json() throws here.
+        const gltfMapResp = await fetch(`${root}/gltf-mapping.json`);
+        this.gltfMapping = this.isJson(gltfMapResp) ? await gltfMapResp.json() as GltfMapping : null;
 
         this.scene = new Scene();
         this.renderGraph = new RenderGraph();
@@ -236,6 +255,7 @@ export class Engine {
         systemRegistry.registerBuiltin('light', this.lightSystem);
         systemRegistry.registerBuiltin('animation', this.animationSystem);
         systemRegistry.registerBuiltin('render', this.renderGraph);
+        this.assertSystemsResolve();
     }
 
     private aspect(): number {
@@ -273,9 +293,12 @@ export class Engine {
 
     async loadRenderGraphData(json: RenderGraphData, appBase?: string): Promise<void> {
         this.renderGraph.fromData(json);
-        const targets = await fetch(`${this.engineConfig.dataRoot}/render-targets.json`)
-            .then(r => (r.ok ? r.json() : {}))
-            .catch(() => ({}));
+        const targetsUrl = `${this.engineConfig.dataRoot}/render-targets.json`;
+        const targetsResp = await fetch(targetsUrl);
+        if (!this.isJson(targetsResp)) {
+            throw new Error(`render-targets.json not found: ${targetsUrl}`);
+        }
+        const targets = await targetsResp.json();
         this.renderGraph.setRenderTargets(targets);
         resourceManager.loadRenderTargets(targets);
         const scripts = (json as { renderScripts?: string[] }).renderScripts ?? [];
@@ -374,6 +397,22 @@ export class Engine {
             this.renderGraph.splats = mgr;
             systemRegistry.registerBuiltin('gaussianSplat', mgr);
             await mgr.loadFromScene(this.scene, base);
+        }
+
+        // Every system named in the active list must resolve to a runnable
+        // instance (builtin or loaded script); a name that resolves to nothing
+        // would otherwise be skipped silently every frame.
+        this.assertSystemsResolve();
+    }
+
+    /** Fail loud when an active system name resolves to no implementation. */
+    private assertSystemsResolve(): void {
+        const unresolved = this.activeSystems.filter(s => !systemRegistry.resolve(s));
+        if (unresolved.length > 0) {
+            throw new Error(
+                `Unresolved system(s): ${unresolved.map(s => `'${s.name}'`).join(', ')} — ` +
+                `each needs a builtin registration or a system def with a loadable source (systems.json / systems/<name>.json)`,
+            );
         }
     }
 
@@ -500,6 +539,13 @@ export class Engine {
     }
 
     async loadGltf(url: string): Promise<void> {
+        const m = this.gltfMapping;
+        if (!m) {
+            throw new Error(
+                `glTF '${url}' declared but ${this.engineConfig.dataRoot}/gltf-mapping.json is missing — ` +
+                `the glTF → component mapping must be declared, not hardcoded`,
+            );
+        }
         const gltfLoader = new GltfLoader();
         const result = await gltfLoader.load(url);
 
@@ -519,52 +565,26 @@ export class Engine {
         }
 
         for (const node of result.nodes) {
-            const m = this.gltfMapping;
             const entityData: Record<string, Record<string, unknown>> = {};
 
-            if (m) {
-                entityData[m.transform.component] = {
-                    [m.transform.fields.position]: node.transform.position,
-                    [m.transform.fields.rotation]: node.transform.rotation,
-                    [m.transform.fields.scale]: node.transform.scale,
-                };
-                entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
+            entityData[m.transform.component] = {
+                [m.transform.fields.position]: node.transform.position,
+                [m.transform.fields.rotation]: node.transform.rotation,
+                [m.transform.fields.scale]: node.transform.scale,
+            };
+            entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
 
-                const pm = result.primitives.find(p => p.name === node.meshName);
-                if (pm) {
-                    const mat: Record<string, unknown> = {};
-                    for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
-                        mat[fieldKey] = (pm.material as unknown as Record<string, unknown>)[gltfKey];
-                    }
-                    for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
-                        const texKey = (pm as unknown as Record<string, unknown>)[gltfKey] as string | undefined;
-                        mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
-                    }
-                    entityData[m.material.component] = mat;
+            const pm = result.primitives.find(p => p.name === node.meshName);
+            if (pm) {
+                const mat: Record<string, unknown> = {};
+                for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
+                    mat[fieldKey] = (pm.material as unknown as Record<string, unknown>)[gltfKey];
                 }
-            } else {
-                entityData['Transform'] = {
-                    position: node.transform.position,
-                    rotation: node.transform.rotation,
-                    scale: node.transform.scale,
-                };
-                entityData['MeshComponent'] = { mesh: node.meshName };
-
-                const pm = result.primitives.find(p => p.name === node.meshName);
-                if (pm) {
-                    entityData['PbrMaterial'] = {
-                        baseColor: pm.material.baseColorFactor,
-                        metallic: pm.material.metallicFactor,
-                        roughness: pm.material.roughnessFactor,
-                        ao: pm.material.aoStrength,
-                        emissive: pm.material.emissiveFactor,
-                        texBaseColor: pm.baseColorTexture ? resourceManager.textureHandle(pm.baseColorTexture) : 0,
-                        texMetalRough: pm.metallicRoughnessTexture ? resourceManager.textureHandle(pm.metallicRoughnessTexture) : 0,
-                        texOcclusion: pm.occlusionTexture ? resourceManager.textureHandle(pm.occlusionTexture) : 0,
-                        texEmissive: pm.emissiveTexture ? resourceManager.textureHandle(pm.emissiveTexture) : 0,
-                        texNormal: pm.normalTexture ? resourceManager.textureHandle(pm.normalTexture) : 0,
-                    };
+                for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
+                    const texKey = (pm as unknown as Record<string, unknown>)[gltfKey] as string | undefined;
+                    mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
                 }
+                entityData[m.material.component] = mat;
             }
 
             this.scene.createEntity(node.name, entityData);

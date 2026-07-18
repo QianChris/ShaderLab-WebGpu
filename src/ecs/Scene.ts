@@ -39,7 +39,12 @@ export class Scene {
 
         for (const [compName, compData] of Object.entries(data)) {
             const comp = schemaRegistry.get(compName);
-            if (!comp) continue;
+            if (!comp) {
+                throw new Error(
+                    `Entity '${key}': unknown component '${compName}' — ` +
+                    `is it declared in components.json (common or the app's)?`,
+                );
+            }
             addComponent(this.world, comp, eid);
             schemaRegistry.setAllFields(compName, comp, eid, compData);
 
