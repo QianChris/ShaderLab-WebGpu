@@ -1,11 +1,6 @@
-import RAPIER from '@dimforge/rapier3d-compat';
-import { defineQuery } from 'bitecs/legacy';
-import { schemaRegistry } from './SchemaRegistry';
-import { resourceManager } from '../render/ResourceManager';
-import { EVENT_TYPES } from '../events/eventTypes';
-import type { Scene } from '../ecs/Scene';
-import type { EventBus } from '../events/EventBus';
-import type { FrameContext, System } from './SystemRegistry';
+import { RAPIER, defineQuery, schemaRegistry, resourceManager, EVENT_TYPES } from '@shaderlab/api';
+import type { Scene, EventBus, FrameContext, System } from '@shaderlab/api';
+import type * as RapierNS from '@dimforge/rapier3d-compat';
 
 interface ControllerParams {
     enabled: boolean;
@@ -21,8 +16,8 @@ interface ControllerParams {
 
 interface BodyRecord {
     eid: number;
-    body: RAPIER.RigidBody;
-    collider: RAPIER.Collider;
+    body: RapierNS.RigidBody;
+    collider: RapierNS.Collider;
     sig: string;
     bodyType: string;
     /** true = this collider is attached to a parent body (attachTo) and has no
@@ -33,8 +28,8 @@ interface BodyRecord {
     attachKey: string;
 }
 
-/** RAPIER collider shape builder lookup (option name â†’ factory). */
-type ColliderBuilder = (R: typeof RAPIER, he: number[], radius: number, halfHeight: number) => RAPIER.ColliderDesc;
+/** RAPIER collider shape builder lookup (option name â†?factory). */
+type ColliderBuilder = (R: typeof RAPIER, he: number[], radius: number, halfHeight: number) => RapierNS.ColliderDesc;
 const COLLIDER_BUILDERS: Record<string, ColliderBuilder> = {
     cuboid: (R, he) => R.ColliderDesc.cuboid(he[0], he[1], he[2]),
     ball: (R, _he, radius) => R.ColliderDesc.ball(radius),
@@ -48,8 +43,8 @@ export interface RayHit {
     distance: number;
 }
 
-/** RAPIER rigid-body constructor lookup (option name â†’ descriptor factory). */
-const BODY_DESC_BUILDERS: Record<string, (R: typeof RAPIER) => RAPIER.RigidBodyDesc> = {
+/** RAPIER rigid-body constructor lookup (option name â†?descriptor factory). */
+const BODY_DESC_BUILDERS: Record<string, (R: typeof RAPIER) => RapierNS.RigidBodyDesc> = {
     dynamic: (R) => R.RigidBodyDesc.dynamic(),
     fixed: (R) => R.RigidBodyDesc.fixed(),
     kinematicPosition: (R) => R.RigidBodyDesc.kinematicPositionBased(),
@@ -70,13 +65,13 @@ export class PhysicsSystem implements System {
     private scene!: Scene;
     private bus: EventBus | null = null;
     private query!: (w: import('bitecs').World) => readonly number[];
-    private world: RAPIER.World | null = null;
-    private eventQueue: RAPIER.EventQueue | null = null;
+    private world: RapierNS.World | null = null;
+    private eventQueue: RapierNS.EventQueue | null = null;
     private records = new Map<number, BodyRecord>();
     private handleToEid = new Map<number, number>();
     private accumulator = 0;
 
-    private groundBody: RAPIER.RigidBody | null = null;
+    private groundBody: RapierNS.RigidBody | null = null;
     private groundSig = '';
 
     attach(scene: Scene, bus?: EventBus): void {
@@ -94,7 +89,7 @@ export class PhysicsSystem implements System {
         // Only remove root bodies: an "attached" collider record shares its parent
         // root's body object (see createRecord), and removeRigidBody(body) already
         // drops every collider attached to that body. Removing the parent and then
-        // the attached child's body would double-free the same body â†’ WASM trap.
+        // the attached child's body would double-free the same body â†?WASM trap.
         for (const rec of this.records.values()) {
             if (rec.attached) continue;
             this.world.removeRigidBody(rec.body);
@@ -161,7 +156,7 @@ export class PhysicsSystem implements System {
 
     /** Resolve a world-space contact point for a collider pair (fallback: body midpoint). */
     private contactPoint(
-        world: RAPIER.World, h1: number, h2: number,
+        world: RapierNS.World, h1: number, h2: number,
         a: number | undefined, b: number | undefined,
     ): [number, number, number] | null {
         const c1 = world.getCollider(h1);
@@ -254,7 +249,7 @@ export class PhysicsSystem implements System {
         };
     }
 
-    private syncGround(world: RAPIER.World, p: ControllerParams): void {
+    private syncGround(world: RapierNS.World, p: ControllerParams): void {
         const sig = p.groundEnabled ? `on|${p.groundHeight}` : 'off';
         if (sig === this.groundSig) return;
         if (this.groundBody) {
@@ -271,7 +266,7 @@ export class PhysicsSystem implements System {
         this.groundSig = sig;
     }
 
-    private reconcile(world: RAPIER.World): void {
+    private reconcile(world: RapierNS.World): void {
         const scene = this.scene;
         const live = new Set<number>();
         const roots: Array<{ eid: number; sig: string }> = [];
@@ -309,7 +304,7 @@ export class PhysicsSystem implements System {
         }
     }
 
-    private createRecord(world: RAPIER.World, eid: number, sig: string, attached: boolean): void {
+    private createRecord(world: RapierNS.World, eid: number, sig: string, attached: boolean): void {
         const scene = this.scene;
         const attachTo = (scene.getField(eid, 'ColliderComponent', 'attachTo') as string) ?? '';
 
@@ -318,7 +313,7 @@ export class PhysicsSystem implements System {
             // The parent must already have been created as a root this frame.
             const parentEid = scene.entityKeyMap.get(attachTo);
             const parentRec = parentEid !== undefined ? this.records.get(parentEid) : undefined;
-            if (!parentRec) return;  // parent missing â€” skip until next frame
+            if (!parentRec) return;  // parent missing â€?skip until next frame
             const collider = world.createCollider(this.buildColliderDesc(eid), parentRec.body);
             this.records.set(eid, { eid, body: parentRec.body, collider, sig, bodyType: 'fixed', attached: true, attachKey: attachTo });
             this.handleToEid.set(collider.handle, eid);
@@ -356,7 +351,7 @@ export class PhysicsSystem implements System {
         this.handleToEid.set(collider.handle, eid);
     }
 
-    private buildColliderDesc(eid: number): RAPIER.ColliderDesc {
+    private buildColliderDesc(eid: number): RapierNS.ColliderDesc {
         const scene = this.scene;
         const shape = (scene.getField(eid, 'ColliderComponent', 'shape') as string) ?? 'cuboid';
         const he = scene.getField(eid, 'ColliderComponent', 'halfExtents') as number[] ?? [0.5, 0.5, 0.5];
@@ -385,7 +380,7 @@ export class PhysicsSystem implements System {
         return desc;
     }
 
-    private destroyRecord(world: RAPIER.World, eid: number): void {
+    private destroyRecord(world: RapierNS.World, eid: number): void {
         const rec = this.records.get(eid);
         if (!rec) return;
         this.handleToEid.delete(rec.collider.handle);
@@ -429,7 +424,7 @@ export class PhysicsSystem implements System {
         }
     }
 
-    private updateDebug(world: RAPIER.World, enabled: boolean): void {
+    private updateDebug(world: RapierNS.World, enabled: boolean): void {
         if (!enabled) { this.debugVertexCount = 0; return; }
         const buffers = world.debugRender();
         const vertexCount = buffers.vertices.length / 3;

@@ -8,5 +8,5 @@
     "systemOrder": ["input", "script", "physics", "camera", "light", "animation", "render"],
     "scriptHooks": ["init", "update"],
     "pluginsRoot": "/plugins",
-    "plugins": ["particles"]
+    "plugins": ["physics", "particles"]
 }

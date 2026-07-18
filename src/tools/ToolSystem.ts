@@ -1,16 +1,12 @@
 import type { Scene } from '../ecs/Scene';
 import type { EventBus } from '../events/EventBus';
-import type { PhysicsSystem } from '../ecs/PhysicsSystem';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
-import { PickTool } from './PickTool';
 
 export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
 
-/** Registry of builtin tool factories, keyed by config `type`. New builtins
- *  can be added here without touching the dispatch logic. */
-const TOOL_REGISTRY: Record<string, ToolFactory> = {
-    pick: (config, ctx) => new PickTool(config, ctx),
-};
+/** Registry of tool factories, keyed by config `type`. Populated entirely by
+ *  plugins (ctx.registerToolType) — the engine ships no built-in tools. */
+const TOOL_REGISTRY: Record<string, ToolFactory> = {};
 
 /** Register a tool type (plugins). Duplicate names throw (fail-loud). */
 export function registerToolType(type: string, factory: ToolFactory): void {
@@ -53,8 +49,8 @@ export class ToolSystem {
     /** App base for resolving relative script paths. Set by setBase(). */
     private appBase = '';
 
-    constructor(scene: Scene, bus: EventBus, physics: PhysicsSystem, getAspect: () => number) {
-        this.ctx = { scene, bus, physics, getAspect };
+    constructor(scene: Scene, bus: EventBus, getSystem: <T = unknown>(name: string) => T | null, getAspect: () => number) {
+        this.ctx = { scene, bus, getSystem, getAspect };
     }
 
     /** Set the app base path (for resolving relative tool script sources).

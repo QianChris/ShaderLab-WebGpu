@@ -2,7 +2,6 @@ import { defineQuery } from 'bitecs/legacy';
 import { schemaRegistry } from './SchemaRegistry';
 import type { Scene } from './Scene';
 import type { EventBus } from '../events/EventBus';
-import type { PhysicsSystem } from './PhysicsSystem';
 import type { FrameContext, System } from './SystemRegistry';
 
 export interface ScriptContext {
@@ -12,8 +11,9 @@ export interface ScriptContext {
     dt: number;
     /** Current viewport aspect ratio (width / height). */
     aspect: number;
-    /** Physics system (ray casts, etc); null before attach. */
-    physics: PhysicsSystem | null;
+    /** Physics system (ray casts, etc); null when the physics plugin is absent.
+     *  Structural contract — gameplay scripts call e.g. physics.castRay(...). */
+    physics: unknown | null;
     getField(compName: string, field: string): unknown;
     setField(compName: string, field: string, value: unknown): void;
     on(type: string, handler: (payload: unknown) => void): () => void;
@@ -32,7 +32,8 @@ export class ScriptSystem implements System {
     private bus: EventBus;
     private baseDir: string;
     private getAspect: () => number = () => 1;
-    private physics: PhysicsSystem | null = null;
+    /** Lazy physics lookup (the physics plugin registers after ScriptSystem exists). */
+    private getPhysics: () => unknown | null = () => null;
     private hooks: string[] = ['init', 'update'];
     private query!: (w: import('bitecs').World) => readonly number[];
     private modules = new Map<string, ScriptModule>();
@@ -59,9 +60,11 @@ export class ScriptSystem implements System {
         this.query = defineQuery([schemaRegistry.get('ScriptComponent')!]);
     }
 
-    /** Provide runtime services scripts can use (physics ray casts, viewport aspect). */
-    provide(physics: PhysicsSystem, getAspect: () => number): void {
-        this.physics = physics;
+    /** Provide runtime services scripts can use (physics ray casts, viewport aspect).
+     *  `getPhysics` is a lazy lookup — the physics system is plugin-provided and
+     *  may register (or be absent) independently of this system's lifetime. */
+    provide(getPhysics: () => unknown | null, getAspect: () => number): void {
+        this.getPhysics = getPhysics;
         this.getAspect = getAspect;
     }
 
@@ -114,7 +117,7 @@ export class ScriptSystem implements System {
             time,
             dt,
             aspect: this.getAspect(),
-            physics: this.physics,
+            physics: this.getPhysics(),
             getField: (compName, field) => scene.getField(eid, compName, field),
             setField: (compName, field, value) => scene.setField(eid, compName, field, value),
             on: (type, handler) => bus.on(type, handler),

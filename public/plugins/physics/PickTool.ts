@@ -1,6 +1,6 @@
-import { mat4TransformVec4 } from '../math';
-import { EVENT_TYPES } from '../events/eventTypes';
-import type { SceneTool, ToolConfig, ToolContext } from './SceneTool';
+import { mat4TransformVec4, EVENT_TYPES } from '@shaderlab/api';
+import type { SceneTool, ToolConfig, ToolContext } from '@shaderlab/api';
+import type { PhysicsSystem } from './PhysicsSystem.ts';
 
 interface MouseEventPayload {
     button: number;
@@ -47,7 +47,7 @@ export class PickTool implements SceneTool {
         const f: [number, number, number] = [far[0] / far[3], far[1] / far[3], far[2] / far[3]];
         const dir: [number, number, number] = [f[0] - n[0], f[1] - n[1], f[2] - n[2]];
 
-        const hit = this.ctx.physics.castRay(n, dir);
+        const hit = this.ctx.getSystem<PhysicsSystem>('physics')?.castRay(n, dir);
         if (!hit) return;
         this.ctx.bus.emit(this.selectEvent, hit);
     }

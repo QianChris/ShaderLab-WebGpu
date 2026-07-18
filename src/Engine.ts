@@ -1,7 +1,6 @@
 import { Scene, type SceneData } from './ecs/Scene';
 import { ScriptSystem } from './ecs/ScriptSystem';
 import { InputSystem } from './ecs/InputSystem';
-import { PhysicsSystem } from './ecs/PhysicsSystem';
 import { CameraSystem } from './ecs/CameraSystem';
 import { LightSystem } from './ecs/LightSystem';
 import { AnimationSystem } from './ecs/AnimationSystem';
@@ -19,7 +18,6 @@ import { loadVertexSlots, removeVertexSlotsByOwner, type VertexSlotDecls, VERTEX
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
-import RAPIER from '@dimforge/rapier3d-compat';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
 import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl, IRenderer } from './render/types';
 
@@ -105,7 +103,6 @@ export class Engine {
     renderGraph!: RenderGraph;
     scriptSystem!: ScriptSystem;
     inputSystem!: InputSystem;
-    physicsSystem!: PhysicsSystem;
     cameraSystem!: CameraSystem;
     lightSystem!: LightSystem;
     animationSystem!: AnimationSystem;
@@ -168,7 +165,6 @@ export class Engine {
         }
         this.activeSystems = this.commonSystems;
         await schemaRegistry.load(`${root}/components.json`);
-        await RAPIER.init();
 
         const [vertexInputs, bindLayoutsData, uniformLayoutsData, samplersData, vertexSlotsData, phasesData, vboPresetsData, blendPresetsData, fallbackTexturesData] = await Promise.all([
             fetch(`${root}/vertex-inputs.json`).then(r => r.json() as Promise<VertexInputDecls>),
@@ -245,24 +241,21 @@ export class Engine {
         this.scriptSystem.setHooks(this.engineConfig.scriptHooks);
         this.inputSystem = new InputSystem(this.canvas, this.eventBus);
         this.inputSystem.attach();
-        this.physicsSystem = new PhysicsSystem();
-        this.physicsSystem.attach(this.scene, this.eventBus);
-        this.setAttachment('physics', this.physicsSystem, 'engine');
         this.cameraSystem = new CameraSystem();
         this.cameraSystem.attach(this.scene);
         this.lightSystem = new LightSystem();
         this.lightSystem.attach(this.scene);
         this.animationSystem = new AnimationSystem();
         this.animationSystem.attach(this.scene);
-        this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
-        this.scriptSystem.provide(this.physicsSystem, () => this.aspect());
+        const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
+        this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
+        this.scriptSystem.provide(() => getSystem('physics'), () => this.aspect());
 
         // Register built-in systems with the SystemRegistry so frame() dispatch
         // is data-driven (systems.json drives order + presence, registry maps
         // names to instances). Plugin systems register through the same API.
         systemRegistry.registerBuiltin('input', this.inputSystem);
         systemRegistry.registerBuiltin('script', this.scriptSystem);
-        systemRegistry.registerBuiltin('physics', this.physicsSystem);
         systemRegistry.registerBuiltin('camera', this.cameraSystem);
         systemRegistry.registerBuiltin('light', this.lightSystem);
         systemRegistry.registerBuiltin('animation', this.animationSystem);
@@ -648,7 +641,6 @@ export class Engine {
         this.scriptSystem.clear();
         this.animationSystem.clear();
         this.eventBus.clear();
-        this.physicsSystem.reset();
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
         this.activeSystems = this.commonSystems;
