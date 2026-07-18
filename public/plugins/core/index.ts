@@ -31,6 +31,32 @@ export default class CorePlugin extends EnginePlugin {
     private script: ScriptSystem | null = null;
     private animation: AnimationSystem | null = null;
 
+    /** Fetch the co-located declaration JSONs into the declaration fields.
+     *  Runs before the engine applies declarations (PluginManager order:
+     *  init → applyDeclarations → setup). */
+    async init(ctx: PluginContext): Promise<void> {
+        const load = async (file: string): Promise<never> => {
+            const resp = await fetch(`${ctx.baseUrl}/${file}`);
+            const contentType = resp.headers.get('content-type') ?? '';
+            if (!resp.ok || contentType.includes('text/html')) {
+                throw new Error(`[core] declaration file missing: ${ctx.baseUrl}/${file}`);
+            }
+            return await resp.json() as never;
+        };
+        this.components = await load('components.json');
+        this.uniformLayouts = await load('uniform-layouts.json');
+        this.bindLayouts = await load('bind-layouts.json');
+        this.vertexSlots = await load('vertex-slots.json');
+        this.vertexInputs = await load('vertex-inputs.json');
+        this.samplers = await load('samplers.json');
+        this.blendPresets = await load('blend-presets.json');
+        this.fallbackTextures = await load('fallback-textures.json');
+        this.vboPresets = await load('vbo-presets.json');
+        this.meshes = await load('meshes.json');
+        this.renderTargets = await load('render-targets.json');
+        this.phases = await load('phases.json');
+    }
+
     setup(ctx: PluginContext): void {
         const input = new InputSystem(ctx.canvas, ctx.eventBus);
         input.attach();

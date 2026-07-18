@@ -28,17 +28,17 @@ function pluginInfo(id) {
 // generators registered in Primitives.ts
 const GENERATORS = ['triangle', 'cube', 'icosphere', 'uvsphere', 'pbrCube', 'pbrIcosphere', 'pbrUvSphere', 'pbrPlane'];
 
-const commonComponents = J(join(COMMON, 'components.json')).map(c => c.name);
-const phases = J(join(COMMON, 'phases.json'));
+const commonComponents = J(join(PLUGINS, 'core', 'components.json')).map(c => c.name);
+const phases = J(join(PLUGINS, 'core', 'phases.json'));
 const phaseNames = new Set(phases.map(p => p.name));
 const phaseBehavior = Object.fromEntries(phases.map(p => [p.name, p.behavior ?? 'normal']));
-const vboNames = new Set(Object.keys(J(join(COMMON, 'vbo-presets.json'))));
-const fallbackNames = new Set(Object.keys(J(join(COMMON, 'fallback-textures.json'))));
+const vboNames = new Set(Object.keys(J(join(PLUGINS, 'core', 'vbo-presets.json'))));
+const fallbackNames = new Set(Object.keys(J(join(PLUGINS, 'core', 'fallback-textures.json'))));
 const engineConfig = J(join(COMMON, 'engine-config.json'));
 const scriptsSubdir = engineConfig.renderScriptsSubdir ?? 'scripts';
 
 // meshes.json generators
-for (const m of J(join(COMMON, 'meshes.json'))) {
+for (const m of J(join(PLUGINS, 'core', 'meshes.json'))) {
     if (!GENERATORS.includes(m.generator)) note(`common/meshes.json '${m.name}': unknown generator '${m.generator}'`);
 }
 

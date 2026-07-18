@@ -154,19 +154,6 @@ export class Engine {
             this.commonSystems = this.engineConfig.systemOrder.map(name => ({ name }));
         }
         this.activeSystems = this.commonSystems;
-        await schemaRegistry.load(`${root}/components.json`);
-
-        const [vertexInputs, bindLayoutsData, uniformLayoutsData, samplersData, vertexSlotsData, phasesData, vboPresetsData, blendPresetsData, fallbackTexturesData] = await Promise.all([
-            fetch(`${root}/vertex-inputs.json`).then(r => r.json() as Promise<VertexInputDecls>),
-            fetch(`${root}/bind-layouts.json`).then(r => r.json() as Promise<BindLayoutDecls>),
-            fetch(`${root}/uniform-layouts.json`).then(r => r.json() as Promise<UniformLayoutDecls>),
-            fetch(`${root}/samplers.json`).then(r => r.json() as Promise<SamplerDecls>),
-            fetch(`${root}/vertex-slots.json`).then(r => r.json() as Promise<VertexSlotDecls>),
-            fetch(`${root}/phases.json`).then(r => r.json() as Promise<PhaseDecl[]>),
-            fetch(`${root}/vbo-presets.json`).then(r => r.json() as Promise<Record<string, { data: number[]; format: string; stride: number }>>),
-            fetch(`${root}/blend-presets.json`).then(r => r.json() as Promise<Record<string, GPUBlendState>>),
-            fetch(`${root}/fallback-textures.json`).then(r => r.json() as Promise<Record<string, { pixel: number[]; format: GPUTextureFormat }>>),
-        ]);
 
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) throw new Error('No GPU adapter');
@@ -178,15 +165,7 @@ export class Engine {
         this.context.configure({ device: this.device, format: this.format, alphaMode: this.engineConfig.alphaMode });
 
         resourceManager.init(this.device);
-        resourceManager.loadBindLayouts(bindLayoutsData);
-        resourceManager.loadSamplers(samplersData);
-        resourceManager.loadVboPresets(vboPresetsData);
-        resourceManager.loadFallbackTextures(fallbackTexturesData);
-        PipelineLoader.setVertexInputs(vertexInputs);
-        PipelineLoader.loadBlendPresets(blendPresetsData);
         PipelineLoader.defaultWorkgroupSize = this.engineConfig.computeTgs;
-        loadVertexSlots(vertexSlotsData);
-        uniformLayouts.load(uniformLayoutsData);
 
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
@@ -195,17 +174,6 @@ export class Engine {
             resourceManager.registerPbrMesh(name, data);
         }
 
-        // meshes.json is optional (warn when absent), but a malformed file or a
-        // reference to an unregistered generator is a config bug — fail loud.
-        const meshesResp = await fetch(`${root}/meshes.json`);
-        let meshesCatalog: Array<{ name: string; generator: string; params?: Record<string, number> }> = [];
-        if (this.isJson(meshesResp)) {
-            meshesCatalog = await meshesResp.json();
-        } else {
-            console.warn(`[Engine] ${root}/meshes.json not found — no preset mesh catalog loaded`);
-        }
-        this.registerMeshCatalog(meshesCatalog);
-
         // gltf-mapping.json is only required by apps that declare glTF assets;
         // loadGltf() throws when it is needed but missing. Malformed → json() throws here.
         const gltfMapResp = await fetch(`${root}/gltf-mapping.json`);
@@ -213,7 +181,6 @@ export class Engine {
 
         this.scene = new Scene();
         this.renderGraph = new RenderGraph();
-        this.renderGraph.setPhases(phasesData);
         this.eventBus = new EventBus();
         const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
@@ -473,14 +440,8 @@ export class Engine {
 
     async loadRenderGraphData(json: RenderGraphData, appBase?: string): Promise<void> {
         this.renderGraph.fromData(json);
-        const targetsUrl = `${this.engineConfig.dataRoot}/render-targets.json`;
-        const targetsResp = await fetch(targetsUrl);
-        if (!this.isJson(targetsResp)) {
-            throw new Error(`render-targets.json not found: ${targetsUrl}`);
-        }
-        const targets = await targetsResp.json();
-        this.renderGraph.setRenderTargets(targets);
-        resourceManager.loadRenderTargets(targets);
+        // Render targets are plugin declarations (core's render-targets.json +
+        // any capability plugin's `renderTargets` field) — already registered.
         const scripts = (json as { renderScripts?: string[] }).renderScripts ?? [];
         this.renderGraph.setScriptFiles(scripts);
         this.renderGraph.setScriptsSubdir(this.engineConfig.renderScriptsSubdir);
