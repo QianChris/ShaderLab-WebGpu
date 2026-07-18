@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "check:plugins": "tsc -p public/plugins --noEmit",
     "preview": "vite preview"
   },
   "devDependencies": {
@@ -18,6 +19,8 @@
     "@d5techs/d5-gaussian-splat-lib": "^1.0.19",
     "@dimforge/rapier3d-compat": "^0.19.3",
     "bitecs": "^0.4.0",
+    "es-module-lexer": "^2.3.1",
+    "sucrase": "^3.35.1",
     "three": "^0.160.1"
   }
 }
