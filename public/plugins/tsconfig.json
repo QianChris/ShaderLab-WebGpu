@@ -6,8 +6,9 @@
         "strict": true,
         "noEmit": true,
         "isolatedModules": true,
+        "allowImportingTsExtensions": true,
         "skipLibCheck": true,
-        "types": ["@webgpu/types"],
+        "types": ["@webgpu/types", "vite/client"],
         "baseUrl": ".",
         "paths": {
             "@shaderlab/api": ["../../src/api.ts"]
