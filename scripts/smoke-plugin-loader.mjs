@@ -73,7 +73,10 @@ async function moduleFor(absPath, inFlight = new Set()) {
         const raw = code.slice(imp.s, imp.e);
         const quoted = raw[0] === '"' || raw[0] === '\'';
         const spec = imp.n ?? (quoted ? raw.slice(1, -1) : undefined);
-        if (spec === undefined) throw new Error(`${absPath}: non-literal dynamic import`);
+        if (spec === undefined) {
+            if (imp.d > -1) continue;   // non-literal dynamic import: leave as-is
+            throw new Error(`${absPath}: unresolvable import specifier`);
+        }
         let target = null;
         if (spec === '@shaderlab/api') {
             target = apiStubUrl;
@@ -116,7 +119,8 @@ for (const id of readdirSync(PLUGINS)) {
             const mockCtx = {
                 baseUrl: `/plugins/${id}`,
                 device: {}, scene: { entityKeyMap: new Map() }, eventBus: { on: () => () => {}, emit: () => {} },
-                engineConfig: {}, renderer: {},
+                engineConfig: { scriptHooks: ['init', 'update'] }, renderer: {},
+                canvas: { addEventListener: () => {}, width: 800, height: 600 },
                 registerSystem: (name, sys) => registered.set(name, sys),
                 registerAttachment: () => {},
                 registerRenderHook: () => {},

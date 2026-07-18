@@ -1,9 +1,4 @@
 import { Scene, type SceneData } from './ecs/Scene';
-import { ScriptSystem } from './ecs/ScriptSystem';
-import { InputSystem } from './ecs/InputSystem';
-import { CameraSystem } from './ecs/CameraSystem';
-import { LightSystem } from './ecs/LightSystem';
-import { AnimationSystem } from './ecs/AnimationSystem';
 import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
@@ -101,11 +96,6 @@ export class Engine {
     format!: GPUTextureFormat;
     scene!: Scene;
     renderGraph!: RenderGraph;
-    scriptSystem!: ScriptSystem;
-    inputSystem!: InputSystem;
-    cameraSystem!: CameraSystem;
-    lightSystem!: LightSystem;
-    animationSystem!: AnimationSystem;
     toolSystem!: ToolSystem;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
@@ -198,17 +188,6 @@ export class Engine {
         loadVertexSlots(vertexSlotsData);
         uniformLayouts.load(uniformLayoutsData);
 
-        // Load common system defs so BufferRegistry can see what UBOs/storage
-        // buffers each common system declares. (loadDefs is idempotent — the
-        // subsequent call in loadApp skips already-loaded common defs.)
-        await systemRegistry.loadDefs(this.commonSystems, root, '');
-        // Allocate every common-scoped buffer declared by common systems' defs
-        // (the four legacy engine UBOs — camera / light / timeInput /
-        // pointShadowFaces — are declared in camera.json / light.json /
-        // input.json). Persists for the engine lifetime; app-scoped buffers
-        // declared by an app's own system defs are allocated in loadApp.
-        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
-
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
         }
@@ -236,34 +215,18 @@ export class Engine {
         this.renderGraph = new RenderGraph();
         this.renderGraph.setPhases(phasesData);
         this.eventBus = new EventBus();
-        this.scriptSystem = new ScriptSystem(this.eventBus, '');
-        this.scriptSystem.attach(this.scene);
-        this.scriptSystem.setHooks(this.engineConfig.scriptHooks);
-        this.inputSystem = new InputSystem(this.canvas, this.eventBus);
-        this.inputSystem.attach();
-        this.cameraSystem = new CameraSystem();
-        this.cameraSystem.attach(this.scene);
-        this.lightSystem = new LightSystem();
-        this.lightSystem.attach(this.scene);
-        this.animationSystem = new AnimationSystem();
-        this.animationSystem.attach(this.scene);
         const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
-        this.scriptSystem.provide(() => getSystem('physics'), () => this.aspect());
 
-        // Register built-in systems with the SystemRegistry so frame() dispatch
-        // is data-driven (systems.json drives order + presence, registry maps
-        // names to instances). Plugin systems register through the same API.
-        systemRegistry.registerBuiltin('input', this.inputSystem);
-        systemRegistry.registerBuiltin('script', this.scriptSystem);
-        systemRegistry.registerBuiltin('camera', this.cameraSystem);
-        systemRegistry.registerBuiltin('light', this.lightSystem);
-        systemRegistry.registerBuiltin('animation', this.animationSystem);
+        // The default renderer registers as the 'render' dispatch target through
+        // the same registry plugins use; core replaces it with its thin wrapper
+        // (same instance behind ctx.renderer) — either way, no special-casing.
         systemRegistry.registerBuiltin('render', this.renderGraph);
 
         // Engine-level plugins (session lifetime). The engine has no compile-time
         // knowledge of any plugin: ids come from engine-config.json, invocation
-        // goes through the registries populated below.
+        // goes through the registries populated below. All capability systems
+        // (input/script/camera/light/animation/render/physics/…) come from here.
         PipelineLoader.pluginsRoot = this.engineConfig.pluginsRoot ?? '/plugins';
         pluginManager.configure({
             pluginsRoot: this.engineConfig.pluginsRoot ?? '/plugins',
@@ -279,6 +242,13 @@ export class Engine {
         });
         await pluginManager.loadMany(this.engineConfig.plugins ?? [], 'engine');
 
+        // System defs (ubos/buffers/needs) now come from plugin `systemDefs`;
+        // loadDefs only resolves legacy def files / app script systems.
+        await systemRegistry.loadDefs(this.commonSystems, root, '');
+        // Allocate every common-scoped buffer declared by the baseline systems
+        // (camera / light / timeInput / pointShadowFaces UBOs from core's defs).
+        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
+
         this.assertSystemsResolve();
     }
 
@@ -291,6 +261,7 @@ export class Engine {
             scene: this.scene,
             eventBus: this.eventBus,
             engineConfig: this.engineConfig,
+            canvas: this.canvas,
             baseUrl,
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
@@ -587,10 +558,6 @@ export class Engine {
 
         this.loadSceneData(sceneJson);
 
-        // Script paths in scene.json are relative to the app base.
-        this.scriptSystem.setBaseDir(base);
-        this.animationSystem.setBaseDir(base);
-
         // Render graph assets (pipelines/shaders/textures) live under /common and
         // must be common-owned so they survive app switches; temporarily flip owner.
         resourceManager.enterApp('common');
@@ -638,8 +605,6 @@ export class Engine {
         const appId = this.currentApp;
         pluginManager.broadcastAppUnloading();
         this.toolSystem.dispose();
-        this.scriptSystem.clear();
-        this.animationSystem.clear();
         this.eventBus.clear();
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);

@@ -1,7 +1,5 @@
-import { resourceManager } from '../render/ResourceManager';
-import { uniformLayouts } from '../render/UniformLayout';
-import type { Scene } from './Scene';
-import type { FrameContext, System } from './SystemRegistry';
+import { resourceManager, uniformLayouts } from '@shaderlab/api';
+import type { Scene, FrameContext, System } from '@shaderlab/api';
 
 const layout = uniformLayouts;
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);

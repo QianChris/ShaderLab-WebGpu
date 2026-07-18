@@ -191,7 +191,10 @@ class PluginManager {
             const quoted = raw[0] === '"' || raw[0] === '\'';
             const spec = imp.n ?? (quoted ? raw.slice(1, -1) : undefined);
             if (spec === undefined) {
-                throw new Error(`${url}: dynamic import with a non-literal specifier is not supported in runtime plugins`);
+                // Non-literal dynamic import (runtime-computed URL, e.g. Blob
+                // imports inside a system) — nothing to rewrite, leave as-is.
+                if (imp.d > -1) continue;
+                throw new Error(`${url}: unresolvable import specifier`);
             }
             let target: string | null = null;
             if (spec === API_SPECIFIER) {

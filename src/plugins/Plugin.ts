@@ -52,6 +52,8 @@ export interface PluginContext {
     scene: Scene;
     eventBus: EventBus;
     engineConfig: EngineConfig;
+    /** The render canvas (input listeners, aspect computation). */
+    canvas: HTMLCanvasElement;
     /** '/plugins/<id>' — base for fetching co-located assets. */
     baseUrl: string;
     /** The active renderer (built-in RenderGraph unless replaced). */

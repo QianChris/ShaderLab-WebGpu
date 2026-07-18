@@ -1,8 +1,5 @@
-import { resourceManager } from '../render/ResourceManager';
-import { uniformLayouts } from '../render/UniformLayout';
-import { EVENT_TYPES } from '../events/eventTypes';
-import type { EventBus } from '../events/EventBus';
-import type { FrameContext, System } from './SystemRegistry';
+import { resourceManager, uniformLayouts, EVENT_TYPES } from '@shaderlab/api';
+import type { EventBus, FrameContext, System } from '@shaderlab/api';
 
 /**
  * Mouse input tracker. Fills the per-frame TimeInput UBO.

@@ -217,10 +217,11 @@ for (const app of readdirSync(APPS)) {
     }
 }
 
-// common systems.json defs
+// common systems.json: defs are plugin-provided now; only explicit def paths must exist
 for (const s of J(join(COMMON, 'systems.json'))) {
-    const defRel = s.def ?? `systems/${s.name}.json`;
-    if (!existsSync(join(COMMON, defRel))) note(`common/systems.json: def '${defRel}' missing for '${s.name}'`);
+    if (s.def && !existsSync(join(COMMON, s.def))) {
+        note(`common/systems.json: explicit def '${s.def}' missing for '${s.name}'`);
+    }
 }
 
 // hook/script value refs: verify exported names exist in the script files (textual check)

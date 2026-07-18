@@ -1,8 +1,5 @@
-import { defineQuery } from 'bitecs/legacy';
-import { schemaRegistry } from './SchemaRegistry';
-import { resourceManager } from '../render/ResourceManager';
-import type { Scene } from './Scene';
-import type { FrameContext, System } from './SystemRegistry';
+import { defineQuery, schemaRegistry, resourceManager } from '@shaderlab/api';
+import type { Scene, FrameContext, System } from '@shaderlab/api';
 
 interface SheetAnimation {
     name: string;

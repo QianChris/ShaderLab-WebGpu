@@ -1,10 +1,5 @@
-import { hasComponent } from 'bitecs/legacy';
-import { schemaRegistry } from './SchemaRegistry';
-import { resourceManager } from '../render/ResourceManager';
-import { uniformLayouts, type UniformLayout } from '../render/UniformLayout';
-import { mat4LookAt, mat4Mul, mat4OrthographicSym, mat4Perspective, quatRotateVec3 } from '../math';
-import type { Scene } from './Scene';
-import type { FrameContext, System } from './SystemRegistry';
+import { hasComponent, schemaRegistry, resourceManager, uniformLayouts, mat4LookAt, mat4Mul, mat4OrthographicSym, mat4Perspective, quatRotateVec3 } from '@shaderlab/api';
+import type { UniformLayout, Scene, FrameContext, System } from '@shaderlab/api';
 
 const IDENTITY_MAT4 = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 

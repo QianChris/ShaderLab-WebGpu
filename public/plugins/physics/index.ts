@@ -15,6 +15,19 @@ import { PickTool } from './PickTool.ts';
 export default class PhysicsPlugin extends EnginePlugin {
     readonly meta = { id: 'physics' };
 
+    /** System metadata (replaces the old common/systems/physics.json def). */
+    systemDefs = [
+        {
+            name: 'physics',
+            source: 'plugin:physics',
+            components: ['ColliderComponent', 'RigidBodyComponent', 'PhysicsControllerComponent', 'Transform'],
+            ubos: [],
+            buffers: [],
+            needs: ['script'],
+            requires: ['wasm:rapier'],
+        },
+    ];
+
     private system: PhysicsSystem | null = null;
 
     async setup(ctx: PluginContext): Promise<void> {

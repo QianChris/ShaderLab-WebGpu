@@ -202,6 +202,8 @@ class SystemRegistry {
         this.appBase = appBase;
         for (const entry of systems) {
             if (this.defs.has(entry.name)) continue;
+            // Plugin-injected defs already cover this system — no def file fetch.
+            if (this.injectedDefs.has(entry.name)) continue;
             const defPath = entry.def ?? `systems/${entry.name}.json`;
             let resp = await fetch(`${commonBase}/${defPath}`);
             if (!isJsonResp(resp) && appBase) {
@@ -271,18 +273,15 @@ class SystemRegistry {
     }
 
     /** Synchronous resolution: returns System or null.
-     *  Uses pre-loaded defs (loadDefs must have been called for script systems
-     *  to be resolvable). Builtin systems work without loadDefs (by-name fallback). */
+     *  Registered instances (plugins' ctx.registerSystem) resolve by name; a
+     *  def file with a script `source` resolves to its loaded script adapter
+     *  (the no-build escape hatch). The legacy 'builtin:' source prefix is
+     *  ignored — all implementations register through the same registry. */
     resolve(entry: SystemEntry): System | null {
         const def = this.defs.get(entry.name);
-        if (def) {
-            if (def.source.startsWith('builtin:')) {
-                const id = def.source.slice('builtin:'.length);
-                return this.builtins.get(id) ?? null;
-            }
+        if (def?.source && !def.source.startsWith('builtin:')) {
             return this.scripts.get(def.source) ?? null;
         }
-        // No def file → fall back to builtin-by-name (backward compat).
         return this.builtins.get(entry.name) ?? null;
     }
 

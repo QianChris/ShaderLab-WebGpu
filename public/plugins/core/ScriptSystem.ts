@@ -1,8 +1,5 @@
-import { defineQuery } from 'bitecs/legacy';
-import { schemaRegistry } from './SchemaRegistry';
-import type { Scene } from './Scene';
-import type { EventBus } from '../events/EventBus';
-import type { FrameContext, System } from './SystemRegistry';
+import { defineQuery, schemaRegistry } from '@shaderlab/api';
+import type { Scene, EventBus, FrameContext, System } from '@shaderlab/api';
 
 export interface ScriptContext {
     eid: number;

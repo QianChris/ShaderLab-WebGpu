@@ -1,8 +1,0 @@
-{
-    "name": "light",
-    "source": "builtin:light",
-    "components": ["LightComponent", "EnvironmentComponent", "Transform"],
-    "ubos": ["light", "pointShadowFaces"],
-    "buffers": [],
-    "needs": ["physics"]
-}
