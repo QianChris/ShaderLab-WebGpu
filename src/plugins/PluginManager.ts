@@ -49,7 +49,9 @@ export function pluginOwner(id: string): string {
 }
 
 export function apiModuleUrl(): string {
-    return import.meta.env.DEV ? '/src/api.ts' : '/assets/engine-api.js';
+    return import.meta.env.DEV
+        ? `${location.origin}/src/api.ts`
+        : `${location.origin}/assets/engine-api.js`;
 }
 
 class PluginManager {

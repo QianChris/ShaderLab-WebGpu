@@ -185,11 +185,6 @@ export class Engine {
         const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
         this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
 
-        // The default renderer registers as the 'render' dispatch target through
-        // the same registry plugins use; core replaces it with its thin wrapper
-        // (same instance behind ctx.renderer) — either way, no special-casing.
-        systemRegistry.registerBuiltin('render', this.renderGraph);
-
         // Engine-level plugins (session lifetime). The engine has no compile-time
         // knowledge of any plugin: ids come from engine-config.json, invocation
         // goes through the registries populated below. All capability systems
