@@ -8,7 +8,7 @@
 ## 1. 模块依赖图（Mermaid）
 
 ```mermaid
-graph TD
+graph RL
     subgraph DEMO_LAYER["🎬 Demo Layer（纯 JSON + 私用资源）"]
         D1["demo1<br/>PBR+Physics+Particles+PostFX"]
         D2["demo2<br/>PBR+Physics+Particles+CubeStack"]
