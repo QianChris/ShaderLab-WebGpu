@@ -1,25 +1,20 @@
 import { Scene, type SceneData } from './ecs/Scene';
-import { ScriptSystem } from './ecs/ScriptSystem';
-import { InputSystem } from './ecs/InputSystem';
-import { PhysicsSystem } from './ecs/PhysicsSystem';
-import { CameraSystem } from './ecs/CameraSystem';
-import { LightSystem } from './ecs/LightSystem';
-import { AnimationSystem } from './ecs/AnimationSystem';
-import { ToolSystem } from './tools/ToolSystem';
+import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
-import { uniformLayouts, type UniformLayoutDecls } from './render/UniformLayout';
+import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
-import { systemRegistry, type FrameContext } from './ecs/SystemRegistry';
+import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
-import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData } from './render/Primitives';
-import { loadVertexSlots, type VertexSlotDecls, VERTEX_SLOTS, SLOT_ORDER } from './render/vertexSlots';
+import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
+import { loadVertexSlots, removeVertexSlotsByOwner, SLOT_ORDER } from './render/vertexSlots';
+import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
-import { GaussianSplatManager } from './render/GaussianSplatManager';
-import RAPIER from '@dimforge/rapier3d-compat';
-import type { RenderGraphData, VertexInputDecls, BindLayoutDecls, SamplerDecls, PhaseDecl } from './render/types';
+import { pluginManager, pluginOwner } from './plugins/PluginManager';
+import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
+import type { RenderGraphData, IRenderer } from './render/types';
 
 interface GltfMapping {
     transform: { component: string; fields: Record<string, string> };
@@ -34,6 +29,8 @@ interface GltfMapping {
 /** App manifest (/apps/<name>/app.json): declares app-specific assets to load. */
 export interface AppManifest {
     name?: string;
+    /** App-scoped plugins to load (unloaded on app switch). */
+    plugins?: string[];
     /** Extra component definition files (merged after common components). */
     components?: string[];
     /** Scene entity data file (default "scene.json"). */
@@ -65,6 +62,10 @@ export interface EngineConfig {
     alphaMode: GPUCanvasAlphaMode;
     systemOrder: string[];
     scriptHooks: string[];
+    /** Root URL of runtime plugins (default '/plugins'). */
+    pluginsRoot?: string;
+    /** Engine-level plugins loaded at init (session lifetime). */
+    plugins?: string[];
 }
 
 export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
@@ -76,7 +77,18 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
     alphaMode: 'premultiplied',
     systemOrder: ['input', 'script', 'physics', 'camera', 'light', 'animation', 'render'],
     scriptHooks: ['init', 'update'],
+    pluginsRoot: '/plugins',
+    plugins: [],
 };
+
+/** Tracks what a plugin registered through its ctx / declarations, so the
+ *  open registries (tools, generators, atoms, phases) can be swept on unload. */
+interface PluginLedger {
+    tools: string[];
+    generators: string[];
+    atoms: Array<[string, string]>;
+    phases: string[];
+}
 
 export class Engine {
     device!: GPUDevice;
@@ -84,15 +96,7 @@ export class Engine {
     format!: GPUTextureFormat;
     scene!: Scene;
     renderGraph!: RenderGraph;
-    scriptSystem!: ScriptSystem;
-    inputSystem!: InputSystem;
-    physicsSystem!: PhysicsSystem;
-    cameraSystem!: CameraSystem;
-    lightSystem!: LightSystem;
-    animationSystem!: AnimationSystem;
     toolSystem!: ToolSystem;
-    /** Splat manager; only instantiated when the active app's systems.json lists the `gaussianSplat` system. */
-    gaussianSplatManager: GaussianSplatManager | null = null;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -104,11 +108,22 @@ export class Engine {
     gltfMapping: GltfMapping | null = null;
     /** Currently loaded app id, or null before first load / after unload. */
     currentApp: string | null = null;
+    /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
+    attachments = new Map<string, { obj: unknown; owner: string }>();
+    /** Plain-object view of attachments handed to FrameContext / hooks. */
+    private attachmentsView: Record<string, unknown> = {};
+    /** Per-plugin registration ledger (for owner sweeps of open registries). */
+    private pluginLedgers = new Map<string, PluginLedger>();
+    /** Replacement renderer installed via ctx.replaceRenderer (null = built-in). */
+    private customRenderer: IRenderer | null = null;
+    private customRendererOwner: string | null = null;
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
     private startTime = 0;
     private lastTime = 0;
+    /** True while loadApp is in flight — frame() skips system updates. */
+    private appLoading = false;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -116,36 +131,29 @@ export class Engine {
     }
 
     async init(): Promise<void> {
-        try {
-            const resp = await fetch('/common/engine-config.json');
-            if (resp.ok) this.engineConfig = await resp.json() as EngineConfig;
-        } catch { /* fall back to defaults */ }
+        // Missing engine-config.json is a documented fallback (built-in defaults),
+        // but a present-yet-malformed file must fail loud (json() throws below).
+        const configResp = await fetch('/common/engine-config.json');
+        if (this.isJson(configResp)) {
+            this.engineConfig = await configResp.json() as EngineConfig;
+        } else {
+            console.warn('[Engine] /common/engine-config.json not found — using built-in defaults');
+        }
 
         const root = this.engineConfig.dataRoot;
         // Load the default system order (common/systems.json). Falls back to
-        // engine-config.systemOrder for back-compat when the file is absent.
-        try {
-            const sr = await fetch(`${root}/systems.json`);
-            if (sr.ok) this.commonSystems = await sr.json() as SystemEntry[];
-        } catch { /* fall back below */ }
+        // engine-config.systemOrder for back-compat when the file is absent;
+        // a malformed file throws (fail loud) instead of silently falling back.
+        const sysResp = await fetch(`${root}/systems.json`);
+        if (this.isJson(sysResp)) {
+            this.commonSystems = await sysResp.json() as SystemEntry[];
+        } else {
+            console.warn(`[Engine] ${root}/systems.json not found — falling back to engine-config systemOrder`);
+        }
         if (this.commonSystems.length === 0) {
             this.commonSystems = this.engineConfig.systemOrder.map(name => ({ name }));
         }
         this.activeSystems = this.commonSystems;
-        await schemaRegistry.load(`${root}/components.json`);
-        await RAPIER.init();
-
-        const [vertexInputs, bindLayoutsData, uniformLayoutsData, samplersData, vertexSlotsData, phasesData, vboPresetsData, blendPresetsData, fallbackTexturesData] = await Promise.all([
-            fetch(`${root}/vertex-inputs.json`).then(r => r.json() as Promise<VertexInputDecls>),
-            fetch(`${root}/bind-layouts.json`).then(r => r.json() as Promise<BindLayoutDecls>),
-            fetch(`${root}/uniform-layouts.json`).then(r => r.json() as Promise<UniformLayoutDecls>),
-            fetch(`${root}/samplers.json`).then(r => r.json() as Promise<SamplerDecls>),
-            fetch(`${root}/vertex-slots.json`).then(r => r.json() as Promise<VertexSlotDecls>),
-            fetch(`${root}/phases.json`).then(r => r.json() as Promise<PhaseDecl[]>),
-            fetch(`${root}/vbo-presets.json`).then(r => r.json() as Promise<Record<string, { data: number[]; format: string; stride: number }>>),
-            fetch(`${root}/blend-presets.json`).then(r => r.json() as Promise<Record<string, GPUBlendState>>),
-            fetch(`${root}/fallback-textures.json`).then(r => r.json() as Promise<Record<string, { pixel: number[]; format: GPUTextureFormat }>>),
-        ]);
 
         const adapter = await navigator.gpu.requestAdapter();
         if (!adapter) throw new Error('No GPU adapter');
@@ -157,26 +165,7 @@ export class Engine {
         this.context.configure({ device: this.device, format: this.format, alphaMode: this.engineConfig.alphaMode });
 
         resourceManager.init(this.device);
-        resourceManager.loadBindLayouts(bindLayoutsData);
-        resourceManager.loadSamplers(samplersData);
-        resourceManager.loadVboPresets(vboPresetsData);
-        resourceManager.loadFallbackTextures(fallbackTexturesData);
-        PipelineLoader.setVertexInputs(vertexInputs);
-        PipelineLoader.loadBlendPresets(blendPresetsData);
         PipelineLoader.defaultWorkgroupSize = this.engineConfig.computeTgs;
-        loadVertexSlots(vertexSlotsData);
-        uniformLayouts.load(uniformLayoutsData);
-
-        // Load common system defs so BufferRegistry can see what UBOs/storage
-        // buffers each common system declares. (loadDefs is idempotent — the
-        // subsequent call in loadApp skips already-loaded common defs.)
-        await systemRegistry.loadDefs(this.commonSystems, root, '');
-        // Allocate every common-scoped buffer declared by common systems' defs
-        // (the four legacy engine UBOs — camera / light / timeInput /
-        // pointShadowFaces — are declared in camera.json / light.json /
-        // input.json). Persists for the engine lifetime; app-scoped buffers
-        // declared by an app's own system defs are allocated in loadApp.
-        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
 
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
@@ -185,12 +174,207 @@ export class Engine {
             resourceManager.registerPbrMesh(name, data);
         }
 
-        const meshesCatalog = await fetch(`${root}/meshes.json`)
-            .then(r => r.json() as Promise<Array<{ name: string; generator: string; params?: Record<string, number> }>>)
-            .catch(() => []);
-        for (const entry of meshesCatalog) {
+        // gltf-mapping.json is only required by apps that declare glTF assets;
+        // loadGltf() throws when it is needed but missing. Malformed → json() throws here.
+        const gltfMapResp = await fetch(`${root}/gltf-mapping.json`);
+        this.gltfMapping = this.isJson(gltfMapResp) ? await gltfMapResp.json() as GltfMapping : null;
+
+        this.scene = new Scene();
+        this.renderGraph = new RenderGraph();
+        this.eventBus = new EventBus();
+        const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
+        this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
+
+        // Engine-level plugins (session lifetime). The engine has no compile-time
+        // knowledge of any plugin: ids come from engine-config.json, invocation
+        // goes through the registries populated below. All capability systems
+        // (input/script/camera/light/animation/render/physics/…) come from here.
+        PipelineLoader.pluginsRoot = this.engineConfig.pluginsRoot ?? '/plugins';
+        pluginManager.configure({
+            pluginsRoot: this.engineConfig.pluginsRoot ?? '/plugins',
+            makeCtx: (id, baseUrl) => this.makePluginContext(id, baseUrl),
+            applyDeclarations: (id, plugin) => this.applyPluginDeclarations(id, plugin),
+            sweepOwner: (owner) => this.sweepPluginOwner(owner),
+            beginOwner: (owner) => {
+                const prev = resourceManager.currentOwnerId;
+                resourceManager.enterApp(owner);
+                return prev;
+            },
+            endOwner: (previous) => resourceManager.enterApp(previous),
+        });
+        await pluginManager.loadMany(this.engineConfig.plugins ?? [], 'engine');
+
+        // System defs (ubos/buffers/needs) now come from plugin `systemDefs`;
+        // loadDefs only resolves legacy def files / app script systems.
+        await systemRegistry.loadDefs(this.commonSystems, root, '');
+        // Allocate every common-scoped buffer declared by the baseline systems
+        // (camera / light / timeInput / pointShadowFaces UBOs from core's defs).
+        bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
+
+        this.assertSystemsResolve();
+    }
+
+    /** Build the per-plugin context: identity (baseUrl) + owner-tracked registration surface. */
+    private makePluginContext(id: string, baseUrl: string): PluginContext {
+        const owner = pluginOwner(id);
+        const ledger = this.ledgerFor(owner);
+        return {
+            device: this.device,
+            scene: this.scene,
+            eventBus: this.eventBus,
+            engineConfig: this.engineConfig,
+            canvas: this.canvas,
+            baseUrl,
+            renderer: this.renderer,
+            registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
+            registerAttachment: (name, obj) => this.setAttachment(name, obj, owner),
+            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn, owner),
+            registerPhaseBehavior: (name, behavior) => this.renderGraph.registerPhaseBehavior(name, behavior, owner),
+            replaceRenderer: (r) => {
+                // Renderer seam: swap the 'render' system dispatch target. The
+                // built-in graph stays idle; data-plane calls (loadRenderGraphData,
+                // editor) keep targeting the replacement via Engine.renderer.
+                this.customRenderer = r;
+                this.customRendererOwner = owner;
+                systemRegistry.unregisterBuiltin('render');
+                systemRegistry.registerBuiltin('render', r, owner);
+            },
+            registerMeshGenerator: (name, fn) => {
+                registerMeshGenerator(name, fn);
+                ledger.generators.push(name);
+            },
+            registerToolType: (name, factory) => {
+                registerToolType(name, factory);
+                ledger.tools.push(name);
+            },
+            registerValueAtoms: (ns, atoms) => {
+                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
+            },
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
+            getPlugin: <T extends EnginePlugin,>(pid: string) => (pluginManager.get(pid)?.instance ?? null) as T | null,
+        };
+    }
+
+    private ledgerFor(owner: string): PluginLedger {
+        let ledger = this.pluginLedgers.get(owner);
+        if (!ledger) {
+            ledger = { tools: [], generators: [], atoms: [], phases: [] };
+            this.pluginLedgers.set(owner, ledger);
+        }
+        return ledger;
+    }
+
+    /** One name, all three hook namespaces (mirrors RenderScriptLoader.loadAll). */
+    private registerRenderHook(name: string, fn: unknown, owner: string): void {
+        this.renderGraph.registerValueScript(name, fn as never, owner);
+        this.renderGraph.registerGeometryHook(name, fn as never, owner);
+        this.renderGraph.registerComputeHook(name, fn as never, owner);
+    }
+
+    /** Merge a plugin's declaration fields into the engine registries. */
+    private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
+        const owner = pluginOwner(id);
+        const ledger = this.ledgerFor(owner);
+        if (plugin.components) schemaRegistry.registerDefs(plugin.components, owner);
+        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts, owner);
+        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots, owner);
+        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs, owner);
+        if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
+        if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
+        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets, owner);
+        if (plugin.fallbackTextures) resourceManager.loadFallbackTextures(plugin.fallbackTextures);
+        if (plugin.vboPresets) resourceManager.loadVboPresets(plugin.vboPresets);
+        if (plugin.renderTargets) {
+            resourceManager.loadRenderTargets(plugin.renderTargets);
+            this.renderGraph.mergeRenderTargets(plugin.renderTargets);
+        }
+        if (plugin.phases) {
+            this.renderGraph.addPhases(plugin.phases);
+            for (const p of plugin.phases) ledger.phases.push(p.name);
+        }
+        if (plugin.meshes) this.registerMeshCatalog(plugin.meshes);
+        if (plugin.systemDefs) {
+            for (const def of plugin.systemDefs) systemRegistry.addDef(def, owner);
+        }
+        if (plugin.pipelines) {
+            for (const [key, config] of Object.entries(plugin.pipelines)) {
+                PipelineLoader.registerVirtualConfig(key.includes(':') ? key : `${id}:${key}`, config);
+            }
+        }
+        if (plugin.shaders) {
+            for (const [key, src] of Object.entries(plugin.shaders)) {
+                PipelineLoader.registerVirtualShader(key.includes(':') ? key : `${id}:${key}`, src);
+            }
+        }
+        if (plugin.renderHooks) {
+            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn, owner);
+        }
+        if (plugin.meshGenerators) {
+            for (const [name, fn] of Object.entries(plugin.meshGenerators)) {
+                registerMeshGenerator(name, fn);
+                ledger.generators.push(name);
+            }
+        }
+        if (plugin.toolTypes) {
+            for (const [name, factory] of Object.entries(plugin.toolTypes)) {
+                registerToolType(name, factory);
+                ledger.tools.push(name);
+            }
+        }
+        if (plugin.valueAtoms) {
+            for (const [ns, atoms] of Object.entries(plugin.valueAtoms)) {
+                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
+                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
+            }
+        }
+    }
+
+    /** Release everything a plugin registered (called on plugin unload). */
+    private sweepPluginOwner(owner: string): void {
+        resourceManager.exitApp(owner);
+        bufferRegistry.exitApp(owner);
+        systemRegistry.removeDefsByOwner(owner);
+        systemRegistry.removeSystemsByOwner(owner);
+        schemaRegistry.removeOwner(owner);
+        uniformLayouts.removeOwner(owner);
+        removeVertexSlotsByOwner(owner);
+        PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
+        PipelineLoader.removeInputsByOwner(owner);
+        PipelineLoader.removeBlendPresetsByOwner(owner);
+        this.renderGraph.removeHooksByOwner(owner);
+        this.renderGraph.removePhaseBehaviorsByOwner(owner);
+        if (this.customRendererOwner === owner) {
+            // The replacement renderer is gone — restore the built-in graph.
+            this.customRenderer = null;
+            this.customRendererOwner = null;
+            systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
+        }
+        for (const [name, entry] of this.attachments) {
+            if (entry.owner === owner) this.deleteAttachment(name);
+        }
+        const ledger = this.pluginLedgers.get(owner);
+        if (ledger) {
+            for (const t of ledger.tools) unregisterToolType(t);
+            for (const g of ledger.generators) unregisterMeshGenerator(g);
+            for (const [ns, name] of ledger.atoms) {
+                if (atomNamespaces[ns]) delete atomNamespaces[ns][name];
+            }
+            if (ledger.phases.length > 0) this.renderGraph.removePhases(ledger.phases);
+            this.pluginLedgers.delete(owner);
+        }
+    }
+
+    /** Build meshes from a catalog (meshes.json or a plugin `meshes` field). */
+    private registerMeshCatalog(entries: MeshCatalogEntry[]): void {
+        for (const entry of entries) {
             const gen = meshGenerators[entry.generator];
-            if (!gen) continue;
+            if (!gen) {
+                throw new Error(
+                    `Mesh catalog entry '${entry.name}' references unknown generator '${entry.generator}' ` +
+                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
+                );
+            }
             const data = gen(entry.params ?? {});
             if (isPbrMeshData(data)) {
                 resourceManager.registerPbrMesh(entry.name, data);
@@ -198,48 +382,26 @@ export class Engine {
                 resourceManager.registerMesh(entry.name, data);
             }
         }
+    }
 
-        this.gltfMapping = await fetch(`${root}/gltf-mapping.json`)
-            .then(r => r.ok ? r.json() as Promise<GltfMapping> : null)
-            .catch(() => null);
-
-        this.scene = new Scene();
-        this.renderGraph = new RenderGraph();
-        this.renderGraph.setPhases(phasesData);
-        this.eventBus = new EventBus();
-        this.scriptSystem = new ScriptSystem(this.eventBus, '');
-        this.scriptSystem.attach(this.scene);
-        this.scriptSystem.setHooks(this.engineConfig.scriptHooks);
-        this.inputSystem = new InputSystem(this.canvas, this.eventBus);
-        this.inputSystem.attach();
-        this.physicsSystem = new PhysicsSystem();
-        this.physicsSystem.attach(this.scene, this.eventBus);
-        this.renderGraph.physics = this.physicsSystem;
-        this.cameraSystem = new CameraSystem();
-        this.cameraSystem.attach(this.scene);
-        this.lightSystem = new LightSystem();
-        this.lightSystem.attach(this.scene);
-        this.renderGraph.lightSystem = this.lightSystem;
-        this.animationSystem = new AnimationSystem();
-        this.animationSystem.attach(this.scene);
-        this.toolSystem = new ToolSystem(this.scene, this.eventBus, this.physicsSystem, () => this.aspect());
-        this.scriptSystem.provide(this.physicsSystem, () => this.aspect());
-
-        // Register built-in systems with the SystemRegistry so frame() dispatch
-        // is data-driven (systems.json drives order + presence, registry maps
-        // names to instances). 'gaussianSplat' is registered conditionally by
-        // loadApp() (app-opted-in); the rest are always-present engine systems.
-        systemRegistry.registerBuiltin('input', this.inputSystem);
-        systemRegistry.registerBuiltin('script', this.scriptSystem);
-        systemRegistry.registerBuiltin('physics', this.physicsSystem);
-        systemRegistry.registerBuiltin('camera', this.cameraSystem);
-        systemRegistry.registerBuiltin('light', this.lightSystem);
-        systemRegistry.registerBuiltin('animation', this.animationSystem);
-        systemRegistry.registerBuiltin('render', this.renderGraph);
+    /** The active renderer: a plugin replacement when installed, else the built-in graph. */
+    get renderer(): IRenderer {
+        return this.customRenderer ?? this.renderGraph;
     }
 
     private aspect(): number {
         return this.canvas.width / Math.max(1, this.canvas.height);
+    }
+
+    /** Publish an opaque object under `name` (owner-tagged for sweeps). */
+    setAttachment(name: string, obj: unknown, owner: string): void {
+        this.attachments.set(name, { obj, owner });
+        this.attachmentsView[name] = obj;
+    }
+
+    deleteAttachment(name: string): void {
+        this.attachments.delete(name);
+        delete this.attachmentsView[name];
     }
 
     loadSceneData(json: SceneData): void {
@@ -273,11 +435,8 @@ export class Engine {
 
     async loadRenderGraphData(json: RenderGraphData, appBase?: string): Promise<void> {
         this.renderGraph.fromData(json);
-        const targets = await fetch(`${this.engineConfig.dataRoot}/render-targets.json`)
-            .then(r => (r.ok ? r.json() : {}))
-            .catch(() => ({}));
-        this.renderGraph.setRenderTargets(targets);
-        resourceManager.loadRenderTargets(targets);
+        // Render targets are plugin declarations (core's render-targets.json +
+        // any capability plugin's `renderTargets` field) — already registered.
         const scripts = (json as { renderScripts?: string[] }).renderScripts ?? [];
         this.renderGraph.setScriptFiles(scripts);
         this.renderGraph.setScriptsSubdir(this.engineConfig.renderScriptsSubdir);
@@ -294,6 +453,15 @@ export class Engine {
      * modules and event handlers are all released).
      */
     async loadApp(name: string): Promise<void> {
+        this.appLoading = true;
+        try {
+            await this.loadAppInner(name);
+        } finally {
+            this.appLoading = false;
+        }
+    }
+
+    private async loadAppInner(name: string): Promise<void> {
         this.unloadCurrentApp();
         this.currentApp = name;
         resourceManager.enterApp(name);
@@ -304,6 +472,10 @@ export class Engine {
             throw new Error(`App not found at ${base}/app.json. If you renamed the folder, update the "name" field in app.json to match.`);
         }
         const manifest = await manifestResp.json() as AppManifest;
+
+        // App-scoped plugins (unloaded on app switch). Loaded before systems.json
+        // so plugin-registered systems are resolvable in the app's system order.
+        await pluginManager.loadMany(manifest.plugins ?? [], 'app');
 
         // An app may override the common system order by shipping its own
         // systems.json; absent → keep the common baseline (commonSystems).
@@ -324,7 +496,7 @@ export class Engine {
         bufferRegistry.allocateFor(this.activeSystems, name, this.device);
 
         for (const rel of manifest.components ?? []) {
-            await schemaRegistry.loadMore(this.resolveAsset(base, rel));
+            await schemaRegistry.loadMore(this.resolveAsset(base, rel), `app:${name}`);
         }
 
         const sceneUrl = this.resolveAsset(base, manifest.scene ?? 'scene.json');
@@ -342,10 +514,6 @@ export class Engine {
 
         this.loadSceneData(sceneJson);
 
-        // Script paths in scene.json are relative to the app base.
-        this.scriptSystem.setBaseDir(base);
-        this.animationSystem.setBaseDir(base);
-
         // Render graph assets (pipelines/shaders/textures) live under /common and
         // must be common-owned so they survive app switches; temporarily flip owner.
         resourceManager.enterApp('common');
@@ -362,18 +530,26 @@ export class Engine {
         for (const glb of manifest.gltf ?? []) {
             await this.loadGltf(this.resolveAsset(base, glb));
         }
-        // Splat (3DGS) is an app-opted-in system: only wire the manager + load
-        // GsComponent ply assets when this app's systems.json lists gaussianSplat.
-        // Storage buffers live under the app's resource scope (released on switch).
-        // The heavy lifting (scan scene for GsComponent + async PLY load) is now
-        // a single manager call, keeping splat logic out of the Engine body.
-        if (this.hasSystem('gaussianSplat')) {
-            resourceManager.enterApp(name);
-            const mgr = new GaussianSplatManager();
-            this.gaussianSplatManager = mgr;
-            this.renderGraph.splats = mgr;
-            systemRegistry.registerBuiltin('gaussianSplat', mgr);
-            await mgr.loadFromScene(this.scene, base);
+
+        // Notify every loaded plugin that the app (scene + render graph) is up
+        // (app-scoped capabilities load their per-scene assets here, e.g. the
+        // splat plugin scans GsComponent entities and loads PLY data).
+        await pluginManager.broadcastAppLoaded(base);
+
+        // Every system named in the active list must resolve to a runnable
+        // instance (builtin or loaded script); a name that resolves to nothing
+        // would otherwise be skipped silently every frame.
+        this.assertSystemsResolve();
+    }
+
+    /** Fail loud when an active system name resolves to no implementation. */
+    private assertSystemsResolve(): void {
+        const unresolved = this.activeSystems.filter(s => !systemRegistry.resolve(s));
+        if (unresolved.length > 0) {
+            throw new Error(
+                `Unresolved system(s): ${unresolved.map(s => `'${s.name}'`).join(', ')} — ` +
+                `each needs a builtin registration or a system def with a loadable source (systems.json / systems/<name>.json)`,
+            );
         }
     }
 
@@ -383,22 +559,20 @@ export class Engine {
     unloadCurrentApp(): void {
         if (!this.currentApp) return;
         const appId = this.currentApp;
+        pluginManager.broadcastAppUnloading();
         this.toolSystem.dispose();
-        this.scriptSystem.clear();
-        this.animationSystem.clear();
         this.eventBus.clear();
-        this.physicsSystem.reset();
-        this.gaussianSplatManager?.dispose();
-        this.gaussianSplatManager = null;
-        this.renderGraph.splats = null;
-        systemRegistry.unregisterBuiltin('gaussianSplat');
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
         this.activeSystems = this.commonSystems;
         this.scene.clear();
         schemaRegistry.resetStrings();
+        schemaRegistry.removeOwner(`app:${appId}`);
         this.renderGraph.exitApp(appId);
         resourceManager.exitApp(appId);
+        // App-scoped plugins unload last: their teardown may release resources
+        // registered under their own owner tag (swept via sweepPluginOwner).
+        pluginManager.unloadAppPlugins();
         this.currentApp = null;
     }
 
@@ -426,6 +600,12 @@ export class Engine {
     private frame = (): void => {
         const now = performance.now();
         if (this.startTime === 0) { this.startTime = now; this.lastTime = now; }
+        // Skip system updates while an app is loading (partial scene/registries).
+        if (this.appLoading) {
+            this.lastTime = now;
+            requestAnimationFrame(this.frame);
+            return;
+        }
         const time = (now - this.startTime) / 1000;
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
@@ -441,14 +621,8 @@ export class Engine {
             context: this.context,
             format: this.format,
             eventBus: this.eventBus,
-            physics: this.physicsSystem,
-            camera: this.cameraSystem,
-            light: this.lightSystem,
-            animation: this.animationSystem,
-            input: this.inputSystem,
-            script: this.scriptSystem,
-            splats: this.gaussianSplatManager,
-            renderGraph: this.renderGraph,
+            attachments: this.attachmentsView,
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
             // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
             getBuffer: (name: string) => bufferRegistry.get(name),
             writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
@@ -500,6 +674,13 @@ export class Engine {
     }
 
     async loadGltf(url: string): Promise<void> {
+        const m = this.gltfMapping;
+        if (!m) {
+            throw new Error(
+                `glTF '${url}' declared but ${this.engineConfig.dataRoot}/gltf-mapping.json is missing — ` +
+                `the glTF → component mapping must be declared, not hardcoded`,
+            );
+        }
         const gltfLoader = new GltfLoader();
         const result = await gltfLoader.load(url);
 
@@ -519,52 +700,26 @@ export class Engine {
         }
 
         for (const node of result.nodes) {
-            const m = this.gltfMapping;
             const entityData: Record<string, Record<string, unknown>> = {};
 
-            if (m) {
-                entityData[m.transform.component] = {
-                    [m.transform.fields.position]: node.transform.position,
-                    [m.transform.fields.rotation]: node.transform.rotation,
-                    [m.transform.fields.scale]: node.transform.scale,
-                };
-                entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
+            entityData[m.transform.component] = {
+                [m.transform.fields.position]: node.transform.position,
+                [m.transform.fields.rotation]: node.transform.rotation,
+                [m.transform.fields.scale]: node.transform.scale,
+            };
+            entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
 
-                const pm = result.primitives.find(p => p.name === node.meshName);
-                if (pm) {
-                    const mat: Record<string, unknown> = {};
-                    for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
-                        mat[fieldKey] = (pm.material as unknown as Record<string, unknown>)[gltfKey];
-                    }
-                    for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
-                        const texKey = (pm as unknown as Record<string, unknown>)[gltfKey] as string | undefined;
-                        mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
-                    }
-                    entityData[m.material.component] = mat;
+            const pm = result.primitives.find(p => p.name === node.meshName);
+            if (pm) {
+                const mat: Record<string, unknown> = {};
+                for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
+                    mat[fieldKey] = (pm.material as unknown as Record<string, unknown>)[gltfKey];
                 }
-            } else {
-                entityData['Transform'] = {
-                    position: node.transform.position,
-                    rotation: node.transform.rotation,
-                    scale: node.transform.scale,
-                };
-                entityData['MeshComponent'] = { mesh: node.meshName };
-
-                const pm = result.primitives.find(p => p.name === node.meshName);
-                if (pm) {
-                    entityData['PbrMaterial'] = {
-                        baseColor: pm.material.baseColorFactor,
-                        metallic: pm.material.metallicFactor,
-                        roughness: pm.material.roughnessFactor,
-                        ao: pm.material.aoStrength,
-                        emissive: pm.material.emissiveFactor,
-                        texBaseColor: pm.baseColorTexture ? resourceManager.textureHandle(pm.baseColorTexture) : 0,
-                        texMetalRough: pm.metallicRoughnessTexture ? resourceManager.textureHandle(pm.metallicRoughnessTexture) : 0,
-                        texOcclusion: pm.occlusionTexture ? resourceManager.textureHandle(pm.occlusionTexture) : 0,
-                        texEmissive: pm.emissiveTexture ? resourceManager.textureHandle(pm.emissiveTexture) : 0,
-                        texNormal: pm.normalTexture ? resourceManager.textureHandle(pm.normalTexture) : 0,
-                    };
+                for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
+                    const texKey = (pm as unknown as Record<string, unknown>)[gltfKey] as string | undefined;
+                    mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
                 }
+                entityData[m.material.component] = mat;
             }
 
             this.scene.createEntity(node.name, entityData);

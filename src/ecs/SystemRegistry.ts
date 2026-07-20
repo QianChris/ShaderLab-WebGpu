@@ -1,24 +1,14 @@
 import type { Scene } from './Scene';
 import type { EventBus } from '../events/EventBus';
-import type { InputSystem } from './InputSystem';
-import type { ScriptSystem } from './ScriptSystem';
-import type { PhysicsSystem } from './PhysicsSystem';
-import type { CameraSystem } from './CameraSystem';
-import type { LightSystem } from './LightSystem';
-import type { AnimationSystem } from './AnimationSystem';
-import type { RenderGraph } from '../render/RenderGraph';
-import type { GaussianSplatManager } from '../render/GaussianSplatManager';
 import type { SystemEntry } from '../Engine';
 
 /**
- * Ambient frame state passed to every System.update(). Built-in systems pull
- * what they need from this single context object; cross-system references
- * (camera/light/physics/…) are exposed transitively for systems that read
- * another system's output (e.g. gaussianSplat reads camera.lastView).
- *
- * The cross-system fields are transitional — once a script system can register
- * itself and be looked up by name, the hard-typed fields will be replaced by
- * `systemRegistry.get(name)`.
+ * Ambient frame state passed to every System.update(). Contains only engine
+ * mechanisms — no concrete system types. Cross-system references go through
+ * `getSystem(name)` with structural typing at the call site, and opaque
+ * plugin-published objects travel in `attachments`. This keeps the engine
+ * free of compile-time dependencies on any system implementation (systems
+ * are plugin-provided).
  */
 export interface FrameContext {
     scene: Scene;
@@ -32,28 +22,19 @@ export interface FrameContext {
     context: GPUCanvasContext;
     format: GPUTextureFormat;
     eventBus: EventBus;
-    physics: PhysicsSystem;
-    camera: CameraSystem;
-    light: LightSystem;
-    animation: AnimationSystem;
-    input: InputSystem;
-    script: ScriptSystem;
-    splats: GaussianSplatManager | null;
-    renderGraph: RenderGraph;
+    /** Opaque objects published by plugins via ctx.registerAttachment
+     *  (e.g. 'particles', 'physics', 'splats'). */
+    attachments: Record<string, unknown>;
+    /** Cross-system lookup. Declare a local structural interface for the
+     *  fields you consume; missing system → null (caller decides severity). */
+    getSystem<T = System>(name: string): T | null;
 
     /* ── Script-system GPU access ──────────────────────────────────────
      * The following helpers expose BufferRegistry + compute dispatch to
      * script-loaded systems (`source: "scripts/x.js"`). They let a user
      * write a JS system that writes to declared UBOs/storage buffers and
      * dispatches compute pipelines — no TypeScript changes required to
-     * add a new GPU-driven simulation system.
-     *
-     * Limitations (Step 6 minimal):
-     *   - dispatchCompute opens its own command encoder + submit (slow path);
-     *     lifting the encoder to frame scope for batched compute is a future
-     *     refactor (see PLAN.md Step 6).
-     *   - bind groups for dispatched compute must be passed in by the script
-     *     (no auto-assembly from a layout). */
+     * add a new GPU-driven simulation system. */
 
     /** Look up a named GPU buffer (UBO or storage) declared by a system.json
      *  `ubos` / `buffers` field. The buffer is allocated by BufferRegistry. */
@@ -146,25 +127,62 @@ class ScriptSystemAdapter implements System {
  */
 class SystemRegistry {
     private builtins = new Map<string, System>();
+    /** Registered system name → owner tag ('engine' | 'plugin:<id>'). */
+    private builtinOwners = new Map<string, string>();
     /** system name → def JSON. Populated by loadDefs; cleared on app switch. */
     private defs = new Map<string, SystemDef>();
+    /** Defs injected programmatically by plugins (owner-tagged, swept on plugin unload). */
+    private injectedDefs = new Map<string, { def: SystemDef; owner: string }>();
     /** script source path → loaded adapter. Persists for the app's lifetime. */
     private scripts = new Map<string, System>();
     private appBase = '';
 
-    /** Register a builtin system instance under `name` (matches systems.json `name`). */
-    registerBuiltin(name: string, sys: System): void {
+    /** Register a system instance under `name` (matches systems.json `name`).
+     *  Cross-owner duplicate names throw (fail-loud). */
+    registerBuiltin(name: string, sys: System, owner = 'engine'): void {
+        const existing = this.builtinOwners.get(name);
+        if (existing !== undefined && existing !== owner && this.builtins.has(name)) {
+            throw new Error(`System '${name}' already registered by ${existing} (attempted by ${owner})`);
+        }
         this.builtins.set(name, sys);
+        this.builtinOwners.set(name, owner);
     }
 
     /** Drop a builtin registration (used when an app-opted-in system is torn down). */
     unregisterBuiltin(name: string): void {
         this.builtins.delete(name);
+        this.builtinOwners.delete(name);
+    }
+
+    /** Dispose + drop every system instance registered by `owner` (plugin unload). */
+    removeSystemsByOwner(owner: string): void {
+        for (const [name, o] of [...this.builtinOwners]) {
+            if (o !== owner) continue;
+            this.builtins.get(name)?.dispose?.();
+            this.builtins.delete(name);
+            this.builtinOwners.delete(name);
+        }
     }
 
     /** Look up a loaded system def by system name (or undefined if not loaded). */
     getDef(name: string): SystemDef | undefined {
-        return this.defs.get(name);
+        return this.defs.get(name) ?? this.injectedDefs.get(name)?.def;
+    }
+
+    /** Inject a system def programmatically (plugins). Cross-owner duplicates throw. */
+    addDef(def: SystemDef, owner: string): void {
+        const existing = this.injectedDefs.get(def.name);
+        if (existing && existing.owner !== owner) {
+            throw new Error(`System def '${def.name}' already declared by ${existing.owner} (attempted by ${owner})`);
+        }
+        this.injectedDefs.set(def.name, { def, owner });
+    }
+
+    /** Drop every injected def owned by `owner` (plugin unload). */
+    removeDefsByOwner(owner: string): void {
+        for (const [name, entry] of this.injectedDefs) {
+            if (entry.owner === owner) this.injectedDefs.delete(name);
+        }
     }
 
     /** All currently-loaded system defs (for BufferRegistry to scan). */
@@ -184,6 +202,8 @@ class SystemRegistry {
         this.appBase = appBase;
         for (const entry of systems) {
             if (this.defs.has(entry.name)) continue;
+            // Plugin-injected defs already cover this system — no def file fetch.
+            if (this.injectedDefs.has(entry.name)) continue;
             const defPath = entry.def ?? `systems/${entry.name}.json`;
             let resp = await fetch(`${commonBase}/${defPath}`);
             if (!isJsonResp(resp) && appBase) {
@@ -196,8 +216,7 @@ class SystemRegistry {
             // Pre-load script systems (builtin: needs no async work).
             if (def.source && !def.source.startsWith('builtin:')) {
                 if (!this.scripts.has(def.source)) {
-                    const adapter = await this.loadScriptSystem(def.source);
-                    if (adapter) this.scripts.set(def.source, adapter);
+                    this.scripts.set(def.source, await this.loadScriptSystem(def.source));
                 }
             }
         }
@@ -228,39 +247,41 @@ class SystemRegistry {
     }
 
     /** Fetch → Blob URL → dynamic import a JS system script (mirrors ScriptSystem).
-     *  Path resolution: absolute (leading /) → as-is; relative → appBase. */
-    private async loadScriptSystem(source: string): Promise<ScriptSystemAdapter | null> {
+     *  Path resolution: absolute (leading /) → as-is; relative → appBase.
+     *  Throws on any failure (missing file, syntax error) — a system declared in
+     *  systems.json that cannot load is a config bug, not a skippable condition. */
+    private async loadScriptSystem(source: string): Promise<ScriptSystemAdapter> {
         const url = source.startsWith('/') ? source : `${this.appBase}/${source}`;
         // Cache-bust so dev-server edits to the system script reload cleanly.
         const cacheBust = `${url}?t=${Date.now()}`;
+        const resp = await fetch(cacheBust);
+        if (!resp.ok) {
+            throw new Error(`System script '${source}' not found (HTTP ${resp.status} for ${url})`);
+        }
+        const src = await resp.text();
+        const blob = new Blob([src], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
         try {
-            const resp = await fetch(cacheBust);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const src = await resp.text();
-            const blob = new Blob([src], { type: 'text/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
-            const mod = await import(/* @vite-ignore */ blobUrl).finally(() => URL.revokeObjectURL(blobUrl));
+            const mod = await import(/* @vite-ignore */ blobUrl);
             const systemMod = (mod.default ?? mod) as SystemScriptModule;
             return new ScriptSystemAdapter(systemMod);
         } catch (err) {
-            console.error(`[SystemRegistry] failed to load system script '${source}':`, err);
-            return null;
+            throw new Error(`System script '${source}' failed to import: ${err}`);
+        } finally {
+            URL.revokeObjectURL(blobUrl);
         }
     }
 
     /** Synchronous resolution: returns System or null.
-     *  Uses pre-loaded defs (loadDefs must have been called for script systems
-     *  to be resolvable). Builtin systems work without loadDefs (by-name fallback). */
+     *  Registered instances (plugins' ctx.registerSystem) resolve by name; a
+     *  def file with a script `source` resolves to its loaded script adapter
+     *  (the no-build escape hatch). The legacy 'builtin:' source prefix is
+     *  ignored — all implementations register through the same registry. */
     resolve(entry: SystemEntry): System | null {
         const def = this.defs.get(entry.name);
-        if (def) {
-            if (def.source.startsWith('builtin:')) {
-                const id = def.source.slice('builtin:'.length);
-                return this.builtins.get(id) ?? null;
-            }
+        if (def?.source && !def.source.startsWith('builtin:')) {
             return this.scripts.get(def.source) ?? null;
         }
-        // No def file → fall back to builtin-by-name (backward compat).
         return this.builtins.get(entry.name) ?? null;
     }
 

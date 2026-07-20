@@ -19,9 +19,8 @@ export interface GeometryHookContext {
     dt: number;
     cw: number;
     ch: number;
-    physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-    particles: import('./ParticleManager').ParticleManager;
-    splats: import('./GaussianSplatManager').GaussianSplatManager | null;
+    /** Opaque plugin-published objects (registerAttachment): particles/physics/splats/…. */
+    attachments: Record<string, unknown>;
     computePipelines: Map<string, GPUComputePipeline>;
 }
 
@@ -31,7 +30,8 @@ export interface ComputeHookContext {
     time: number;
     dt: number;
     computePipelines: Map<string, GPUComputePipeline>;
-    particles: import('./ParticleManager').ParticleManager;
+    /** Opaque plugin-published objects (registerAttachment). */
+    attachments: Record<string, unknown>;
     /** Extra pipeline names declared on the entry (e.g. particle emit/sim). */
     aux: Record<string, string | undefined>;
     /** Look up compute pipeline metadata (workgroupSize, bindings) by config path. */
@@ -97,7 +97,12 @@ export class PipelineDriver {
         const decl = this.decl.compute as { script?: string } | undefined;
         if (!decl?.script) return;
         const hook = this.computeHooks.get(decl.script);
-        if (!hook) return;
+        if (!hook) {
+            throw new Error(
+                `Pipeline '${this.path}': compute hook '${decl.script}' not found — ` +
+                `is its script listed in render.json "renderScripts" and does it export that function?`,
+            );
+        }
         hook(encoder, {
             ...ctx,
             entities: this.query ? this.query(ctx.scene.world) : [],
@@ -111,13 +116,7 @@ export class PipelineDriver {
         pass: GPURenderPassEncoder,
         scene: Scene,
         pipeline: GPURenderPipeline,
-        frame: {
-            time: number; dt: number; cw: number; ch: number;
-            physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-            particles: import('./ParticleManager').ParticleManager;
-            splats: import('./GaussianSplatManager').GaussianSplatManager | null;
-            computePipelines: Map<string, GPUComputePipeline>;
-        },
+        frame: import('./types').DriverFrame,
     ): void {
         const geom = this.decl.geometry;
         const entities = this.query ? this.query(scene.world) : [];
@@ -136,15 +135,18 @@ export class PipelineDriver {
         if (geom.hook) {
             this.bindGroups(pass, vctx);
             const hook = this.geometryHooks.get(geom.hook);
-            if (hook) {
-                hook(pass, {
-                    scene, entities, pipeline,
-                    time: frame.time, dt: frame.dt, cw: frame.cw, ch: frame.ch,
-                    physics: frame.physics, particles: frame.particles,
-                    splats: frame.splats,
-                    computePipelines: frame.computePipelines,
-                });
+            if (!hook) {
+                throw new Error(
+                    `Pipeline '${this.path}': geometry hook '${geom.hook}' not found — ` +
+                    `is its script listed in render.json "renderScripts" and does it export that function?`,
+                );
             }
+            hook(pass, {
+                scene, entities, pipeline,
+                time: frame.time, dt: frame.dt, cw: frame.cw, ch: frame.ch,
+                attachments: frame.attachments,
+                computePipelines: frame.computePipelines,
+            });
             return;
         }
 
@@ -177,6 +179,13 @@ export class PipelineDriver {
             pass.setBindGroup(0, resourceManager.frameBindGroup());
         } else if (names[0] === 'frameShadow') {
             pass.setBindGroup(0, resourceManager.frameShadowBindGroup());
+        } else if (names.length > 0 && !(this.decl.bindGroups ?? []).some(bg => bg.group === 0)) {
+            // A named @group(0) layout that is neither a known frame layout nor
+            // covered by a renderer.bindGroups entry would silently stay unbound.
+            throw new Error(
+                `Pipeline '${this.path}': bindLayout[0] '${names[0]}' is not a known frame layout ` +
+                `('frame' | 'frameShadow') and no renderer.bindGroups entry declares group 0`,
+            );
         }
 
         for (const bg of this.decl.bindGroups ?? []) {
@@ -307,8 +316,12 @@ export class PipelineDriver {
         vctx: ValueContext,
     ): void {
         if (vb.source === 'vbo') {
-            const buf = resourceManager.getNamedVBO(vb.vbo ?? 'quad');
-            if (buf) pass.setVertexBuffer(vb.slot, buf);
+            const vboName = vb.vbo ?? 'quad';
+            const buf = resourceManager.getNamedVBO(vboName);
+            if (!buf) {
+                throw new Error(`Pipeline '${this.path}': VBO '${vboName}' not declared in vbo-presets.json`);
+            }
+            pass.setVertexBuffer(vb.slot, buf);
             return;
         }
         const meshName = resolveString(vb.mesh ?? 'MeshComponent.mesh', vctx);

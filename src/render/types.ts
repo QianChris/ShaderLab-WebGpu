@@ -1,4 +1,6 @@
 import type { SlotName } from './vertexSlots';
+import type { Scene } from '../ecs/Scene';
+import type { FrameContext } from '../ecs/SystemRegistry';
 
 export interface VertexAttributeConfig {
     format: GPUVertexFormat;
@@ -14,11 +16,13 @@ export interface VertexLayoutConfig {
 
 export type BlendPreset = string;
 
-/** phases.json: declarative phase list with ordering and behavior tags. */
+/** phases.json: declarative phase list with ordering and behavior tags.
+ *  `behavior` names a registered PhaseBehavior ('normal' when omitted);
+ *  new behaviors can be registered by plugins — the set is open. */
 export interface PhaseDecl {
     name: string;
     order: number;
-    behavior: 'normal' | 'shadow-clear' | 'postprocess-chain';
+    behavior: string;
 }
 
 export type RenderPhase = string;
@@ -154,4 +158,81 @@ export interface RenderGraphData {
      *  entity renders into its own on-screen `Camera.viewport` rect per frame.
      *  When false (default), only the primary (first active) Camera renders. */
     multiView?: boolean;
+}
+
+/* ── Phase behaviors (open pass-strategy registry) ─────────────────── */
+
+/** Pixel rect for a camera's on-screen viewport (scissor + viewport). */
+export interface ViewportRect {
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+}
+
+/** Per-frame info handed to PipelineDriver.record and render hooks. */
+export interface DriverFrame {
+    time: number;
+    dt: number;
+    cw: number;
+    ch: number;
+    /** Opaque plugin-published objects (particles/physics/splats/…). */
+    attachments: Record<string, unknown>;
+    computePipelines: Map<string, GPUComputePipeline>;
+}
+
+/**
+ * Facade handed to a PhaseBehavior.run. Deliberately narrow: it exposes the
+ * mechanisms a pass strategy needs (encoder, drivers, target metadata, the
+ * default record path) without opening the render graph internals.
+ */
+export interface PhaseBehaviorContext {
+    encoder: GPUCommandEncoder;
+    phase: PhaseDecl;
+    /** Every driver declared in this phase — enabled AND disabled (behaviors
+     *  like shadow-clear run even when their pipeline is disabled). */
+    drivers: import('./PipelineDriver').PipelineDriver[];
+    scene: Scene;
+    frame: DriverFrame;
+    cw: number;
+    ch: number;
+    format: GPUTextureFormat;
+    swapView: GPUTextureView;
+    viewport: ViewportRect | null;
+    /** Targets cleared so far this frame (share to merge load/clear ops). */
+    cleared: Set<string>;
+    /** True when the 'scene' target aliases the swapchain (no post chain). */
+    sceneIsScreen: boolean;
+    getSystem<T>(name: string): T | null;
+    pipelineFor(d: import('./PipelineDriver').PipelineDriver): GPURenderPipeline | undefined;
+    /** Names of transient (ping-pong) render targets from render-targets.json. */
+    transientTargets(): string[];
+    /** The engine's default normal-phase path: group enabled drivers by
+     *  (color,depth) target, open merged passes, record every driver. */
+    runDefault(): void;
+}
+
+/** A pass-execution strategy, registered by name (phases.json `behavior`). */
+export interface PhaseBehavior {
+    /** Multi-view: run once per camera (true, default) or once per frame
+     *  before the per-camera stage (false — e.g. shadow map rendering). */
+    perCamera?: boolean;
+    run(ctx: PhaseBehaviorContext): void;
+}
+
+/* ── Renderer seam (whole-renderer replacement, opt-in) ────────────── */
+
+/**
+ * The renderer contract the engine holds. The built-in RenderGraph implements
+ * it; a plugin may provide its own via ctx.replaceRenderer (the built-in graph
+ * then stays idle). Editor data-plane methods are part of the contract so the
+ * pipeline panel keeps working against custom renderers.
+ */
+export interface IRenderer {
+    update(ctx: FrameContext): void;
+    compile(device: GPUDevice, format: GPUTextureFormat, dataBase: string, appBase?: string): Promise<void>;
+    fromData(data: RenderGraphData): void;
+    toData(): RenderGraphData;
+    exitApp(appId: string): void;
+    registerPhaseBehavior(name: string, behavior: PhaseBehavior, owner?: string): void;
 }

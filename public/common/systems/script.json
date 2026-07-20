@@ -1,8 +1,0 @@
-{
-    "name": "script",
-    "source": "builtin:script",
-    "components": ["ScriptComponent"],
-    "ubos": [],
-    "buffers": [],
-    "needs": ["input"]
-}

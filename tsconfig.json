@@ -7,7 +7,7 @@
     "noEmit": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["@webgpu/types"]
+    "types": ["@webgpu/types", "vite/client"]
   },
   "include": ["src"]
 }

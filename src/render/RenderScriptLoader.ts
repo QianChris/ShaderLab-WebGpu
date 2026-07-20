@@ -55,13 +55,9 @@ export class RenderScriptLoader {
         const compute = new Map<string, ComputeHook>();
 
         for (const file of files) {
-            let exports: Record<string, AnyFn>;
-            try {
-                exports = await this.load(file);
-            } catch (err) {
-                console.error(`[RenderScriptLoader] ${err}`);
-                continue;
-            }
+            // A script listed in render.json "renderScripts" that fails to load
+            // is a config bug — propagate instead of silently dropping its hooks.
+            const exports = await this.load(file);
             // Derive the hook key base from the file's basename: strip the
             // leading sub-namespace dir (e.g. "render/" in "render/particles.js")
             // and the .js suffix, so the registered key is "particles.simulate"

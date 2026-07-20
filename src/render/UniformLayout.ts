@@ -100,10 +100,26 @@ export class UniformLayout {
 
 export class UniformLayoutRegistry {
     private layouts = new Map<string, UniformLayout>();
+    /** Layout name → owner tag ('engine' | 'plugin:<id>'). */
+    private owners = new Map<string, string>();
 
-    load(decls: UniformLayoutDecls): void {
+    load(decls: UniformLayoutDecls, owner = 'engine'): void {
         for (const [name, members] of Object.entries(decls)) {
+            const existing = this.owners.get(name);
+            if (existing !== undefined && existing !== owner) {
+                throw new Error(`Uniform layout '${name}' already declared by ${existing} (attempted by ${owner})`);
+            }
+            this.owners.set(name, owner);
             this.layouts.set(name, new UniformLayout(members));
+        }
+    }
+
+    /** Remove every layout registered by `owner` (plugin unload). */
+    removeOwner(owner: string): void {
+        for (const [name, o] of [...this.owners]) {
+            if (o !== owner) continue;
+            this.owners.delete(name);
+            this.layouts.delete(name);
         }
     }
 

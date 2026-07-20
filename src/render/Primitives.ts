@@ -296,6 +296,17 @@ export const PRESET_PBR_MESHES: Record<string, PbrMeshData> = {
 
 export type MeshGenerator = (params: Record<string, number>) => MeshData | PbrMeshData;
 
+/** Register a mesh generator (plugins). Duplicate names throw (fail-loud). */
+export function registerMeshGenerator(name: string, gen: MeshGenerator): void {
+    if (meshGenerators[name]) throw new Error(`Mesh generator '${name}' already registered`);
+    meshGenerators[name] = gen;
+}
+
+/** Remove a mesh generator (plugin unload). */
+export function unregisterMeshGenerator(name: string): void {
+    delete meshGenerators[name];
+}
+
 export const meshGenerators: Record<string, MeshGenerator> = {
     triangle: () => makeTriangle(),
     cube: () => makeCube(),

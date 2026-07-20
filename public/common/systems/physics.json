@@ -1,9 +1,0 @@
-{
-    "name": "physics",
-    "source": "builtin:physics",
-    "components": ["ColliderComponent", "RigidBodyComponent", "PhysicsControllerComponent", "Transform"],
-    "ubos": [],
-    "buffers": [],
-    "needs": ["script"],
-    "requires": ["wasm:rapier"]
-}

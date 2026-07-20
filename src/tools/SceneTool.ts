@@ -1,6 +1,5 @@
 import type { Scene } from '../ecs/Scene';
 import type { EventBus } from '../events/EventBus';
-import type { PhysicsSystem } from '../ecs/PhysicsSystem';
 
 export interface ToolConfig {
     /** Builtin tool name (e.g., "pick"). Mutually exclusive with `source`. */
@@ -16,7 +15,9 @@ export interface ToolConfig {
 export interface ToolContext {
     scene: Scene;
     bus: EventBus;
-    physics: PhysicsSystem;
+    /** Cross-system lookup (structural typing at the call site) — tools take
+     *  no compile-time dependency on any system implementation. */
+    getSystem<T = unknown>(name: string): T | null;
     getAspect: () => number;
 }
 

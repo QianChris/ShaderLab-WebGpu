@@ -1,41 +1,41 @@
 import { defineQuery } from 'bitecs/legacy';
 import { resourceManager } from './ResourceManager';
 import { PipelineLoader } from './PipelineLoader';
-import { ParticleManager } from './ParticleManager';
 import { PipelineDriver, type GeometryHook, type ComputeHook } from './PipelineDriver';
 import { RenderScriptLoader } from './RenderScriptLoader';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
 import { uniformLayouts } from './UniformLayout';
-import { type RenderGraphData, type PhaseMap, type PhaseDecl } from './types';
+import { normalBehavior, shadowClearBehavior, postProcessChainBehavior } from './phaseBehaviors';
+import {
+    type RenderGraphData,
+    type PhaseMap,
+    type PhaseDecl,
+    type PhaseBehavior,
+    type PhaseBehaviorContext,
+    type DriverFrame,
+    type ViewportRect,
+    type IRenderer,
+} from './types';
 import type { RenderTargetDecls } from './rendererDecl';
 import type { ValueContext } from './valueResolver';
-import type { Scene, CameraView } from '../ecs/Scene';
+import type { CameraView } from '../ecs/Scene';
 import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const SCREEN = 'screen';
 
-/** Pixel rect for a camera's on-screen viewport (scissor + viewport). */
-interface ViewportRect {
-    x: number;
-    y: number;
-    w: number;
-    h: number;
-}
-
 /**
- * Data-driven render graph. Owns no per-pipeline draw logic. Each render
- * pipeline embeds a declarative `renderer` block (query / target / geometry /
- * bind groups); a generic PipelineDriver executes it. Pipelines self-declare
- * their phase; render.json is just the load manifest + defaults.
+ * Data-driven render graph. Owns no per-pipeline draw logic and no pass
+ * strategy: each render pipeline embeds a declarative `renderer` block executed
+ * by a generic PipelineDriver, and each phase names a registered PhaseBehavior
+ * (open registry — engine defaults and plugins register through the same API).
  */
-export class RenderGraph implements System {
+export class RenderGraph implements System, IRenderer {
     name = '';
     phases: PhaseMap = {};
-    physics: import('../ecs/PhysicsSystem').PhysicsSystem | null = null;
-    lightSystem: import('../ecs/LightSystem').LightSystem | null = null;
-    splats: import('./GaussianSplatManager').GaussianSplatManager | null = null;
 
     private phaseList: PhaseDecl[] = [];
+    private phaseBehaviors = new Map<string, PhaseBehavior>();
+    private phaseBehaviorOwners = new Map<string, string>();
     private clearColor: [number, number, number, number] = [0, 0, 0, 1];
     private pipelines = new Map<string, GPURenderPipeline>();
     private computePipelines = new Map<string, GPUComputePipeline>();
@@ -44,7 +44,6 @@ export class RenderGraph implements System {
     private dataBase = '/common';
     private scriptsSubdir = 'scripts';
     private format: GPUTextureFormat = 'bgra8unorm';
-    private particles = new ParticleManager();
     private sceneIsScreen = true;
     /** Multi-view split-screen toggle (from render.json `multiView: true`). */
     private multiView = false;
@@ -54,21 +53,72 @@ export class RenderGraph implements System {
     private valueScripts = new Map<string, (ctx: ValueContext) => number[] | number>();
     private geometryHooks = new Map<string, GeometryHook>();
     private computeHooks = new Map<string, ComputeHook>();
+    /** Hook name → owner tag ('app' = render.json renderScripts, 'plugin:<id>'). */
+    private hookOwners = new Map<string, string>();
     private scriptFiles: string[] = [];
 
-    /** Register an escape-hatch script (Phase 2/3 populate these). */
-    registerValueScript(name: string, fn: (ctx: ValueContext) => number[] | number): void {
+    constructor() {
+        // Engine-default pass strategies, registered through the same public
+        // registry plugins use — no special-cased dispatch anywhere.
+        this.registerPhaseBehavior('normal', normalBehavior, 'engine');
+        this.registerPhaseBehavior('shadow-clear', shadowClearBehavior, 'engine');
+        this.registerPhaseBehavior('postprocess-chain', postProcessChainBehavior, 'engine');
+    }
+
+    /** Register a pass strategy under a behavior name (phases.json `behavior`). */
+    registerPhaseBehavior(name: string, behavior: PhaseBehavior, owner = 'engine'): void {
+        const existing = this.phaseBehaviorOwners.get(name);
+        if (existing !== undefined && existing !== owner) {
+            throw new Error(`Phase behavior '${name}' already registered by ${existing} (attempted by ${owner})`);
+        }
+        this.phaseBehaviorOwners.set(name, owner);
+        this.phaseBehaviors.set(name, behavior);
+    }
+
+    /** Drop every phase behavior registered by `owner` (plugin unload). */
+    removePhaseBehaviorsByOwner(owner: string): void {
+        for (const [name, o] of [...this.phaseBehaviorOwners]) {
+            if (o !== owner) continue;
+            this.phaseBehaviorOwners.delete(name);
+            this.phaseBehaviors.delete(name);
+        }
+    }
+
+    /** Register an escape-hatch script (renderScripts or plugins). */
+    registerValueScript(name: string, fn: (ctx: ValueContext) => number[] | number, owner = 'app'): void {
         this.valueScripts.set(name, fn);
+        this.hookOwners.set(name, owner);
     }
-    registerGeometryHook(name: string, fn: GeometryHook): void {
+    registerGeometryHook(name: string, fn: GeometryHook, owner = 'app'): void {
         this.geometryHooks.set(name, fn);
+        this.hookOwners.set(name, owner);
     }
-    registerComputeHook(name: string, fn: ComputeHook): void {
+    registerComputeHook(name: string, fn: ComputeHook, owner = 'app'): void {
         this.computeHooks.set(name, fn);
+        this.hookOwners.set(name, owner);
+    }
+
+    /** Drop every hook registered by `owner` (app switch / plugin unload). */
+    removeHooksByOwner(owner: string): void {
+        for (const [name, o] of [...this.hookOwners]) {
+            if (o !== owner) continue;
+            this.hookOwners.delete(name);
+            this.valueScripts.delete(name);
+            this.geometryHooks.delete(name);
+            this.computeHooks.delete(name);
+        }
     }
 
     setRenderTargets(targets: RenderTargetDecls): void {
-        this.targets = targets;
+        this.targets = { ...this.targets, ...targets };
+    }
+
+    /** Merge render targets declared by a plugin. Duplicate names throw. */
+    mergeRenderTargets(targets: RenderTargetDecls): void {
+        for (const [name, decl] of Object.entries(targets)) {
+            if (this.targets[name]) throw new Error(`Render target '${name}' already declared`);
+            this.targets[name] = decl;
+        }
     }
 
     /** Release app-owned state: drivers, escape-hatch hooks, particle GPU buffers.
@@ -79,10 +129,7 @@ export class RenderGraph implements System {
         // GPUBindGroups dereferenced now rather than after driver GC).
         for (const d of this.drivers) d.dispose();
         this.drivers = [];
-        this.valueScripts.clear();
-        this.geometryHooks.clear();
-        this.computeHooks.clear();
-        this.particles.clear();
+        this.removeHooksByOwner('app');
     }
 
     /** Names of render escape-hatch scripts to load at compile (e.g. "render/pbr.js"). */
@@ -100,6 +147,22 @@ export class RenderGraph implements System {
         this.phaseList = [...phases].sort((a, b) => a.order - b.order);
     }
 
+    /** Merge phases declared by a plugin. Duplicate names throw (fail-loud). */
+    addPhases(phases: PhaseDecl[]): void {
+        for (const p of phases) {
+            if (this.phaseList.some(e => e.name === p.name)) {
+                throw new Error(`Phase '${p.name}' already declared`);
+            }
+            this.phaseList.push(p);
+        }
+        this.phaseList.sort((a, b) => a.order - b.order);
+    }
+
+    /** Remove phases by name (plugin unload). */
+    removePhases(names: string[]): void {
+        this.phaseList = this.phaseList.filter(p => !names.includes(p.name));
+    }
+
     /** Ordered phase names (for editor display). */
     getPhaseNames(): string[] {
         return this.phaseList.map(p => p.name);
@@ -114,6 +177,17 @@ export class RenderGraph implements System {
             if (def) this.clearColor = [def[0], def[1], def[2], def[3]];
         }
         this.multiView = data.multiView ?? false;
+        // Every phase key in render.json must exist in phases.json — entries
+        // under an unknown phase name would otherwise be dropped silently.
+        const known = new Set(this.phaseList.map(p => p.name));
+        for (const key of Object.keys(data.phases)) {
+            if (!known.has(key)) {
+                throw new Error(
+                    `Render graph '${data.name}' declares phase '${key}' which is not in phases.json ` +
+                    `(known: ${[...known].join(', ')})`,
+                );
+            }
+        }
         this.phases = {};
         for (const phase of this.phaseList) {
             const list = data.phases[phase.name] ?? [];
@@ -127,12 +201,13 @@ export class RenderGraph implements System {
         this.drivers = [];
 
         // Load escape-hatch render scripts, merge into the hook registries.
+        // Plugin-registered hooks of the same name take precedence (skip).
         if (this.scriptFiles.length > 0) {
             const loader = new RenderScriptLoader(dataBase, this.scriptsSubdir);
             const hooks = await loader.loadAll(this.scriptFiles);
-            for (const [k, v] of hooks.value) if (!this.valueScripts.has(k)) this.valueScripts.set(k, v);
-            for (const [k, v] of hooks.geometry) if (!this.geometryHooks.has(k)) this.geometryHooks.set(k, v);
-            for (const [k, v] of hooks.compute) if (!this.computeHooks.has(k)) this.computeHooks.set(k, v);
+            for (const [k, v] of hooks.value) if (!this.valueScripts.has(k)) this.registerValueScript(k, v, 'app');
+            for (const [k, v] of hooks.geometry) if (!this.geometryHooks.has(k)) this.registerGeometryHook(k, v, 'app');
+            for (const [k, v] of hooks.compute) if (!this.computeHooks.has(k)) this.registerComputeHook(k, v, 'app');
         }
 
         // Load every pipeline listed in the manifest, build a driver from its renderer block.
@@ -172,7 +247,15 @@ export class RenderGraph implements System {
                 const driver = new PipelineDriver(entry.pipeline, decl, entry, this.valueScripts, this.geometryHooks, this.computeHooks);
                 driver.dataBase = dataBase;
                 driver.aux = decl.aux ?? {};
-                if (decl.query) driver.query = defineQuery(decl.query.map(name => schemaRegistry.get(name)!));
+                if (decl.query) {
+                    driver.query = defineQuery(decl.query.map(name => {
+                        const comp = schemaRegistry.get(name);
+                        if (!comp) {
+                            throw new Error(`Pipeline '${entry.pipeline}': renderer.query component '${name}' is not registered (components.json)`);
+                        }
+                        return comp;
+                    }));
+                }
                 this.drivers.push(driver);
             }
         }
@@ -202,11 +285,12 @@ export class RenderGraph implements System {
         }
     }
 
-    /** Try loading a render pipeline from commonBase first, then appBase on 404. */
+    /** Try loading a render pipeline from commonBase first, then appBase on 404.
+     *  Plugin-prefixed paths ('<plugin>:…') resolve directly, no fallback. */
     private async tryLoadPipeline(
         device: GPUDevice, format: GPUTextureFormat, commonBase: string, appBase: string | undefined, path: string,
     ): Promise<GPURenderPipeline> {
-        if (path.startsWith('/')) {
+        if (path.startsWith('/') || PipelineLoader.pluginRef(path)) {
             return PipelineLoader.load(device, format, commonBase, path);
         }
         try {
@@ -217,11 +301,12 @@ export class RenderGraph implements System {
         }
     }
 
-    /** Try loading a compute pipeline from commonBase first, then appBase on 404. */
+    /** Try loading a compute pipeline from commonBase first, then appBase on 404.
+     *  Plugin-prefixed paths ('<plugin>:…') resolve directly, no fallback. */
     private async tryLoadCompute(
         device: GPUDevice, commonBase: string, appBase: string | undefined, path: string,
     ): Promise<GPUComputePipeline> {
-        if (path.startsWith('/')) {
+        if (path.startsWith('/') || PipelineLoader.pluginRef(path)) {
             return PipelineLoader.loadCompute(device, commonBase, path);
         }
         try {
@@ -234,11 +319,11 @@ export class RenderGraph implements System {
 
     /** System interface: run the render graph for this frame. */
     update(ctx: FrameContext): void {
-        this.execute(ctx.device, ctx.context, ctx.format, ctx.scene, ctx.time, ctx.dt);
+        this.execute(ctx);
     }
 
-    execute(device: GPUDevice, context: GPUCanvasContext, format: GPUTextureFormat, scene: Scene, time: number, dt: number): void {
-        const tex = context.getCurrentTexture();
+    execute(ctx: FrameContext): void {
+        const tex = ctx.context.getCurrentTexture();
         const cw = tex.width;
         const ch = tex.height;
         const canvasAspect = cw / Math.max(1, ch);
@@ -249,122 +334,143 @@ export class RenderGraph implements System {
         // camera UBO is re-written per camera, so each camera must own its own
         // command buffer (writeBuffer → submit) — a single command buffer
         // cannot safely re-write a shared UBO between render passes.
-        const cameras = scene.getActiveCameras(canvasAspect);
+        const cameras = ctx.scene.getActiveCameras(canvasAspect);
         const swapView = tex.createView();
         if (this.multiView && cameras.length > 1) {
-            this.executeMultiView(device, scene, time, dt, cw, ch, format, swapView, cameras);
+            this.executeMultiView(ctx, cw, ch, swapView, cameras);
             return;
         }
-        this.executeSingle(device, scene, time, dt, cw, ch, format, swapView);
+        this.executeSingle(ctx, cw, ch, swapView);
     }
 
-    /** Single-camera (or zero-camera) path: the original render-graph execute.
-     *  The camera UBO is assumed already written by CameraSystem.update. */
-    private executeSingle(
-        device: GPUDevice, scene: Scene, time: number, dt: number,
-        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
-    ): void {
-        const frame = {
-            time, dt, cw, ch,
-            physics: this.physics,
-            particles: this.particles,
-            splats: this.splats,
+    /** Per-frame info for drivers + hooks (attachments carry plugin objects). */
+    private driverFrame(ctx: FrameContext, cw: number, ch: number): DriverFrame {
+        return {
+            time: ctx.time,
+            dt: ctx.dt,
+            cw, ch,
+            attachments: ctx.attachments,
             computePipelines: this.computePipelines,
         };
+    }
 
-        const encoder = device.createCommandEncoder();
+    /** Resolve a phase's behavior from the registry (fail-loud when missing). */
+    private behaviorFor(phase: PhaseDecl): PhaseBehavior {
+        const name = phase.behavior || 'normal';
+        const behavior = this.phaseBehaviors.get(name);
+        if (!behavior) {
+            throw new Error(
+                `Phase '${phase.name}': behavior '${name}' is not registered ` +
+                `(known: ${[...this.phaseBehaviors.keys()].join(', ')})`,
+            );
+        }
+        return behavior;
+    }
 
-        // ── shadow phase ──
-        // No upfront clear: when there are shadow-casting lights, runShadowPhase
-        // clears each face/layer via loadOp as it renders. When there are none,
-        // the shadow textures are never sampled (per-light params.y gating), so
-        // clearing would be wasted work — and a whole-array view can't be used as
-        // a render-pass attachment anyway (WebGPU requires single-layer views).
-        void this.phaseList.find(p => p.behavior === 'shadow-clear');
+    /** True when any enabled driver sits in a phase with the given behavior. */
+    private hasEnabledWithBehavior(behaviorName: string): boolean {
+        const names = new Set(
+            this.phaseList.filter(p => (p.behavior || 'normal') === behaviorName).map(p => p.name),
+        );
+        return this.drivers.some(d => d.entry.enabled && names.has(d.decl.phase));
+    }
+
+    /** Build the narrow facade a PhaseBehavior runs against. */
+    private behaviorContext(
+        ctx: FrameContext,
+        encoder: GPUCommandEncoder,
+        phase: PhaseDecl,
+        frame: DriverFrame,
+        cw: number, ch: number,
+        swapView: GPUTextureView,
+        cleared: Set<string>,
+        viewport: ViewportRect | null,
+    ): PhaseBehaviorContext {
+        return {
+            encoder,
+            phase,
+            drivers: this.drivers.filter(d => d.decl.phase === phase.name),
+            scene: ctx.scene,
+            frame,
+            cw, ch,
+            format: ctx.format,
+            swapView,
+            viewport,
+            cleared,
+            sceneIsScreen: this.sceneIsScreen,
+            getSystem: ctx.getSystem,
+            pipelineFor: (d) => this.pipelines.get(d.path),
+            transientTargets: () => this.transientTargetNames(),
+            runDefault: () => {
+                const enabled = this.drivers.filter(d => d.entry.enabled && d.decl.phase === phase.name);
+                if (enabled.length === 0) return;
+                this.runNormalPhase(encoder, enabled, ctx, frame, cw, ch, swapView, cleared, viewport);
+            },
+        };
+    }
+
+    /** Single-camera (or zero-camera) path. The camera UBO is assumed already
+     *  written by the camera system. */
+    private executeSingle(ctx: FrameContext, cw: number, ch: number, swapView: GPUTextureView): void {
+        const frame = this.driverFrame(ctx, cw, ch);
+        const encoder = ctx.device.createCommandEncoder();
 
         // ── compute stage (script hooks) ──
         for (const d of this.drivers) {
             if (!d.entry.enabled) continue;
             d.compute(encoder, {
-                scene, time, dt,
+                scene: ctx.scene,
+                time: ctx.time,
+                dt: ctx.dt,
                 computePipelines: this.computePipelines,
-                particles: this.particles,
+                attachments: ctx.attachments,
             });
         }
 
         // If nothing post-processes, the "scene" target is the swapchain directly.
-        const postPhase = this.phaseList.find(p => p.behavior === 'postprocess-chain');
-        const hasPost = postPhase
-            ? this.drivers.some(d => d.entry.enabled && d.decl.phase === postPhase.name)
-            : false;
-        this.sceneIsScreen = !hasPost;
+        this.sceneIsScreen = !this.hasEnabledWithBehavior('postprocess-chain');
 
-        // ── group drivers by phase, then by (color,depth) target run ──
+        // ── behavior-dispatched phase execution ──
         const cleared = new Set<string>();
         for (const phase of this.phaseList) {
-            if (phase.behavior === 'shadow-clear') {
-                // Always clear shadow faces (when there are shadow-casting
-                // lights), even if the shadow pipeline is disabled — otherwise
-                // PBR would sample stale depth and shadows would not disappear.
-                this.runShadowPhase(
-                    encoder,
-                    this.drivers.filter(d => d.decl.phase === phase.name),
-                    scene, frame,
-                );
-                continue;
-            }
-            const inPhase = this.drivers.filter(d => d.entry.enabled && d.decl.phase === phase.name);
-            if (inPhase.length === 0) continue;
-            this.runPhase(encoder, phase, inPhase, scene, frame, cw, ch, format, swapView, cleared, null);
+            const behavior = this.behaviorFor(phase);
+            behavior.run(this.behaviorContext(ctx, encoder, phase, frame, cw, ch, swapView, cleared, null));
         }
 
-        device.queue.submit([encoder.finish()]);
+        ctx.device.queue.submit([encoder.finish()]);
     }
 
-    /** Multi-view path: render every active camera into its own viewport.
-     *  Compute + shadow run once (camera-independent); then per camera:
-     *  write the camera UBO, open one command buffer, run all non-shadow /
-     *  non-postprocess phases with that camera's viewport, submit. */
+    /** Multi-view path: per-frame behaviors (perCamera: false — e.g. shadow)
+     *  run once in stage 1; then each camera gets its own command buffer with
+     *  every perCamera behavior scoped to its viewport. */
     private executeMultiView(
-        device: GPUDevice, scene: Scene, time: number, dt: number,
-        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
-        cameras: CameraView[],
+        ctx: FrameContext, cw: number, ch: number, swapView: GPUTextureView, cameras: CameraView[],
     ): void {
-        const frame = {
-            time, dt, cw, ch,
-            physics: this.physics,
-            particles: this.particles,
-            splats: this.splats,
-            computePipelines: this.computePipelines,
-        };
+        const frame = this.driverFrame(ctx, cw, ch);
 
         // Multi-view does not support the postprocess chain (it routes through a
-        // single screen target). The scene target IS the screen here. The
-        // conflict is validated out at compile(), so the skip below is defensive.
+        // single screen target); validated out at compile(). Scene IS the screen.
         this.sceneIsScreen = true;
 
-        // ── stage 1: compute + shadow (camera-independent), one submit ──
-        const enc0 = device.createCommandEncoder();
+        // ── stage 1: compute + per-frame behaviors, one submit ──
+        const enc0 = ctx.device.createCommandEncoder();
         for (const d of this.drivers) {
             if (!d.entry.enabled) continue;
             d.compute(enc0, {
-                scene, time, dt,
+                scene: ctx.scene,
+                time: ctx.time,
+                dt: ctx.dt,
                 computePipelines: this.computePipelines,
-                particles: this.particles,
+                attachments: ctx.attachments,
             });
         }
-        const shadowPhase = this.phaseList.find(p => p.behavior === 'shadow-clear');
-        if (shadowPhase) {
-            // Pass all shadow-phase drivers (enabled or not); runShadowPhase
-            // picks the first enabled one to record, and clears every face
-            // regardless — so a disabled shadow pipeline yields no shadows.
-            this.runShadowPhase(
-                enc0,
-                this.drivers.filter(d => d.decl.phase === shadowPhase.name),
-                scene, frame,
-            );
+        const cleared0 = new Set<string>();
+        for (const phase of this.phaseList) {
+            const behavior = this.behaviorFor(phase);
+            if (behavior.perCamera !== false) continue;
+            behavior.run(this.behaviorContext(ctx, enc0, phase, frame, cw, ch, swapView, cleared0, null));
         }
-        device.queue.submit([enc0.finish()]);
+        ctx.device.queue.submit([enc0.finish()]);
 
         // ── stage 2: one command buffer per camera ──
         // cleared is shared across cameras so the first camera clears the screen
@@ -384,23 +490,18 @@ export class RenderGraph implements System {
             if (vy + vh > ch) vh = ch - vy;
             if (vw <= 0 || vh <= 0) continue;
             const vp: ViewportRect = { x: vx, y: vy, w: vw, h: vh };
-            const enc = device.createCommandEncoder();
+            const enc = ctx.device.createCommandEncoder();
             for (const phase of this.phaseList) {
-                // shadow-clear already ran in stage 1; postprocess-chain is
-                // validated out at compile(). Any other behavior falls through
-                // to runPhase (which itself dispatches by behavior).
-                if (phase.behavior === 'shadow-clear') continue;
-                if (phase.behavior === 'postprocess-chain') continue;
-                const inPhase = this.drivers.filter(d => d.entry.enabled && d.decl.phase === phase.name);
-                if (inPhase.length === 0) continue;
-                this.runPhase(enc, phase, inPhase, scene, frame, cw, ch, format, swapView, cleared, vp);
+                const behavior = this.behaviorFor(phase);
+                if (behavior.perCamera === false) continue;
+                behavior.run(this.behaviorContext(ctx, enc, phase, frame, cw, ch, swapView, cleared, vp));
             }
-            device.queue.submit([enc.finish()]);
+            ctx.device.queue.submit([enc.finish()]);
         }
     }
 
     /** Upload one camera's matrices to the shared camera UBO. Used by the
-     *  multi-view path only; the single-camera path relies on CameraSystem.update
+     *  multi-view path only; the single-camera path relies on the camera system
      *  having already written the primary camera's matrices. */
     private writeCameraUBO(cam: CameraView): void {
         const buf = this.cameraData;
@@ -414,36 +515,17 @@ export class RenderGraph implements System {
         resourceManager.device.queue.writeBuffer(ubo, 0, buf.buffer, buf.byteOffset, buf.byteLength);
     }
 
-    private runPhase(
+    /** Default 'normal' behavior body: merge consecutive enabled drivers that
+     *  share the same color(s)+depth target into one pass, then record. */
+    private runNormalPhase(
         encoder: GPUCommandEncoder,
-        phase: PhaseDecl,
         drivers: PipelineDriver[],
-        scene: Scene,
-        frame: {
-            time: number; dt: number; cw: number; ch: number;
-            physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-            particles: ParticleManager;
-            splats: import('./GaussianSplatManager').GaussianSplatManager | null;
-            computePipelines: Map<string, GPUComputePipeline>;
-        },
-        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
+        ctx: FrameContext,
+        frame: DriverFrame,
+        cw: number, ch: number, swapView: GPUTextureView,
         cleared: Set<string>, viewport: ViewportRect | null,
     ): void {
-        // Post-process phase: ping-pong fullscreen chain.
-        if (phase.behavior === 'postprocess-chain') {
-            this.runPostChain(encoder, drivers, scene, frame, cw, ch, format, swapView);
-            return;
-        }
-
-        // Shadow phase: one depth-only render pass per (light, face), driven by
-        // LightSystem.shadowPassList. Each pass clears its own layer/face.
-        if (phase.behavior === 'shadow-clear') {
-            this.runShadowPhase(encoder, drivers, scene, frame);
-            return;
-        }
-
-        // Merge consecutive drivers that share the same color(s)+depth target into one
-        // pass. `color` may be a single name or an array (MRT, e.g. deferred GBuffer).
+        // `color` may be a single name or an array (MRT, e.g. deferred GBuffer).
         const colorNamesOf = (d: PipelineDriver): string[] => {
             const c = d.decl.target?.color;
             return Array.isArray(c) ? c : [c ?? 'scene'];
@@ -467,54 +549,9 @@ export class RenderGraph implements System {
             cleared.add(key);
             this.openPassAndRecord(
                 encoder, colors, depthName, drivers.slice(i, j),
-                scene, frame, cw, ch, format, swapView, clear, viewport,
+                ctx, frame, cw, ch, swapView, clear, viewport,
             );
             i = j;
-        }
-    }
-
-    /** Shadow phase: iterate LightSystem.shadowPassList and render all shadow
-     *  casters into each shadow light's depth face. The ShadowPipeline driver
-     *  auto-binds group 0 (frameShadow) and group 1 (object) per entity; the
-     *  per-face selector at group 2 (shadowPass) is set here once per pass.
-     *  Each face is cleared via loadOp regardless of whether a driver runs —
-     *  so disabling the shadow pipeline makes shadows disappear (PBR samples
-     *  depth=1 = lit) instead of leaving stale depth from the previous frame. */
-    private runShadowPhase(
-        encoder: GPUCommandEncoder,
-        drivers: PipelineDriver[],
-        scene: Scene,
-        frame: {
-            time: number; dt: number; cw: number; ch: number;
-            physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-            particles: ParticleManager;
-            splats: import('./GaussianSplatManager').GaussianSplatManager | null;
-            computePipelines: Map<string, GPUComputePipeline>;
-        },
-    ): void {
-        const passes = this.lightSystem?.shadowPassList ?? [];
-        if (passes.length === 0) return;
-        // First ENABLED shadow driver records depth; when none is enabled the
-        // passes still run (clear-only) so consumers read a cleared shadow map.
-        const driver = drivers.find(d => d.entry.enabled);
-        const pipeline = driver ? this.pipelines.get(driver.path) : undefined;
-        for (let i = 0; i < passes.length; i++) {
-            const p = passes[i];
-            const pass = encoder.beginRenderPass({
-                colorAttachments: [],
-                depthStencilAttachment: {
-                    view: p.view,
-                    depthClearValue: 1.0,
-                    depthLoadOp: 'clear',
-                    depthStoreOp: 'store',
-                },
-            });
-            if (pipeline && driver) {
-                // Per-face selector {lightIdx, face} for the shadow-depth vertex shader.
-                pass.setBindGroup(2, resourceManager.shadowPassBindGroup(i, p.lightIdx, p.face));
-                driver.record(pass, scene, pipeline, frame);
-            }
-            pass.end();
         }
     }
 
@@ -522,26 +559,20 @@ export class RenderGraph implements System {
         encoder: GPUCommandEncoder,
         colorNames: string[], depthName: string,
         drivers: PipelineDriver[],
-        scene: Scene,
-        frame: {
-            time: number; dt: number; cw: number; ch: number;
-            physics: import('../ecs/PhysicsSystem').PhysicsSystem | null;
-            particles: ParticleManager;
-            splats: import('./GaussianSplatManager').GaussianSplatManager | null;
-            computePipelines: Map<string, GPUComputePipeline>;
-        },
-        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView, clear: boolean,
+        ctx: FrameContext,
+        frame: DriverFrame,
+        cw: number, ch: number, swapView: GPUTextureView, clear: boolean,
         viewport: ViewportRect | null,
     ): void {
         const isDepthOnly = colorNames.length === 1 && colorNames[0] === 'none';
 
         const colorAttachments: GPURenderPassColorAttachment[] = [];
         if (!isDepthOnly) {
-            const envClear = scene.getEnvironmentClearColor() ?? this.clearColor;
+            const envClear = ctx.scene.getEnvironmentClearColor() ?? this.clearColor;
             for (const name of colorNames) {
                 const view = (name === SCREEN || (name === 'scene' && this.sceneIsScreen))
                     ? swapView
-                    : resourceManager.namedColorTargetView(name, cw, ch, format);
+                    : resourceManager.namedColorTargetView(name, cw, ch, ctx.format);
                 colorAttachments.push({
                     view,
                     // The scene/screen target clears to the env color; offscreen
@@ -576,52 +607,10 @@ export class RenderGraph implements System {
         }
         for (const d of drivers) {
             const pipeline = this.pipelines.get(d.path);
-            if (!pipeline) continue;
-            d.record(pass, scene, pipeline, frame);
+            if (!pipeline) throw new Error(`Pipeline '${d.path}' was not compiled (compile() must load every manifest entry)`);
+            d.record(pass, ctx.scene, pipeline, frame);
         }
         pass.end();
-    }
-
-    private runPostChain(
-        encoder: GPUCommandEncoder,
-        drivers: PipelineDriver[],
-        scene: Scene,
-        frame: { time: number; dt: number; cw: number; ch: number },
-        cw: number, ch: number, format: GPUTextureFormat, swapView: GPUTextureView,
-    ): void {
-        void scene; void frame;
-        const transients = this.transientTargetNames();
-        // Dynamic chain routing: first reads from scene, last writes to screen,
-        // middle passes ping-pong between transient targets.
-        // Declared entry.input/output are hints for transient names but the
-        // chain always starts at scene and ends at screen regardless of which
-        // passes are enabled/disabled.
-        let prevOutput = 'scene';
-        for (let i = 0; i < drivers.length; i++) {
-            const last = i === drivers.length - 1;
-            const entry = drivers[i].entry;
-            const input = prevOutput;
-            const output = last
-                ? 'screen'
-                : transients.find(t => t !== input) ?? 'ppB';
-            const srcView = input === 'scene' && this.sceneIsScreen
-                ? swapView
-                : resourceManager.namedColorTargetView(input, cw, ch, format);
-            const dstView = output === 'screen'
-                ? swapView
-                : resourceManager.namedColorTargetView(output, cw, ch, format);
-            const pipeline = this.pipelines.get(drivers[i].path);
-            if (!pipeline) { prevOutput = output; continue; }
-
-            const pass = encoder.beginRenderPass({
-                colorAttachments: [{ view: dstView, clearValue: [0, 0, 0, 1], loadOp: 'clear', storeOp: 'store' }],
-            });
-            pass.setPipeline(pipeline);
-            pass.setBindGroup(0, resourceManager.fullscreenBindGroup(srcView, entry));
-            pass.draw(3);
-            pass.end();
-            prevOutput = output;
-        }
     }
 
     /** Collect transient color target names from render-targets.json. */

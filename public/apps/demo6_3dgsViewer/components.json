@@ -1,9 +1,0 @@
-[
-    {
-        "name": "GsComponent",
-        "fields": {
-            "ply":   { "type": "string", "default": "" },
-            "count": { "type": "u32", "default": 0 }
-        }
-    }
-]

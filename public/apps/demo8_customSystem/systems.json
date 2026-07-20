@@ -5,6 +5,6 @@
     { "name": "camera" },
     { "name": "light" },
     { "name": "animation" },
-    { "name": "orbit", "def": "systems/orbit.json" },
+    { "name": "orbit" },
     { "name": "render" }
 ]

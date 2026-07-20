@@ -1,8 +1,0 @@
-{
-    "name": "gaussianSplat",
-    "source": "builtin:gaussianSplat",
-    "components": ["GsComponent", "Transform"],
-    "ubos": [],
-    "buffers": [],
-    "needs": ["camera"]
-}

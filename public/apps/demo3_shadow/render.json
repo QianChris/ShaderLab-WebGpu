@@ -5,10 +5,10 @@
     "Preprocess": [],
     "Compute": [],
     "Shadow": [
-      { "name": "ShadowMap", "pipeline": "pipelines/ShadowPipeline.json", "enabled": true }
+      { "name": "ShadowMap", "pipeline": "core:pipelines/ShadowPipeline.json", "enabled": true }
     ],
     "Opaque": [
-      { "name": "PbrSolid",    "pipeline": "pipelines/PbrPipeline.json",        "enabled": true },
+      { "name": "PbrSolid",    "pipeline": "core:pipelines/PbrPipeline.json",        "enabled": true },
       { "name": "ShadowDebug", "pipeline": "pipelines/ShadowDebugPipeline.json", "enabled": false }
     ],
     "Transparent": [],

@@ -1,16 +1,23 @@
 import type { Scene } from '../ecs/Scene';
 import type { EventBus } from '../events/EventBus';
-import type { PhysicsSystem } from '../ecs/PhysicsSystem';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
-import { PickTool } from './PickTool';
 
-type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
+export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
 
-/** Registry of builtin tool factories, keyed by config `type`. New builtins
- *  can be added here without touching the dispatch logic. */
-const TOOL_REGISTRY: Record<string, ToolFactory> = {
-    pick: (config, ctx) => new PickTool(config, ctx),
-};
+/** Registry of tool factories, keyed by config `type`. Populated entirely by
+ *  plugins (ctx.registerToolType) — the engine ships no built-in tools. */
+const TOOL_REGISTRY: Record<string, ToolFactory> = {};
+
+/** Register a tool type (plugins). Duplicate names throw (fail-loud). */
+export function registerToolType(type: string, factory: ToolFactory): void {
+    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
+    TOOL_REGISTRY[type] = factory;
+}
+
+/** Remove a tool type (plugin unload). */
+export function unregisterToolType(type: string): void {
+    delete TOOL_REGISTRY[type];
+}
 
 /** Wraps a script-loaded tool module in the SceneTool interface. */
 class ScriptToolAdapter implements SceneTool {
@@ -42,8 +49,8 @@ export class ToolSystem {
     /** App base for resolving relative script paths. Set by setBase(). */
     private appBase = '';
 
-    constructor(scene: Scene, bus: EventBus, physics: PhysicsSystem, getAspect: () => number) {
-        this.ctx = { scene, bus, physics, getAspect };
+    constructor(scene: Scene, bus: EventBus, getSystem: <T = unknown>(name: string) => T | null, getAspect: () => number) {
+        this.ctx = { scene, bus, getSystem, getAspect };
     }
 
     /** Set the app base path (for resolving relative tool script sources).
@@ -53,13 +60,14 @@ export class ToolSystem {
     }
 
     async loadFromFile(url: string): Promise<void> {
-        let configs: ToolConfig[] = [];
-        try {
-            const resp = await fetch(url);
-            if (resp.ok) configs = await resp.json() as ToolConfig[];
-        } catch {
-            configs = [];
+        // The manifest explicitly declared this tools file — missing or
+        // malformed is a config bug, not a "no tools" situation.
+        const resp = await fetch(url);
+        const ct = resp.headers.get('content-type') ?? '';
+        if (!resp.ok || !(ct.includes('json') || ct.includes('application'))) {
+            throw new Error(`Tools config not found: ${url} (declared in app.json "tools")`);
         }
+        const configs = await resp.json() as ToolConfig[];
         await this.load(configs);
     }
 
@@ -68,48 +76,51 @@ export class ToolSystem {
         for (const config of configs) {
             if (config.enabled === false) continue;
             const tool = await this.resolveTool(config);
-            if (!tool) continue;
             tool.attach();
             this.tools.push(tool);
         }
     }
 
-    private async resolveTool(config: ToolConfig): Promise<SceneTool | null> {
+    private async resolveTool(config: ToolConfig): Promise<SceneTool> {
         // Script source: fetch → Blob URL → dynamic import → wrap in adapter.
         if (config.source) {
             const mod = await this.loadScript(config.source);
-            if (!mod) return null;
             return new ScriptToolAdapter(mod, this.ctx);
         }
         // Builtin: lookup by `type` in the registry.
         if (config.type) {
             const factory = TOOL_REGISTRY[config.type];
             if (!factory) {
-                console.warn(`[ToolSystem] unknown tool type '${config.type}'`);
-                return null;
+                throw new Error(
+                    `Unknown tool type '${config.type}' in tools.json ` +
+                    `(builtins: ${Object.keys(TOOL_REGISTRY).join(', ')}; or use "source" for a script tool)`,
+                );
             }
             return factory(config, this.ctx);
         }
-        console.warn('[ToolSystem] tool config has neither `type` nor `source`');
-        return null;
+        throw new Error('tools.json entry has neither `type` nor `source`');
     }
 
     /** Fetch → Blob URL → dynamic import a tool script (mirrors ScriptSystem).
-     *  Path resolution: absolute (leading /) → as-is; relative → appBase. */
-    private async loadScript(source: string): Promise<ToolScriptModule | null> {
+     *  Path resolution: absolute (leading /) → as-is; relative → appBase.
+     *  Throws on any failure — a declared tool that cannot load is a config bug. */
+    private async loadScript(source: string): Promise<ToolScriptModule> {
         const url = source.startsWith('/') ? source : `${this.appBase}/${source}`;
         const cacheBust = `${url}?t=${Date.now()}`;
+        const resp = await fetch(cacheBust);
+        if (!resp.ok) {
+            throw new Error(`Tool script '${source}' not found (HTTP ${resp.status} for ${url})`);
+        }
+        const src = await resp.text();
+        const blob = new Blob([src], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
         try {
-            const resp = await fetch(cacheBust);
-            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-            const src = await resp.text();
-            const blob = new Blob([src], { type: 'text/javascript' });
-            const blobUrl = URL.createObjectURL(blob);
-            const mod = await import(/* @vite-ignore */ blobUrl).finally(() => URL.revokeObjectURL(blobUrl));
+            const mod = await import(/* @vite-ignore */ blobUrl);
             return (mod.default ?? mod) as ToolScriptModule;
         } catch (err) {
-            console.error(`[ToolSystem] failed to load tool script '${source}':`, err);
-            return null;
+            throw new Error(`Tool script '${source}' failed to import: ${err}`);
+        } finally {
+            URL.revokeObjectURL(blobUrl);
         }
     }
 

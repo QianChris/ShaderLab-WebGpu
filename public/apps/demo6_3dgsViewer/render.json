@@ -1,10 +1,9 @@
 {
   "name": "SplatRenderGraph",
-  "renderScripts": ["render/splat.js"],
   "phases": {
     "Opaque": [
-      { "name": "Grid",     "pipeline": "pipelines/GridPipeline.json",     "enabled": true },
-      { "name": "PbrSolid", "pipeline": "pipelines/PbrPipeline.json",      "enabled": true }
+      { "name": "Grid",     "pipeline": "core:pipelines/GridPipeline.json",     "enabled": true },
+      { "name": "PbrSolid", "pipeline": "core:pipelines/PbrPipeline.json",      "enabled": true }
     ],
     "Transparent": [
       { "name": "Splat", "pipeline": "pipelines/GaussianSplatPipeline.json", "enabled": true }
