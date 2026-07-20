@@ -6,7 +6,7 @@
 
 三条硬规则：
 1. **引擎不依赖任何插件**：src/ 对 public/plugins/ 零 import、零类型引用。引擎→插件调用只经虚接口（`System`/`PhaseBehavior`/hook/`ToolFactory`/`MeshGenerator`/`AtomResolver`/`IRenderer`/生命周期）+ 注册表分发；插件→引擎只 import `@shaderlab/api` 一个面（运行时被重写到 dev `/src/api.ts` / prod `/assets/engine-api.js`）。
-2. **所有插件平等**：无 `builtin:` 特权。core（六个基线系统）与用户插件走同一条装载链。
+2. **所有插件平等**：无 `builtin:` 特权。core（五个基线系统）与用户插件走同一条装载链。
 3. **fail-loud**：缺文件、重名声明、未注册的 system/behavior/hook/组件一律 throw，不静默回退。
 
 ## 构建 / 运行 / 校验
@@ -48,25 +48,30 @@ src/                          引擎 = 宿主 + 机制（对插件零知识）
 public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发，改动无需重构引擎）
   index.ts                    default export class extends EnginePlugin；meta.id=目录名
   tsconfig.json               (根目录级) paths 映射 @shaderlab/api → ../../src/api.ts
-  core/                       基线：input/script/camera/light/animation/render(薄包装) 六系统 +
+  core/                       基线：input/script/camera/light/render(薄包装) 五系统 +
                               12 个声明 JSON(components/uniform-layouts/bind-layouts/vertex-slots/
                               vertex-inputs/samplers/blend/fallback/vbo/meshes/render-targets/phases，
-                              init() fetch 共置文件) + 12 条管线 + WGSL + params hook
+                              init() fetch 共置文件) + 11 条管线 + WGSL + params hook
+                              （animation 系统已迁至 sprite 插件）
   physics/                    Rapier：PhysicsSystem + PickTool('pick' 工具) + debug 管线/hook；
                               RAPIER.init() 在 setup（不载即不付 WASM 成本）
   particles/                  ParticleManager('particles' attachment) + 3 管线 + hooks
-  splat/                      3DGS：GaussianSplatManager + SplatLoader + GsComponent +
-                              gaussianSplat 系统 + splat.draw hook（app 级，demo6 声明）
-  orbit/                      示例：自定义组件 + OrbitSystem（demo8 声明）
+  splat/                      3DGS：GaussianSplatManager(多实例 Map<eid,SplatInstance>) + SplatLoader +
+                              GsComponent + gaussianSplat 系统(before:camera,用上一帧 camera 排序) +
+                              splat.draw hook（app 级，demo6 声明）
+  sprite/                     SpriteSheetComponent + SpriteAnimationComponent + SpriteSystem('animation'
+                              系统，从 core 迁出) + SpritePipeline + WGSL；引擎级常驻
+  orbit/                      示例：OrbitComponent + OrbitSystem(自动轨道,demo8) +
+                              OrbitCameraComponent + OrbitCameraSystem(鼠标驱动相机,demo3/5/6/7)
 
 public/common/                组合层残留：engine-config.json（含 pluginsRoot + plugins 引擎级清单
-                              + systemOrder 旧式 bare-name 兜底）、
+                              [core,physics,particles,sprite] + systemOrder 旧式 bare-name 兜底）、
                               systems.json（默认帧顺序，`[{ "name": "..." }]` 对象数组，主用）、
                               gltf-mapping.json、textures/
-public/apps/<name>/           app：app.json（plugins/components/scene/render/systems/tools/gltf）、
+public/apps/<name>/           app：app.json（plugins/components/scene/render/tools/gltf）、
                               scene.json、render.json（管线清单，'<plugin>:pipelines/X.json' 引用）、
-                              systems.json（顺序覆盖，同 `[{name}]` 格式）、tools.json、scripts/、私有 pipelines/shaders
-PLAN.md                       根目录整改规划草稿（已按本文校准），细节以本文为准
+                              tools.json、scripts/、私有 pipelines/shaders
+                              （app 可选自带 systems.json 覆写默认顺序；未提供时走 common + 自动插入）
 ```
 
 ## 插件写法（用户视角）
@@ -89,7 +94,7 @@ export default class MyFxPlugin extends EnginePlugin {
 }
 ```
 
-- 组合：engine-config.json `plugins`（引擎级常驻）或 app.json `plugins`（app 级，切 app 逆拓扑卸载）；systems.json 里列 `{ "name": "myfx" }` 决定帧顺序（**顺序权永远在 systems.json，插件只提供实现**）。
+- 组合：engine-config.json `plugins`（引擎级常驻）或 app.json `plugins`（app 级，切 app 逆拓扑卸载）；systems.json 里列 `{ "name": "myfx" }` 决定帧顺序（**顺序权永远在 systems.json，插件只提供实现**）。app 未提供自有 systems.json 时，引擎自动把声明了 `after`/`before` 的未列出 system 插入默认顺序（见下文"自动插入"）。
 - 跨插件协作：`ctx.getSystem<T>(name)` / `ctx.getPlugin(id)` / attachments —— **结构类型契约**（本地声明 interface），运行时 fail-loud。
 - 插件 TS 限"可剥离语法"；运行时只剥类型不检查——类型错误靠编辑器 + `check:plugins` 抓。
 - 相对导入支持多文件（Blob 递归重写）；**相对导入必须带 `.ts` 扩展名**（如 `from './Foo.ts'`，运行时 Blob fetch 需要完整路径，插件 tsconfig 用 `allowImportingTsExtensions` 放行）；禁止裸导入（除 `@shaderlab/api`）；循环相对导入 throw。
@@ -102,7 +107,8 @@ export default class MyFxPlugin extends EnginePlugin {
 - **attachments**：插件 `ctx.registerAttachment(name, obj)` 发布不透明对象（'particles'/'physics'/'splats'）；FrameContext 与 hook ctx 透传，引擎不调用。
 - **owner 清扫**：一切注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/tools/generators/atoms）带 owner 标签（'engine' | 'app:<id>' | 'plugin:<id>'）；跨 owner 重名 throw；插件卸载=按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 unloadCurrentApp 自动逆序卸载）。
 - **IRenderer 缝**：Engine.renderer 默认= RenderGraph；插件可 `ctx.replaceRenderer(r)`（重注册 'render' 分派目标）。编辑器 PipelinePanel 依赖 to/fromData 数据面。
-- **buffers**：system 元数据（`ubos`/`buffers`/`needs`）由插件 `systemDefs` 声明（SystemRegistry.injectedDefs），BufferRegistry 按 systems.json 清单分配（common/app scope）。
+- **buffers**：system 元数据（`ubos`/`buffers`/`needs`/`after`/`before`）由插件 `systemDefs` 声明（SystemRegistry.injectedDefs），BufferRegistry 按 systems.json 清单分配（common/app scope）。
+- **自动插入**：app 未提供自有 systems.json 时，`SystemRegistry.autoInsert(commonSystems)` 把声明了 `after`/`before` 但不在默认列表中的 system 自动插入。`after: ['input']` = 插到 input 之后；`before: ['render']` = 插到 render 之前。app 提供了自有 systems.json → 显式覆写优先，不自动插入。`needs` 不驱动自动插入（仅做顺序验证）。
 - **api.ts 是契约**：给插件加能力=在 api 加导出（宁窄勿宽）；**严禁 api 导入 public/plugins 下任何东西**。
 - **dev/prod 单例**：dev 下 Blob 模块 import `/src/api.ts` 与主包同 URL 同实例；prod 下 `engine-api.js` 与 main 共享 Rollup chunk。改 vite.config 的 entry 配置前先理解这一点。
 
@@ -121,7 +127,7 @@ export default class MyFxPlugin extends EnginePlugin {
 1. **新能力（系统/组件/管线/hook）**：写一个插件目录，app.json 或 engine-config 声明 —— 引擎零改动。
 2. **新渲染相位**：插件 `phases` 字段 +（如需新策略）`registerPhaseBehavior`。
 3. **新 uniform/bind/slot/target/blend/sampler/fallback/vbo/mesh**：插件对应声明字段（core 的 12 个 JSON 是范例）。
-4. **改系统顺序**：改 common/systems.json 或 app systems.json（纯 JSON）。
+4. **改系统顺序**：改 common/systems.json 或 app systems.json（纯 JSON）。新 system 声明 `after`/`before` 可自动插入默认顺序（无需 app 自带 systems.json）。
 5. **给插件开新引擎能力**：api.ts 加导出（这是契约变更，慎重+文档）。
 6. **机制级改动**（RenderGraph/ResourceManager/PluginManager…）：动 src/，勿引入内容/插件知识。
 7. 收尾必跑四件套（见上）。
@@ -130,5 +136,6 @@ export default class MyFxPlugin extends EnginePlugin {
 
 - `common/textures` 是共享资产池（`asset:` 按 dataRoot 解析）；`PRESET_MESHES` 仍在 Primitives.ts；`RenderScriptLoader` app 级逃生舱保留但 common/scripts 已空。
 - ScriptComponent 游戏脚本（scene 挂 .js，Blob import）与 SystemRegistry 的 `source:"scripts/*.js"` 无构建系统仍可用，属内容层逃生舱，非推荐主路径。
-- gaussianSplat 单实例限制仍在（多 GsComponent 用最后一个并 warn）。
-- 根目录 PLAN.md 是整改规划草稿（已按本文校准）；细节以本文为准。
+- `spriteEntity` uniform layout 仍在 core/uniform-layouts.json（sprite 插件的 SpritePipeline 引用它）；理论上应随 sprite 迁出，但 sprite 依赖 core 所以跨层引用可用。
+- gaussianSplat 用 `before: ['camera']` 自动插入，sort 使用上一帧 camera 数据（一帧延迟，对排序可接受）。
+- PhysicsWorld 多控制器冲突检测未实现（P3 暂缓）；当前多 `PhysicsControllerComponent` 会静默用最后一个。
