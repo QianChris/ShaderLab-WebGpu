@@ -1,9 +1,10 @@
 # PLAN.md — ShaderLab-WebGPU 引擎本体整改规划
 
-> 版本: 1.1  
+> 版本: 1.2  
 > 目标: 消除特权代码，实现彻底插件化，加固资源生命周期  
 > 约束: **不修改 Editor** | **保持所有现有 demo 可运行** | **零破坏重构**  
 > 参考真相源: **AGENTS.md**（已取代原 ARCHITECTURE.md，为代码现状最权威描述）。本规划已按 AGENTS.md 校准：删除已完成/已解决/基于过时前提的 Task，并标注与架构原则冲突的 Task。
+> 阶段 3 决策结论（2026-07-20）: systems.json 保留为权威顺序源；新增依赖驱动的自动插入（仅在无覆写时触发），不放弃 systems.json 顺序权。
 
 ---
 
@@ -410,114 +411,128 @@
 
 ---
 
-## 阶段 3: System 调度显式化（P2）— ⚠️ 需架构决策
+## 阶段 3: System 调度依赖插入（P2）
 
-**目标**: ~~从"全局硬编码 JSON 顺序"进化为"声明式 Phase + Priority"。~~
+**目标**: 让新插件声明执行依赖（在某 system 之前/之后），在 app 未提供 `systems.json` 覆写时自动插入默认顺序。保留 systems.json 作为权威顺序源。
 
-> **⚠️ 此阶段与架构核心原则冲突，需先做架构决策，不可当"零破坏重构"执行。**
->
-> AGENTS.md 三处明示："**顺序权永远在 systems.json，插件只提供实现**"。这是刻意设计选择：让组合层（JSON）而非插件决定帧顺序，原因正是本阶段风险栏自己列出的"某些 System 有隐式前后依赖（如 light 必须在 camera 之后），仅靠 phase 不够精细"。
->
-> Task 3.1 试图改为"插件声明 phase 自动排序，systems.json 降级为白名单" —— 这是**架构方向性反转**，不是 P2 级加固。
->
-> **决策门**：在启动本阶段前，必须先回答："是否放弃 systems.json 持有顺序权？"
-> - 是 → 本阶段升格为架构 RFC，单独评审，不能藏在 P2 里偷渡
-> - 否 → 整个阶段 3 砍掉（Task 3.2 已完成，Task 3.1 不做）
+> **决策结论**（2026-07-20）: systems.json 仍是默认顺序的唯一权威（AGENTS.md 原则不变）。app 可完全覆写 systems.json（已有能力，不变）。新能力：当 app **未提供** 自有 systems.json 时，引擎将未在默认列表中但声明了 `after`/`before` 依赖的 system 自动插入默认顺序。这是便利机制，不替代显式覆写。
 
-**完成标准**（仅当决策门通过时适用）:
-- [ ] demo6/8 不再需要覆盖整个 `systems.json` 来插入自定义 System
-- [ ] 新插件可以通过声明 phase 自动插入正确位置
+**设计原则**:
+1. **systems.json 权威**: 显式 JSON 顺序永远是最终裁决。app 提供了 systems.json → 用那个，不自动插入。
+2. **声明依赖**: 插件在 systemDefs 声明 `after: ['input']` 或 `before: ['render']`——表示"我希望在 X 之后 / Y 之前运行"。
+3. **仅在无覆写时触发**: app 未提供 systems.json → 用 `common/systems.json` + 自动插入。提供了 → 用那个，未列出的 system 不运行（现有行为不变）。
+4. **无依赖 = 不插入**: 声明了 `after: []` 且 `before: []` 的 system 不会自动插入——仍需显式列在 systems.json 中。
+
+**完成标准**:
+- [ ] demo3/5/6/7 删除自有 systems.json，orbitCamera 通过 `after: ['input']` 自动插入
+- [ ] demo6 的 gaussianSplat 通过 `needs: ['camera']` 自动插入（已有 needs，复用）
+- [ ] demo8 删除自有 systems.json，orbit 通过 `after: ['animation']` 自动插入
+- [ ] 所有未修改的 demo 行为不变（它们要么用 common/systems.json 无额外 system，要么已有自有 systems.json）
 
 ---
 
-### Task 3.1: 引入 SystemPhase + Priority 机制
+### Task 3.1: 依赖驱动的 System 自动插入
 
-**优先级**: P2（** gated by 决策门，未通过前不得启动 **）  
-**目标**: 让 System 注册时声明执行阶段，SystemRegistry 支持自动排序。
+**优先级**: P2  
+**目标**: 在 SystemRegistry 中实现依赖驱动的自动插入机制。当 app 使用 `common/systems.json`（无覆写）时，将声明了 `after`/`before` 依赖但未在列表中的 system 自动插入默认顺序。
 
 **输入文件**:
-- `src/ecs/SystemRegistry.ts` — System 注册和调度核心
-- `src/ecs/SystemRegistry.ts` — FrameContext 定义（如在同文件）
-- `src/plugins/Plugin.ts` — PluginContext 接口
-- `public/common/systems.json` — 默认系统顺序
-- `public/apps/demo6_3dgsViewer/systems.json` — override 示例
-- `public/apps/demo8_customSystem/systems.json` — override 示例
+- `src/ecs/SystemRegistry.ts` — System 注册、needs 验证、resolve 逻辑
+- `src/Engine.ts` — loadAppInner 中 systems.json 加载逻辑（line 482-488）
+- `public/common/systems.json` — 默认顺序
+- `public/plugins/orbit/index.ts` — systemDefs（orbit + orbitCamera）
+- `public/plugins/splat/index.ts` — systemDefs（gaussianSplat）
+- `public/apps/demo3_shadow/systems.json` — 待删除（验证自动插入）
+- `public/apps/demo5_deferred/systems.json` — 待删除
+- `public/apps/demo6_3dgsViewer/systems.json` — 待删除
+- `public/apps/demo7_multiView/systems.json` — 待删除
+- `public/apps/demo8_customSystem/systems.json` — 待删除
 
 **输出文件**:
-- `src/ecs/SystemRegistry.ts` — 增加 phase/priority 支持
-- `src/plugins/Plugin.ts` — 扩展 PluginContext.registerSystem 签名
-- `src/render/types.ts` — 如需要，扩展相关接口
-- `public/common/systems.json` — 增加 `"sortMode": "manual"` 标记（向后兼容）
+- `src/ecs/SystemRegistry.ts` — 新增 `autoInsert(activeList, registeredDefs)` 方法
+- `src/Engine.ts` — loadAppInner 中，当 app 未提供 systems.json 时调用 autoInsert
+- `public/plugins/orbit/index.ts` — systemDefs 加 `after` 声明
+- `public/plugins/splat/index.ts` — systemDefs 加 `after` 声明（或复用已有 `needs`）
+- 删除 demo3/5/6/7/8 的 systems.json（验证后）
 
-**依赖**: 阶段 1 完成（确保所有 System 都通过插件注册，无脚本直接 `new System`）
+**依赖**: 阶段 1 完成（所有 system 都通过插件注册）
 
 **详细步骤**:
 
-1. **定义 Phase 枚举**: 在 `src/ecs/SystemRegistry.ts`（或新建 `src/ecs/SystemPhase.ts`）中：
+1. **扩展 SystemDef 接口**: 在 `src/ecs/SystemRegistry.ts`（或 `src/plugins/Plugin.ts` 的 SystemDef 类型）加可选字段：
    ```typescript
-   export enum SystemPhase {
-     Input = 100,
-     Script = 200,
-     Physics = 300,
-     Animation = 400,
-     PreRender = 500,
-     Render = 600,
-     PostRender = 700,
+   interface SystemDef {
+       name: string;
+       source: string;
+       components: string[];
+       ubos: string[];
+       buffers: SystemBufferDecl[];
+       needs: string[];        // 已有：硬数据依赖（顺序验证）
+       after?: string[];       // 新增：软排序——自动插入在这些 system 之后
+       before?: string[];      // 新增：软排序——自动插入在这些 system 之前
    }
    ```
+   `after`/`before` 与 `needs` 的区别：`needs` 是硬数据依赖（验证顺序 + 驱动自动插入），`after`/`before` 是软排序声明（仅驱动自动插入，不验证）。
 
-2. **扩展 System 注册接口**:
+2. **实现 autoInsert**: 在 SystemRegistry 中新增方法：
    ```typescript
-   export interface SystemDef {
-     name: string;
-     phase: SystemPhase;
-     priority: number; // 同 phase 内排序，升序
-     factory: (ctx: PluginContext) => System;
+   /** 将声明了 after/before 但未在 activeList 中的 system 自动插入。
+    *  仅在 app 未提供自有 systems.json 时调用。 */
+   autoInsert(activeList: SystemEntry[], defs: SystemDef[]): SystemEntry[] {
+       const listed = new Set(activeList.map(s => s.name));
+       const toInsert = defs.filter(d => !listed.has(d.name) && (d.after?.length || d.before?.length));
+       if (toInsert.length === 0) return activeList;
+
+       const result = [...activeList];
+       for (const def of toInsert) {
+           const afterIdx = Math.max(-1, ...(def.after ?? []).map(n => result.findIndex(s => s.name === n)));
+           const beforeIdx = Math.min(result.length, ...(def.before ?? []).map(n => result.findIndex(s => s.name === n)));
+           const insertAt = Math.max(0, Math.min(afterIdx + 1, beforeIdx < 0 ? result.length : beforeIdx));
+           result.splice(insertAt, 0, { name: def.name });
+       }
+       return result;
    }
-
-   // PluginContext 扩展
-   registerSystem(
-     name: string, 
-     factory: (ctx: PluginContext) => System, 
-     options?: { phase?: SystemPhase; priority?: number; }
-   ): void;
    ```
+   多个 system 插入同位置时按 defs 数组顺序（= 插件注册顺序）。
 
-3. **修改 SystemRegistry**:
-   - 内部存储从 `Map<string, System>` 改为 `Map<string, { system: System; phase: SystemPhase; priority: number }>`
-   - 增加 `sortSystems()` 方法：
-     ```typescript
-     private sortSystems(): void {
-       this.sortedSystems = Array.from(this.systems.values())
-         .sort((a, b) => {
-           if (a.phase !== b.phase) return a.phase - b.phase;
-           return a.priority - b.priority;
-         })
-         .map(entry => entry.system);
-     }
-     ```
-   - `update(ctx)` 改为遍历 `this.sortedSystems`
+3. **Engine.loadAppInner 集成**: 在 `src/Engine.ts` 的 `loadAppInner` 中，当 app 未提供自有 systems.json（即用 `commonSystems`）时，调用 `systemRegistry.autoInsert`：
+   ```typescript
+   // 现有逻辑（line 482-488）：
+   if (this.isJson(sysResp)) {
+       this.activeSystems = await sysResp.json();
+   } else {
+       this.activeSystems = this.commonSystems;
+   }
+   
+   // 新增：仅在使用 common 默认顺序时自动插入
+   if (!hasAppSystemsJson) {
+       const allDefs = systemRegistry.injectedDefs; // 所有已注册插件的 systemDefs
+       this.activeSystems = systemRegistry.autoInsert(this.activeSystems, allDefs);
+   }
+   ```
+   有自有 systems.json → 不调用 autoInsert（显式覆写优先）。
 
-4. **兼容 systems.json**:
-   - 读取 `systems.json` 时，检查 `"sortMode"` 字段：
-     - `"manual"`（默认）: 按 JSON 数组顺序执行，忽略 phase/priority（完全向后兼容）
-     - `"auto"`: 按 phase + priority 自动排序
-   - 如果 `systems.json` 中显式列出系统名（如 `["input", "script", ...]`），但 `sortMode: "auto"`，则这些名称仅作为"白名单"（只运行列出的系统，但顺序由 phase 决定）。
+4. **为各插件 systemDefs 加 after/before 声明**:
+   - `orbit` system: `after: ['animation']`（demo8 用，在 animation 后、render 前自动插入）
+   - `orbitCamera` system: `after: ['input']`（demo3/5/6/7 用，在 input 后自动插入）
+   - `gaussianSplat` system: 已有 `needs: ['camera']`，复用 needs 做自动插入（needs 也驱动插入）
 
-5. **迁移 demo6/8**:
-   - demo6: 删除 `systems.json` override，在 `splat` 插件注册 `gaussianSplat` system 时声明 `phase: SystemPhase.PreRender, priority: 0`
-   - demo8: 删除 `systems.json` override，在 `orbit` 插件注册 `orbit` system 时声明 `phase: SystemPhase.Animation, priority: 10`（在 animation 之后）
-   - 两个 demo 的 `app.json` 中移除 `systems.json` 引用或标记 `"sortMode": "auto"`
+5. **needs 兼容**: `autoInsert` 也检查 `needs`——如果 system 有 `needs: ['X']` 且未在列表中，自动插入在 X 之后。这样 gaussianSplat 不需要额外声明 `after`。
+
+6. **删除 demo 自有 systems.json**: 验证自动插入后，删除 demo3/5/6/7/8 的 systems.json 及 app.json 中的 `"systems"` 引用。这些 demo 改用 common/systems.json + 自动插入。
+
+7. **验证 demo6 特殊情况**: demo6 同时有 gaussianSplat（app 级 splat 插件）和 orbitCamera（app 级 orbit 插件）。两者都需自动插入。需确保插入顺序正确：orbitCamera after input, gaussianSplat after camera → 结果应为 `input → orbitCamera → script → physics → camera → light → animation → gaussianSplat → render`。
 
 **验收标准**:
-- [ ] demo6 不依赖自定义 `systems.json`，`gaussianSplat` system 自动插入到 `animation` 之后、`render` 之前
-- [ ] demo8 不依赖自定义 `systems.json`，`orbit` system 自动插入到正确位置
-- [ ] `public/common/systems.json` 标记 `"sortMode": "manual"`，所有未迁移 demo 行为不变
-- [ ] 新增一个测试插件，注册 `phase: SystemPhase.PreRender` 的 System，在不修改任何 systems.json 的情况下正确执行
+- [ ] demo3/5/6/7/8 删除自有 systems.json 后，自动插入正确，浏览器中行为与整改前一致
+- [ ] demo1/2/4（本就无自有 systems.json）行为不变
+- [ ] `needs` 验证仍工作（gaussianSplat needs camera → 如果 camera 不在顺序中会报错）
+- [ ] `npm run build` + `check:plugins` + `validate-config` + `smoke-plugin-loader` 四件套通过
 
 **风险与回滚**:
-- 风险: 某些 System 可能有隐式的前后依赖（如 `light` 必须在 `camera` 之后），仅靠 phase 不够精细。
-- 回滚: 恢复 `systems.json` override，将 sortMode 改回 manual。
+- 风险: 多个 system 声明相同 after 位置时，插入顺序可能不确定（需要按插件依赖拓扑序）。demo6 的 gaussianSplat + orbitCamera 需测试。
+- 风险: 如果 app 提供了自有 systems.json 但遗漏了某些 system，该 system 不会运行（现有行为，但用户可能期望自动插入）。这需要在文档中明确。
+- 回滚: 恢复各 demo 的 systems.json，从 SystemDef 移除 after/before 字段。
 
 ---
 
