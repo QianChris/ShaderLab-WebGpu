@@ -1,5 +1,7 @@
 {
   "name": "demo5_deferred",
+  "plugins": ["orbit"],
   "scene": "scene.json",
-  "render": "render.json"
+  "render": "render.json",
+  "systems": "systems.json"
 }

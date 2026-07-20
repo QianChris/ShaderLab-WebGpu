@@ -6,6 +6,5 @@
     { "name": "camera" },
     { "name": "light" },
     { "name": "animation" },
-    { "name": "gaussianSplat" },
     { "name": "render" }
 ]

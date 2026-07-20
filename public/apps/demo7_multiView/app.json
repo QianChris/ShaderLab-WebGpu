@@ -1,6 +1,8 @@
 {
   "name": "demo7_multiView",
+  "plugins": ["orbit"],
   "scene": "scene.json",
   "render": "render.json",
+  "systems": "systems.json",
   "gltf": ["../../assets/models/DamagedHelmet.glb"]
 }

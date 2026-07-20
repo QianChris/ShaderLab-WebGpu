@@ -1,8 +1,8 @@
 {
   "MainCamera": {
     "Transform": { "position": [0, 0.8, 3.8], "rotation": [-0.13, 0, 0, 0.991], "scale": [1, 1, 1] },
-    "Camera": { "fov": 45, "near": 0.1, "far": 100, "active": 1 },
-    "ScriptComponent": { "script": "scripts/orbit.js", "enabled": 1 }
+     "Camera": { "fov": 45, "near": 0.1, "far": 100, "active": 1 },
+    "OrbitCameraComponent": { "rotSpeed": 3.0, "panSpeed": 1.5, "zoomSpeed": 0.15, "minDistance": 1.0, "maxDistance": 50.0, "viewport": 0 }
   },
   "Environment": {
     "Transform": { "position": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] },

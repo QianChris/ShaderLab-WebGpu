@@ -1,8 +1,9 @@
 # PLAN.md — ShaderLab-WebGPU 引擎本体整改规划
 
-> 版本: 1.0  
-> 目标: 消除特权代码，实现彻底插件化，加固资源生命周期，显式化 System 调度  
-> 约束: **不修改 Editor** | **保持所有现有 demo 可运行** | **零破坏重构**
+> 版本: 1.1  
+> 目标: 消除特权代码，实现彻底插件化，加固资源生命周期  
+> 约束: **不修改 Editor** | **保持所有现有 demo 可运行** | **零破坏重构**  
+> 参考真相源: **AGENTS.md**（已取代原 ARCHITECTURE.md，为代码现状最权威描述）。本规划已按 AGENTS.md 校准：删除已完成/已解决/基于过时前提的 Task，并标注与架构原则冲突的 Task。
 
 ---
 
@@ -14,6 +15,7 @@
 4. **验收驱动**: 每个任务必须有可自动验证的验收标准。无法自动验证的，必须提供手动验证步骤。
 5. **阶段隔离**: 同一阶段内的任务可以并行执行（无文件冲突时）。跨阶段任务必须按顺序执行。
 6. **回滚就绪**: 每个任务完成后，git commit 一次，commit message 前缀为 `[PLAN]`。
+7. **以代码为准**: 本规划的输入/输出文件清单若与代码现状不符，以代码为准并就地更新本规划，而非按过时清单执行。
 
 ---
 
@@ -57,21 +59,28 @@
 
 1. **差异分析**: 读取 5 个 orbit.js 文件，提取所有硬编码常量（radius, speed, sensitivity, damping, minDistance, maxDistance, target offset 等），建立对照表。
 
-2. **扩展 Schema**: 在 `public/plugins/orbit/index.ts` 中扩展 `OrbitComponent` 的 schema，确保所有从 orbit.js 提取的常量都有对应字段：
+2. **扩展 Schema**: `public/plugins/orbit/index.ts` 当前 `OrbitComponent` 已有 `radius`/`speed`/`spin` 三个 `f32` 字段（实测）。需扩展为以下完整字段，所有从 orbit.js 提取的常量都要有对应字段；类型用 `f32`（非 `float`）、`vec3`、`bool`，遵循插件声明约定（`components` 字段，非 `static schema`，参考 core/components.json）：
    ```typescript
-   static schema = {
-     radius:      { type: 'float', default: 5.0 },
-     speed:       { type: 'float', default: 1.0 },
-     spin:        { type: 'float', default: 0.0 },
-     sensitivity: { type: 'float', default: 1.0 },
-     damping:     { type: 'float', default: 0.9 },
-     minDistance: { type: 'float', default: 0.1 },
-     maxDistance: { type: 'float', default: 100.0 },
-     target:      { type: 'vec3',  default: [0, 0, 0] },
-     autoRotate:  { type: 'bool',  default: false },
-   }
+   components = [
+     {
+       name: 'OrbitComponent',
+       fields: {
+         // 已有（不要重复声明，扩展即可）:
+         radius: { type: 'f32', default: 2.5 },
+         speed:  { type: 'f32', default: 0.8 },
+         spin:   { type: 'f32', default: 1.5 },
+         // 需新增（从 5 个 orbit.js 副本提取的常量）:
+         sensitivity: { type: 'f32', default: 1.0 },
+         damping:     { type: 'f32', default: 0.9 },
+         minDistance: { type: 'f32', default: 0.1 },
+         maxDistance: { type: 'f32', default: 100.0 },
+         target:      { type: 'vec3', default: [0, 0, 0] },
+         autoRotate:  { type: 'bool', default: 0 },   // bool 默认值用 0/1（见 demo4 components.json 约定）
+       },
+     },
+   ];
    ```
-   如果 OrbitSystem 目前未读取这些字段，同步修改 `OrbitSystem.ts` 使其从 Component 读取配置而非硬编码。
+   如果 `OrbitSystem.ts` 目前未读取这些新字段，同步修改使其从 Component 读取配置而非硬编码。
 
 3. **修改 Scene JSON**: 对每个受影响的 demo，找到其 `MainCamera` entity：
    - 删除 `ScriptComponent`（或其中引用 orbit.js 的部分）
@@ -94,76 +103,89 @@
 
 ---
 
-### Task 1.2: Sprite 能力插件化
+### Task 1.2: Sprite 能力从 core 剥离为独立 `sprite` 插件
 
 **优先级**: P0  
-**目标**: 将 `SpriteSheetComponent` 和 `SpriteAnimationComponent` 从 app 级 components.json 迁移至独立 `sprite` 插件。
+**目标**: 消除 core 插件对 app 级声明组件的隐式依赖。当前 core 的 `AnimationSystem`、`SpritePipeline.json`、`systemDefs` 全部引用 `SpriteSheetComponent`/`SpriteAnimationComponent`，但这两个组件的 schema 声明只在 `demo4_spriteSheet/components.json`。任何不带 demo4 组件清单的 app 加载 core，都会让 AnimationSystem 查询不存在的 schema —— 这是跨层耦合 bug，不是"待优化"。
 
 **输入文件**:
-- `public/apps/demo2/components.json`
-- `public/apps/demo4_spriteSheet/components.json`
-- `public/apps/demo4_spriteSheet/pipelines/` — Sprites 管线
-- `public/apps/demo4_spriteSheet/shaders/` — Sprites shader
-- `public/apps/demo2/app.json`
+- `public/plugins/core/index.ts` — systemDefs 第 28 行声明 animation 系统期望 `['SpriteSheetComponent', 'SpriteAnimationComponent']`
+- `public/plugins/core/AnimationSystem.ts` — 整文件读写这两个组件（line 65-152）
+- `public/plugins/core/components.json` — 不含这两个组件声明（确认）
+- `public/plugins/core/pipelines/SpritePipeline.json` — query 引用这两个组件
+- `public/plugins/core/shaders/Sprite.wgsl`
+- `public/apps/demo4_spriteSheet/components.json` — 当前唯一声明点
 - `public/apps/demo4_spriteSheet/app.json`
+- `public/apps/demo4_spriteSheet/scene.json`
 
 **输出文件**:
-- `public/plugins/sprite/index.ts` — 新建，定义 SpriteSheetComponent + SpriteAnimationComponent
-- `public/plugins/sprite/SpriteSystem.ts` — 新建，处理动画更新（如当前由 AnimationSystem 兼管，则拆分）
-- `public/plugins/sprite/pipelines/SpritesPipeline.json` — 从 demo4 迁移
-- `public/plugins/sprite/shaders/Sprites.wgsl` — 从 demo4 迁移
-- `public/apps/demo2/components.json` — 删除 SpriteSheet/SpriteAnimation 声明
-- `public/apps/demo4_spriteSheet/components.json` — 删除 SpriteSheet/SpriteAnimation 声明
-- `public/apps/demo2/app.json` — 添加 `"sprite"` 到 plugins
+- `public/plugins/sprite/index.ts` — 新建。声明 `SpriteSheetComponent` + `SpriteAnimationComponent`（从 demo4 components.json 迁移），注册 SpriteSystem（从 core AnimationSystem 迁移），声明 `pipelines('sprite:SpritePipeline')` + `shaders` + `systemDefs`
+- `public/plugins/sprite/pipelines/SpritePipeline.json` — 从 core 迁移
+- `public/plugins/sprite/shaders/Sprite.wgsl` — 从 core 迁移
+- `public/plugins/core/AnimationSystem.ts` — **删除**
+- `public/plugins/core/pipelines/SpritePipeline.json` — **删除**
+- `public/plugins/core/shaders/Sprite.wgsl` — **删除**
+- `public/plugins/core/index.ts` — 从 systemDefs 移除 `animation` 条目；从 setup 移除 AnimationSystem 实例化；移除 `SpritePipeline` 引用（如有）
+- `public/plugins/core/components.json` — 无需改（本就不含 SpriteSheet）
+- `public/apps/demo4_spriteSheet/components.json` — **删除**（组件声明移入 sprite 插件）
 - `public/apps/demo4_spriteSheet/app.json` — 添加 `"sprite"` 到 plugins
 
 **依赖**: 无
 
 **详细步骤**:
 
-1. **新建插件目录**: `public/plugins/sprite/`
+1. **新建插件目录**: `public/plugins/sprite/`，含 `tsconfig.json`（参考 `public/plugins/tsconfig.json` 的 `@shaderlab/api` paths 映射）
 
-2. **组件定义**: 在 `public/plugins/sprite/index.ts` 中定义：
+2. **组件声明**: 在 `public/plugins/sprite/index.ts` 的 `components` 字段声明（TS 字面量或 init() fetch 共置 JSON，参考 core 的 12 JSON 模式）：
    ```typescript
-   export class SpriteSheetComponent extends Component {
-     static schema = {
-       texture: { type: 'texture', default: null },
-       rows: { type: 'int', default: 1 },
-       cols: { type: 'int', default: 1 },
-       totalFrames: { type: 'int', default: 1 },
-     }
-   }
-   export class SpriteAnimationComponent extends Component {
-     static schema = {
-       currentFrame: { type: 'int', default: 0 },
-       frameRate: { type: 'float', default: 10 },
-       playing: { type: 'bool', default: true },
-       loop: { type: 'bool', default: true },
-     }
-   }
+   components = [
+     { name: 'SpriteSheetComponent', fields: {
+         sheet:     { type: 'string', default: '' },
+         texHandle: { type: 'u32', default: 0 },
+         columns:   { type: 'u32', default: 8 },
+         rows:      { type: 'u32', default: 9 } } },
+     { name: 'SpriteAnimationComponent', fields: {
+         animation: { type: 'u32', default: 0 },
+         row:       { type: 'u32', default: 0 },
+         frame:     { type: 'u32', default: 0 },
+         elapsed:   { type: 'f32', default: 0.0 },
+         playing:   { type: 'bool', default: 1 },
+         direction: { type: 'i32', default: 1 } } },
+   ];
    ```
+   字段类型以 `demo4_spriteSheet/components.json` 现状为准（不要沿用本规划 v1.0 里的 `texture`/`frameRate` 旧 schema，那不匹配代码）。
 
-3. **系统实现**: 如果 `AnimationSystem`（core 插件）目前负责 Sprite 动画，则在 `SpriteSystem.ts` 中接管：
-   - 查询所有带 `SpriteAnimationComponent` 的 entity
-   - 根据 `dt` 和 `frameRate` 更新 `currentFrame`
-   - 如果动画结束且 `loop=false`，设置 `playing=false`
+3. **系统迁移**: 把 `core/AnimationSystem.ts` 整文件移到 `sprite/SpriteSystem.ts`，类名可保留 `AnimationSystem` 或改为 `SpriteSystem`。逻辑不变（读写 schemaRegistry + scene field）。注意相对导入带 `.ts` 扩展名（插件约定，见 AGENTS.md）。
 
-4. **资源迁移**: 将 demo4 的 Sprites 管线 JSON 和 WGSL shader 复制到 `public/plugins/sprite/pipelines/` 和 `shaders/`，并修改内部路径引用为 `<sprite>:pipelines/...` 和 `<sprite>:shaders/...`。
+4. **管线/着色器迁移**: 把 `core/pipelines/SpritePipeline.json` 移到 `sprite/pipelines/SpritePipeline.json`，`core/shaders/Sprite.wgsl` 移到 `sprite/shaders/Sprite.wgsl`。pipeline JSON 内部如有 shader 相对路径，相对新位置解析。
 
-5. **修改 App 配置**: 
-   - 从 demo2 和 demo4 的 `components.json` 中移除 SpriteSheetComponent 和 SpriteAnimationComponent 的声明。
-   - 在 `app.json` 的 `plugins` 数组中添加 `"sprite"`。
+5. **systemDefs 声明**: 在 sprite 插件 `index.ts` 声明：
+   ```typescript
+   systemDefs = [
+     { name: 'animation', source: 'plugin:sprite', components: ['SpriteSheetComponent','SpriteAnimationComponent'],
+       ubos: [], buffers: [], needs: [] },
+   ];
+   ```
+   系统名仍是 `'animation'`（systems.json 顺序不变，demo 不需改 systems.json）。
 
-6. **修改 Scene**: 如果 demo2/demo4 的 `scene.json` 中 entity 引用了这些组件，确保组件名不变（因为插件注册后 schemaRegistry 会全局注册组件名）。
+6. **core 清理**: 从 `core/index.ts` 的 `systemDefs` 删除 `animation` 条目；`setup()` 中删除 `this.animation = new AnimationSystem()` 及相关行；删除 `import { AnimationSystem }`。删除 `core/AnimationSystem.ts`、`core/pipelines/SpritePipeline.json`、`core/shaders/Sprite.wgsl`。
+
+7. **app 配置**: `demo4_spriteSheet/app.json` 的 `plugins` 数组添加 `"sprite"`。删除 `demo4_spriteSheet/components.json`（声明已移入插件）。`scene.json` 中组件实例数据不变（schema 名未变）。
+
+8. **回归检查**: 确认其他 demo（demo1/3/5/6/7/8）的 render.json 不引用 `core:SpritePipeline`（应为 demo4 专属）。若有引用需改引为 `sprite:SpritePipeline`。
 
 **验收标准**:
-- [ ] `grep -r "SpriteSheetComponent" public/apps/` 定义位置不在任何 `components.json` 中（应在 plugins/sprite/）
-- [ ] demo2 和 demo4 在浏览器中加载后，Sprite 动画行为与整改前一致
-- [ ] demo4 的精灵图正确显示并播放动画
+- [ ] `grep -r "SpriteSheetComponent" public/plugins/core/` 零命中（core 不再持有 sprite 任何痕迹）
+- [ ] `grep -r "AnimationSystem" public/plugins/core/` 零命中
+- [ ] `public/apps/demo4_spriteSheet/components.json` 不存在或为空
+- [ ] demo4_spriteSheet 浏览器加载后精灵动画行为与整改前一致
+- [ ] demo1/3/5/6/7/8 加载后渲染无回归（它们本就不用 sprite，core 卸掉 sprite 后应无副作用——此条同时验证 core 不再隐式依赖 sprite 组件）
+- [ ] `npm run check:plugins` 通过
 
 **风险与回滚**:
-- 风险: Sprite 管线可能依赖 demo4 特有的 render target 配置或 blending 状态。
-- 回滚: 恢复 components.json 中的声明，恢复 app.json 的 plugins 列表。
+- 风险: Sprite 管线可能依赖 demo4 特有的 render target 或 blending 配置。需检查 `SpritePipeline.json` 是否引用 app 级声明的 target/sampler。
+- 风险: 若有其他 demo 的 render.json 误引 `core:SpritePipeline`，迁移后会断链。第 8 步已覆盖检查。
+- 回滚: 恢复 core 下三个文件 + systemDefs 条目 + setup 实例化；恢复 demo4 components.json 与 app.json。
 
 ---
 
@@ -215,7 +237,6 @@
 **完成标准**:
 - [ ] 连续切换 8 个 demo 各 10 轮（共 80 次）不崩溃、不泄漏
 - [ ] GaussianSplatManager 支持多实例
-- [ ] PipelineLoader 缓存支持多 app 隔离
 
 ---
 
@@ -375,76 +396,35 @@
 
 ---
 
-### Task 2.3: PipelineLoader 缓存命名空间隔离
+### Task 2.3: ~~PipelineLoader 缓存命名空间隔离~~（已解决，保留为记录）
 
-**优先级**: P1  
-**目标**: 防止不同 app/插件的同名管线/着色器互相覆盖。
+**状态**: 已解决，无需执行。
 
-**输入文件**:
-- `src/render/PipelineLoader.ts` — 静态缓存实现
+**核查结论**: `src/render/PipelineLoader.ts` 已具备 owner 隔离：
+- `virtualConfigs` / `virtualShaders`（line 60-62）以 `'<plugin>:<name>'` 为 key，天然按插件命名空间隔离，不同插件同名管线不会碰撞
+- `vertexInputOwners`（line 54）/ `blendPresetOwners`（line 63）已有 owner map + 跨 owner throw（与 AGENTS.md "跨 owner 重名 throw" 一致）
+- `configs` / `shaderModules` / `computeMeta` / `pipelineSlots` 是 GPU 编译产物缓存，按 URL/key 索引，跨 app 同 key 同内容复用是有意为之（AGENTS.md 明示）
+- 原设想的"两个 app 同名但 WGSL 不同的管线互相覆盖"场景在当前"app 级管线走文件 URL、virtual 走 `<plugin>:` 前缀"设计下不会发生
 
-**输出文件**:
-- `src/render/PipelineLoader.ts` — 增加 owner 前缀隔离
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **读取缓存实现**: 确认 `virtualConfigs`、`virtualShaders`、`configs`、`shaderModules` 等 static Map/Record 的 key 结构。
-
-2. **修改缓存 key**: 所有缓存读写点增加 `owner` 前缀：
-   ```typescript
-   // 之前
-   static virtualConfigs: Map<string, any> = new Map();
-
-   // 之后
-   static virtualConfigs: Map<string, any> = new Map();
-
-   static getVirtualConfig(ref: string, owner: string): any {
-     const key = `${owner}::${ref}`;
-     return this.virtualConfigs.get(key);
-   }
-
-   static setVirtualConfig(ref: string, owner: string, config: any) {
-     const key = `${owner}::${ref}`;
-     this.virtualConfigs.set(key, config);
-   }
-   ```
-   对 `virtualShaders`、`configs`、`computeMeta`、`pipelineSlots`、`shaderModules` 执行同样改造。
-
-3. **修改调用点**: 在 `PipelineLoader.loadVirtualConfig` / `loadVirtualShader` / `loadConfig` 等入口中，确保 `owner` 参数被正确传递。`owner` 格式为 `app:<appId>` 或 `plugin:<pluginId>`。
-   - 检查 `PluginManager` 在加载插件时如何调用 PipelineLoader，确保 pluginId 传入。
-   - 检查 `Engine.loadApp` 在加载 app 级管线时如何调用，确保 appId 传入。
-
-4. **清理接口适配**: `removeVirtualsByPrefix(prefix)` 目前按前缀清理。修改为按 owner 精确清理：
-   ```typescript
-   static removeVirtualsByOwner(owner: string) {
-     const prefix = `${owner}::`;
-     [this.virtualConfigs, this.virtualShaders].forEach(map => {
-       for (const key of map.keys()) {
-         if (key.startsWith(prefix)) map.delete(key);
-       }
-     });
-   }
-   ```
-
-5. **向后兼容**: 如果某些调用点暂时无法传入 owner，使用默认 owner `"global"`。
-
-**验收标准**:
-- [ ] 创建两个测试 app，各自声明同名但 WGSL 内容不同的管线 `TestPipeline`，同时加载时两者使用各自的 shader，不互相覆盖
-- [ ] 所有现有 demo 加载后渲染结果无回归
-
-**风险与回滚**:
-- 风险: 调用点分散，可能遗漏某些缓存读写路径。
-- 回滚: 恢复原始 key 逻辑，保留 owner 参数但不使用。
+如未来出现真实碰撞 case，再单开 Task，不要按过时假设预防式改造。
 
 ---
 
-## 阶段 3: System 调度显式化（P2）
+## 阶段 3: System 调度显式化（P2）— ⚠️ 需架构决策
 
-**目标**: 从"全局硬编码 JSON 顺序"进化为"声明式 Phase + Priority"。
+**目标**: ~~从"全局硬编码 JSON 顺序"进化为"声明式 Phase + Priority"。~~
 
-**完成标准**:
+> **⚠️ 此阶段与架构核心原则冲突，需先做架构决策，不可当"零破坏重构"执行。**
+>
+> AGENTS.md 三处明示："**顺序权永远在 systems.json，插件只提供实现**"。这是刻意设计选择：让组合层（JSON）而非插件决定帧顺序，原因正是本阶段风险栏自己列出的"某些 System 有隐式前后依赖（如 light 必须在 camera 之后），仅靠 phase 不够精细"。
+>
+> Task 3.1 试图改为"插件声明 phase 自动排序，systems.json 降级为白名单" —— 这是**架构方向性反转**，不是 P2 级加固。
+>
+> **决策门**：在启动本阶段前，必须先回答："是否放弃 systems.json 持有顺序权？"
+> - 是 → 本阶段升格为架构 RFC，单独评审，不能藏在 P2 里偷渡
+> - 否 → 整个阶段 3 砍掉（Task 3.2 已完成，Task 3.1 不做）
+
+**完成标准**（仅当决策门通过时适用）:
 - [ ] demo6/8 不再需要覆盖整个 `systems.json` 来插入自定义 System
 - [ ] 新插件可以通过声明 phase 自动插入正确位置
 
@@ -452,7 +432,7 @@
 
 ### Task 3.1: 引入 SystemPhase + Priority 机制
 
-**优先级**: P2  
+**优先级**: P2（** gated by 决策门，未通过前不得启动 **）  
 **目标**: 让 System 注册时声明执行阶段，SystemRegistry 支持自动排序。
 
 **输入文件**:
@@ -541,188 +521,85 @@
 
 ---
 
-### Task 3.2: RenderGraph Phase Behavior 插件注册
+### Task 3.2: ~~RenderGraph Phase Behavior 插件注册~~（已完成）
 
-**优先级**: P2  
-**目标**: 让插件可以注册自定义 Render Phase Behavior，解耦 Deferred 等复杂管线的硬编码。
+**状态**: 已实现，无需执行。
 
-**输入文件**:
-- `src/render/RenderGraph.ts` — Phase 调度实现
-- `src/render/types.ts` — PhaseBehavior 接口
-- `public/apps/demo5_deferred/render.json` — Deferred 的 tight coupling 示例
+**核查结论**（对照 AGENTS.md 与源码）:
+- `src/render/types.ts:237` 已暴露 `registerPhaseBehavior(name, behavior, owner?)` 接口
+- `src/render/RenderGraph.ts:69` 已实现，带 `phaseBehaviorOwners` map + `removePhaseBehaviorsByOwner`（line 79-85）
+- `src/render/phaseBehaviors.ts` 已有 `normal` / `shadow-clear` / `postprocess-chain` 三默认
+- 引擎默认三 behavior 经与插件相同通道注册（`RenderGraph.ts:63-65`），插件可覆盖/补充
 
-**输出文件**:
-- `src/render/RenderGraph.ts` — 支持动态注册 PhaseBehavior
-- `src/render/types.ts` — 扩展 IRenderer 或 PluginContext 接口
-- `public/apps/demo5_deferred/render.json` — 简化，利用新 behavior
-
-**依赖**: Task 3.1
-
-**详细步骤**:
-
-1. **读取当前 PhaseBehavior 实现**: 理解 `normal`、`shadow-clear`、`postprocess-chain` 三个默认 behavior 的实现方式。
-
-2. **扩展注册接口**: 在 `PluginContext` 中增加：
-   ```typescript
-   registerPhaseBehavior(name: string, behavior: PhaseBehavior): void;
-   ```
-   在 `RenderGraph` 中维护 `Map<string, PhaseBehavior>`。
-
-3. **Deferred Phase Behavior 插件化**:
-   - 新建或修改一个插件（如 `deferred` 插件，或放在 core 中但按需注册），提供 `gbuffer` behavior：
-     ```typescript
-     const gbufferBehavior: PhaseBehavior = {
-       perCamera: true,
-       run: (ctx) => {
-         // 1. 执行所有 target="gbufferA/B/C/D" 的 pass
-         // 2. 执行 DeferredLight pass（读取 GBuffer）
-       }
-     };
-     ```
-   - demo5 的 `render.json` 中，将 GBuffer → DeferredLight 的 tight coupling 改为引用 `"behavior": "gbuffer"`。
-
-4. **简化 render.json**: demo5 的 render.json 应该不再需要手动排列 GBuffer 和 DeferredLight 的 pass 顺序，而是由 behavior 内部处理依赖。
-
-**验收标准**:
-- [ ] demo5 的 deferred 渲染结果与整改前一致
-- [ ] `render.json` 中 GBuffer 和 DeferredLight 的 pass 顺序不再硬编码（或至少不依赖 app 级配置）
-- [ ] 新增一个自定义 behavior 插件，能在不修改 RenderGraph 核心代码的情况下注册并执行
-
-**风险与回滚**:
-- 风险: PhaseBehavior 的抽象可能过度设计，Deferred 的 tight coupling 可能难以完全解耦而不损失性能。
-- 回滚: 恢复硬编码的 render.json 配置。
+**遗留可选优化**（不阻塞，低优先级）: demo5 的 deferred 紧耦合仍写在 `render.json`，未来若要解耦可由 deferred 插件注册 `gbuffer` behavior。但这是组合层重构，非引擎缺口，且 DeferredLight ← GBuffer 的 pass 顺序当前能正常工作，不必预防式动刀。
 
 ---
 
-## 阶段 4: 组合冲突自动化（P3）
+## 阶段 4: 组合冲突自动化（P3）— ⚠️ 暂缓（YAGNI）
 
-**目标**: 为将来"多 demo 合并运行"扫清配置层面的障碍。
+**目标**: ~~为将来"多 demo 合并运行"扫清配置层面的障碍。~~
 
-**完成标准**:
-- [ ] 两个 scene.json 可以加载到同一 Scene 而不发生 entity key 冲突
-- [ ] PhysicsWorld 多控制器冲突可被检测或自动合并
-
----
-
-### Task 4.1: Entity Key 命名空间/前缀支持
-
-**优先级**: P3  
-**目标**: 消除 Scene 中 entity key 的唯一性冲突。
-
-**输入文件**:
-- `src/ecs/Scene.ts` — createEntity / getEntity 实现
-
-**输出文件**:
-- `src/ecs/Scene.ts` — 增加 key prefix / namespace 支持
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **读取当前实现**: 确认 `Scene.createEntity(key, components)` 和 `Scene.getEntity(key)` 的实现。
-
-2. **增加 Prefix 支持**:
-   ```typescript
-   class Scene {
-     private keyPrefix: string = '';
-
-     setKeyPrefix(prefix: string) {
-       this.keyPrefix = prefix;
-     }
-
-     createEntity(key: string, components: Record<string, any>): number {
-       const namespacedKey = this.keyPrefix ? `${this.keyPrefix}/${key}` : key;
-       // 使用 namespacedKey 作为唯一标识
-       // ...
-     }
-
-     getEntity(key: string): number | undefined {
-       const namespacedKey = this.keyPrefix ? `${this.keyPrefix}/${key}` : key;
-       return this.entityMap.get(namespacedKey);
-     }
-
-     // 兼容：也支持直接查询短名（如果全局唯一）
-     getEntityByShortName(key: string): number | undefined {
-       return this.entityMap.get(key);
-     }
-   }
-   ```
-
-3. **Engine 集成**: 在 `Engine.loadApp(appId)` 中，加载 scene 前调用 `scene.setKeyPrefix(appId)`。
-   - 注意：这会影响现有 demo 中脚本通过 key 查找 entity 的逻辑（如 `scene.getEntity('SunLight')`）。
-   - 如果脚本中使用了硬编码 key，需要修改为支持前缀查找，或在 `setKeyPrefix` 时同时注册无前缀别名（双重注册）。
-
-4. **双重注册策略（推荐）**: 
-   - `createEntity` 时，同时注册 `appId/key` 和 `key`（如果 `key` 尚未被占用）。
-   - `getEntity('SunLight')` 先尝试查找 `SunLight`，如果找不到且当前有 prefix，再查找 `appId/SunLight`。
-   - 这样单个 app 运行时不破坏现有行为，合并运行时才启用命名空间隔离。
-
-**验收标准**:
-- [ ] 单个 demo 运行时，`scene.getEntity('MainCamera')` 仍然正常工作（向后兼容）
-- [ ] 两个 demo 合并加载时（通过某种测试方式），同名 entity（如两个 `SunLight`）共存且不覆盖
-- [ ] `scene.toJSON()` 序列化时保留命名空间信息（或能正确还原）
-
-**风险与回滚**:
-- 风险: 脚本系统中大量硬编码 entity key，双重注册可能引入歧义。
-- 回滚: 移除 prefix 逻辑，恢复纯 key 模式。
+> **⚠️ 本阶段暂缓执行。**
+>
+> AGENTS.md 明示：合并 demo 的正确姿势是"写一个新的 app.json + scene.json + render.json"，引擎零改动。当前无任何 demo 需要运行时多场景或 entity key 命名空间隔离。本阶段在为**假设的**"多 demo 同 Scene 运行"需求做引擎级改动（`Scene.setKeyPrefix` + 双重注册），属 YAGNI。
+>
+> **解封条件**: 出现真实的"运行时合并两个 demo 到同一 Scene"产品需求时再启动。在此之前，用 fail-loud throw 覆盖明确的冲突（Task 4.2 简化版），不动 Scene 核心数据结构。
 
 ---
 
-### Task 4.2: PhysicsWorld 冲突检测与合并策略
+### Task 4.1: ~~Entity Key 命名空间/前缀支持~~（暂缓）
 
-**优先级**: P3  
-**目标**: 明确同一 Scene 中多个 PhysicsControllerComponent 的处理方式。
+**状态**: 暂缓（YAGNI）。解封条件见阶段 4 头部。
+
+**理由**: `Scene.createEntity(key, ...)` 当前用 key 作唯一标识，同 key 后者覆盖前者。这是设计而非 bug —— 单 app 运行时 entity key 自然唯一，合并场景应在新 app.json 里手动去重（AGENTS.md 已示）。引入 `setKeyPrefix` + 双重注册会污染 Scene 核心数据结构，且脚本中大量硬编码 entity key 查找需同步改造，风险/收益不划算。
+
+如未来真有需求，再评估"prefix + 双重注册"或"显式 namespace API"哪个更合适。
+
+---
+
+### Task 4.2: PhysicsWorld 多控制器冲突检测（fail-loud throw）
+
+**优先级**: P3（轻量版，可独立于阶段 4 其他项执行）  
+**目标**: 同一 Scene 出现多个 `PhysicsControllerComponent` 时立即 throw，而非静默用最后一个导致未定义物理行为。
 
 **输入文件**:
 - `public/plugins/physics/PhysicsSystem.ts` — PhysicsWorld 初始化逻辑
-- `public/apps/demo1/scene.json` — PhysicsControllerComponent 配置
-- `public/apps/demo2/scene.json` — PhysicsControllerComponent 配置
+- `public/apps/demo1/scene.json` — 单控制器示例
+- `public/apps/demo2/scene.json` — 单控制器示例
 
 **输出文件**:
-- `public/plugins/physics/PhysicsSystem.ts` — 增加冲突检测/合并逻辑
+- `public/plugins/physics/PhysicsSystem.ts` — 初始化处加多控制器检测
 
 **依赖**: 无
 
 **详细步骤**:
 
-1. **读取当前实现**: 确认 PhysicsSystem 如何处理 `PhysicsControllerComponent`。是否一个 World 只能有一个 Controller？
+1. **读取当前实现**: 确认 `PhysicsSystem` 如何发现并消费 `PhysicsControllerComponent`。当前若是"取第一个/最后一个"即静默覆盖，正是要改的点。
 
-2. **选择策略**（根据当前实现选择其一）：
-
-   **策略 A: 自动合并**（如果参数可合并）：
+2. **严格检测（策略 B，唯一策略）**: 在 PhysicsWorld 初始化前查询所有带 `PhysicsControllerComponent` 的 entity：
    ```typescript
-   // PhysicsSystem 初始化时
-   const controllers = scene.query(PhysicsControllerComponent);
-   if (controllers.length > 1) {
-     const mergedConfig = mergePhysicsConfigs(controllers.map(c => c.config));
-     this.world = createWorld(mergedConfig);
-   }
-   ```
-
-   **策略 B: 严格检测 + 清晰报错**（如果只能有一个）：
-   ```typescript
-   const controllers = scene.query(PhysicsControllerComponent);
+   const controllers = scene.queryByComponent('PhysicsControllerComponent');
    if (controllers.length > 1) {
      throw new Error(
        `[PhysicsSystem] Multiple PhysicsControllerComponent detected in scene. ` +
-       `Only one is allowed per Scene. Found on entities: ${controllers.map(e => e.key).join(', ')}. ` +
-       `Suggestion: Merge physics config into a single entity, or use separate Scene instances.`
+       `Only one is allowed per Scene. Found on entities: ` +
+       `${controllers.map(e => scene.getEntityKey(e)).join(', ')}. ` +
+       `Fix: merge physics config into a single entity, or split into separate apps.`
      );
    }
    ```
+   不做自动合并（策略 A）—— PhysicsWorld 的全局参数（gravity / ground plane）只能有一份，自动合并会产生不可预期的物理行为，fail-loud 更利于早期发现问题（与 AGENTS.md "fail-loud" 原则一致）。
 
-3. **推荐策略 B**: 因为 PhysicsWorld 的全局参数（gravity、ground plane）通常只能有一份，自动合并可能产生不可预期的物理行为。严格报错更利于早期发现问题。
-
-4. **文档化**: 在 `ARCHITECTURE.md` 或插件 README 中明确说明："一个 Scene 只能有一个 PhysicsControllerComponent"。
+3. **文档化**: 在 AGENTS.md "已知残留 / 陷阱" 区追加一行："一个 Scene 只能有一个 PhysicsControllerComponent，多控制器在 loadApp 阶段 throw。"
 
 **验收标准**:
-- [ ] 加载包含两个 PhysicsControllerComponent 的 scene 时，`loadApp` 阶段抛出清晰错误（而非静默异常）
-- [ ] 所有现有 demo（只有一个 Controller）正常运行
-- [ ] 错误消息包含 entity key 和修复建议
+- [ ] 加载包含两个 `PhysicsControllerComponent` 的 scene 时，`loadApp` 阶段抛出含 entity key 的清晰错误（而非静默异常或未定义行为）
+- [ ] 所有现有 demo（单控制器）正常运行
+- [ ] `node scripts/validate-config.mjs` 通过（如该脚本已支持 PhysicsController 计数检查，更好）
 
 **风险与回滚**:
-- 风险: 某些 demo 可能无意中包含多个 Controller（如 glTF 导入时自动添加）。
-- 回滚: 移除检测逻辑，恢复静默覆盖行为。
+- 风险: 极低。某些 demo 若无意中含多个 Controller（如 glTF 导入副作用），会从"静默坏掉"变成"显式报错"——这恰是 fail-loud 的预期收益。
+- 回滚: 移除检测逻辑。
 
 ---
 
@@ -733,7 +610,7 @@
 | `app.json` | App 级配置：声明插件、系统顺序、场景、渲染图 |
 | `scene.json` | 场景实体配置：entity key + component 数据 |
 | `render.json` | 渲染图配置：phases、passes、render targets |
-| `systems.json` | System 执行顺序表（将被 Phase 机制取代） |
+| `systems.json` | System 执行顺序表（架构原则：顺序权在此，非插件；见 AGENTS.md） |
 | `components.json` | App 级局部组件 Schema 声明 |
 | `owner-tag` | ResourceManager / BufferRegistry 的资源归属标记：`app:<id>` / `plugin:<id>` |
 | PhaseBehavior | RenderGraph 的相位策略：控制该 phase 下 pass 如何执行 |

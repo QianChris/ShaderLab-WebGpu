@@ -67,6 +67,7 @@ async function main(): Promise<void> {
         };
         editor.onAppSwitch = switchToApp;
         (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = switchToApp;
+        (window as unknown as { engine: unknown }).engine = engine;
 
         console.log('[ShaderLab] initialized');
         console.log('[ShaderLab] scene:', JSON.stringify(engine.exportScene(), null, 2));

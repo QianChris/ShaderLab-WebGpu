@@ -576,6 +576,11 @@ export class Engine {
         this.currentApp = null;
     }
 
+    /** Resource counts for diagnostics / stress testing (delegates to ResourceManager). */
+    getResourceStats(): Record<string, number> {
+        return resourceManager.getStats() as unknown as Record<string, number>;
+    }
+
     /** Resolve an app asset path: absolute (leading /) or relative to the app dir. */
     private resolveAsset(base: string, rel: string): string {
         return rel.startsWith('/') ? rel : `${base}/${rel}`;

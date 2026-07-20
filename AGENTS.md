@@ -59,11 +59,14 @@ public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发�
                               gaussianSplat 系统 + splat.draw hook（app 级，demo6 声明）
   orbit/                      示例：自定义组件 + OrbitSystem（demo8 声明）
 
-public/common/                组合层残留：engine-config.json（含 pluginsRoot + plugins 引擎级清单）、
-                              systems.json（默认帧顺序，bare name 数组）、gltf-mapping.json、textures/
+public/common/                组合层残留：engine-config.json（含 pluginsRoot + plugins 引擎级清单
+                              + systemOrder 旧式 bare-name 兜底）、
+                              systems.json（默认帧顺序，`[{ "name": "..." }]` 对象数组，主用）、
+                              gltf-mapping.json、textures/
 public/apps/<name>/           app：app.json（plugins/components/scene/render/systems/tools/gltf）、
                               scene.json、render.json（管线清单，'<plugin>:pipelines/X.json' 引用）、
-                              systems.json（顺序覆盖）、tools.json、scripts/、私有 pipelines/shaders
+                              systems.json（顺序覆盖，同 `[{name}]` 格式）、tools.json、scripts/、私有 pipelines/shaders
+PLAN.md                       根目录整改规划草稿（已按本文校准），细节以本文为准
 ```
 
 ## 插件写法（用户视角）
@@ -89,7 +92,7 @@ export default class MyFxPlugin extends EnginePlugin {
 - 组合：engine-config.json `plugins`（引擎级常驻）或 app.json `plugins`（app 级，切 app 逆拓扑卸载）；systems.json 里列 `{ "name": "myfx" }` 决定帧顺序（**顺序权永远在 systems.json，插件只提供实现**）。
 - 跨插件协作：`ctx.getSystem<T>(name)` / `ctx.getPlugin(id)` / attachments —— **结构类型契约**（本地声明 interface），运行时 fail-loud。
 - 插件 TS 限"可剥离语法"；运行时只剥类型不检查——类型错误靠编辑器 + `check:plugins` 抓。
-- 相对导入支持多文件（Blob 递归重写）；禁止裸导入（除 `@shaderlab/api`）；循环相对导入 throw。
+- 相对导入支持多文件（Blob 递归重写）；**相对导入必须带 `.ts` 扩展名**（如 `from './Foo.ts'`，运行时 Blob fetch 需要完整路径，插件 tsconfig 用 `allowImportingTsExtensions` 放行）；禁止裸导入（除 `@shaderlab/api`）；循环相对导入 throw。
 - 插件内 fetch 资产用 `ctx.baseUrl`；管线/着色器可为文件（`'<id>:pipelines/X.json'` → `/plugins/<id>/...`，shader 相对管线文件解析）或内存声明（`pipelines`/`shaders` 字段，同名 key）。
 
 ## 引擎侧关键机制（改代码前须知）
@@ -125,7 +128,7 @@ export default class MyFxPlugin extends EnginePlugin {
 
 ## 已知残留 / 陷阱
 
-- `common/textures` 是共享资产池（`asset:` 按 dataRoot 解析）；`PRESET_MESHES` 仍在 Primitives.ts；`RenderScriptLoader` app 级逃生舱保留但 common/scripts 已空 —— 见 PLAN_Plugin.md 残留清单。
+- `common/textures` 是共享资产池（`asset:` 按 dataRoot 解析）；`PRESET_MESHES` 仍在 Primitives.ts；`RenderScriptLoader` app 级逃生舱保留但 common/scripts 已空。
 - ScriptComponent 游戏脚本（scene 挂 .js，Blob import）与 SystemRegistry 的 `source:"scripts/*.js"` 无构建系统仍可用，属内容层逃生舱，非推荐主路径。
 - gaussianSplat 单实例限制仍在（多 GsComponent 用最后一个并 warn）。
-- 深度设计文档 ARCHITECTURE.md 反映的是插件化以前的旧结构，细节以本文与 PLAN_Plugin.md 为准。
+- 根目录 PLAN.md 是整改规划草稿（已按本文校准）；细节以本文为准。

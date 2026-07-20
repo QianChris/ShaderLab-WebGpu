@@ -129,6 +129,20 @@ export class ResourceManager {
         return this.currentOwner;
     }
 
+    /** Resource counts for diagnostics / stress testing (all scopes). */
+    getStats(): { meshes: number; pbrMeshes: number; meshGpu: number; textures: number; colorTargets: number; depthTargets: number; uniforms: number; storageBuffers: number } {
+        return {
+            meshes: this.meshData.size,
+            pbrMeshes: this.pbrMeshData.size,
+            meshGpu: this.meshGpu.size,
+            textures: this.textures.size,
+            colorTargets: this.colorTargets.size,
+            depthTargets: this.depthTargets.size,
+            uniforms: this.uniformBuffers.size,
+            storageBuffers: this.storageBuffers.size,
+        };
+    }
+
     /** Claim a name in a named-decl registry for the current owner.
      *  Cross-owner duplicates throw (fail-loud); same-owner reloads pass. */
     private claimName(owners: Map<string, string>, name: string, kind: string): void {
