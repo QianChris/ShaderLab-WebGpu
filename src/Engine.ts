@@ -478,13 +478,14 @@ export class Engine {
         await pluginManager.loadMany(manifest.plugins ?? [], 'app');
 
         // An app may override the common system order by shipping its own
-        // systems.json; absent → keep the common baseline (commonSystems).
+        // systems.json; absent → use the common baseline + auto-insert any
+        // registered systems that declared after/before dependencies.
         const systemsUrl = this.resolveAsset(base, manifest.systems ?? 'systems.json');
         const sysResp = await fetch(systemsUrl);
         if (this.isJson(sysResp)) {
             this.activeSystems = await sysResp.json() as SystemEntry[];
         } else {
-            this.activeSystems = this.commonSystems;
+            this.activeSystems = systemRegistry.autoInsert(this.commonSystems);
         }
 
         // Pre-load each system's def JSON + any script systems referenced by

@@ -2,6 +2,5 @@
   "name": "demo6_3dgsViewer",
   "plugins": ["splat", "orbit"],
   "scene": "scene.json",
-  "render": "render.json",
-  "systems": "systems.json"
+  "render": "render.json"
 }

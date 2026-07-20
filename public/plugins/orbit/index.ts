@@ -65,6 +65,7 @@ export default class OrbitPlugin extends EnginePlugin {
                 { name: 'orbitScratch', size: 64, usage: ['storage', 'copy_dst'] },
             ],
             needs: [],
+            after: ['animation'],
         },
         {
             name: 'orbitCamera',
@@ -73,6 +74,7 @@ export default class OrbitPlugin extends EnginePlugin {
             ubos: [],
             buffers: [],
             needs: [],
+            after: ['input'],
         },
     ];
 
