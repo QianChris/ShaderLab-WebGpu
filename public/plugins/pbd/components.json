@@ -1,0 +1,15 @@
+[
+  {
+    "name": "PbdSoftBodyComponent",
+    "fields": {
+      "gridN":           { "type": "u32", "default": 5 },
+      "cellSize":        { "type": "f32", "default": 0.4 },
+      "gravity":         { "type": "f32", "default": -9.81 },
+      "damping":         { "type": "f32", "default": 0.995 },
+      "solverIterations":{ "type": "u32", "default": 8 },
+      "compliance":      { "type": "f32", "default": 0.0 },
+      "restitution":     { "type": "f32", "default": 0.3 },
+      "mass":            { "type": "f32", "default": 1.0 }
+    }
+  }
+]

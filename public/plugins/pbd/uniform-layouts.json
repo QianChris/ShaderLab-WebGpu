@@ -1,0 +1,12 @@
+{
+  "pbdParams": [
+    { "name": "dt", "type": "f32" },
+    { "name": "time", "type": "f32" },
+    { "name": "gravityY", "type": "f32" },
+    { "name": "damping", "type": "f32" },
+    { "name": "solverIterations", "type": "u32" },
+    { "name": "particleCount", "type": "u32" },
+    { "name": "restitution", "type": "f32" },
+    { "name": "_pad0", "type": "f32" }
+  ]
+}
