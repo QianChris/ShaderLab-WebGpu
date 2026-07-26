@@ -36,9 +36,9 @@ class SplatPhysicsSystem implements System {
 
         let attached = 0;
         for (const desc of result.colliderDescs) {
-            desc.setDensity(1);
-            desc.setFriction(0.7);
-            desc.setRestitution(0.1);
+            desc.setDensity(8);
+            desc.setFriction(0.9);
+            desc.setRestitution(0.05);
             desc.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
             if (physics.attachColliderToBody(this.state.gsEid, desc)) {
                 attached++;
@@ -95,7 +95,8 @@ export default class SplatPhysicsPlugin extends EnginePlugin {
         ctx.scene.setField(gsEid, 'RigidBodyComponent', 'bodyType', 'dynamic');
         ctx.scene.setField(gsEid, 'RigidBodyComponent', 'ccd', 1);
         ctx.scene.setField(gsEid, 'RigidBodyComponent', 'linearDamping', 0.05);
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'angularDamping', 0.1);
+        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'angularDamping', 0.3);
+        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'gravityScale', 1);
 
         ctx.scene.toggleComponent(gsEid, 'ColliderComponent', true);
         ctx.scene.setField(gsEid, 'ColliderComponent', 'shape', 'cuboid');

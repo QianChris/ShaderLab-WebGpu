@@ -56,8 +56,8 @@ function spawnBall(ctx, ndcX, ndcY) {
     const far = unproject(cam.ivp, ndcX, ndcY, 1);
     const dir = normalize([far[0] - near[0], far[1] - near[1], far[2] - near[2]]);
 
-    const speed = Number(ctx.getField('GameStateComponent', 'ballSpeed') ?? 18);
-    const radius = Number(ctx.getField('GameStateComponent', 'ballRadius') ?? 0.35);
+    const speed = Number(ctx.getField('GameStateComponent', 'ballSpeed') ?? 25);
+    const radius = Number(ctx.getField('GameStateComponent', 'ballRadius') ?? 0.25);
 
     const origin = [near[0] + dir[0] * 0.5, near[1] + dir[1] * 0.5, near[2] + dir[2] * 0.5];
     const vel = [dir[0] * speed, dir[1] * speed, dir[2] * speed];
@@ -74,7 +74,7 @@ function spawnBall(ctx, ndcX, ndcY) {
             emissive: [0.1, 0.1, 0.2]
         },
         RigidBodyComponent: { bodyType: 'dynamic', linearVelocity: vel, ccd: 1 },
-        ColliderComponent: { shape: 'ball', radius: radius, restitution: 0.4, density: 6, friction: 0.5 },
+        ColliderComponent: { shape: 'ball', radius: radius, restitution: 0.5, density: 1, friction: 0.4 },
     });
     balls.add(eid);
     ballKeys.set(eid, key);

@@ -12,7 +12,19 @@
     "LightComponent": { "type": "directional", "color": [1, 0.95, 0.85], "intensity": 2.5, "castShadow": 0 }
   },
   "PhysicsWorld": {
-    "PhysicsControllerComponent": { "enabled": 1, "gravity": [0, -9.81, 0], "timeStep": 0.0166667, "maxSubsteps": 4, "debugDraw": 1, "groundEnabled": 1, "groundHeight": -1.5, "groundHalfExtent": 50, "groundThickness": 0.5 }
+    "PhysicsControllerComponent": { "enabled": 1, "gravity": [0, -9.81, 0], "timeStep": 0.0166667, "maxSubsteps": 4, "debugDraw": 1, "groundEnabled": 0 }
+  },
+  "Ground": {
+    "Transform": { "position": [0, -1.75, 0], "rotation": [0, 0, 0, 1], "scale": [10, 0.25, 10] },
+    "MeshComponent": { "mesh": "pbr_cube" },
+    "PbrMaterial": {
+      "baseColor": [0.35, 0.38, 0.42, 1],
+      "metallic": 0.0,
+      "roughness": 0.9,
+      "ao": 1,
+      "emissive": [0, 0, 0]
+    },
+    "ColliderComponent": { "shape": "cuboid", "halfExtents": [5, 0.125, 5], "friction": 0.8, "restitution": 0.1 }
   },
   "ReferenceCube": {
     "Transform": { "position": [1.2, 0.1, 0.4], "rotation": [0, 0, 0, 1], "scale": [0.3, 0.6, 0.3] },
@@ -26,7 +38,7 @@
     }
   },
   "GsEntity": {
-    "Transform": { "position": [0, 0, 0], "rotation": [0, 0, 1, 0], "scale": [1, 1, 1] },
+    "Transform": { "position": [0, 1, 0], "rotation": [0, 0, 1, 0], "scale": [1, 1, 1] },
     "GsComponent": { "ply": "../../assets/models/3dgs/bicycle-road.ply" }
   },
   "Sparks": {
@@ -45,7 +57,7 @@
   },
   "GameState": {
     "Transform": { "position": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] },
-    "GameStateComponent": { "ballSpeed": 20.0, "ballRadius": 0.35, "spawnHeight": 7.0 },
+    "GameStateComponent": { "ballSpeed": 25.0, "ballRadius": 0.25, "spawnHeight": 7.0 },
     "ScriptComponent": { "script": "scripts/game.js", "enabled": 1 }
   }
 }
