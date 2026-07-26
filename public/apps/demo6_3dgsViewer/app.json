@@ -1,6 +1,7 @@
 {
   "name": "demo6_3dgsViewer",
-  "plugins": ["splat"],
+  "plugins": ["splat", "splat-physics"],
+  "components": ["components.json"],
   "scene": "scene.json",
   "render": "render.json",
   "systems": "systems.json"
