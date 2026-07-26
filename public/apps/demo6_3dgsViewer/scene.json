@@ -12,7 +12,7 @@
     "LightComponent": { "type": "directional", "color": [1, 0.95, 0.85], "intensity": 2.5, "castShadow": 0 }
   },
   "PhysicsWorld": {
-    "PhysicsControllerComponent": { "enabled": 1, "gravity": [0, -9.81, 0], "timeStep": 0.0166667, "maxSubsteps": 4, "debugDraw": 0, "groundEnabled": 1, "groundHeight": -1.5, "groundHalfExtent": 50, "groundThickness": 0.5 }
+    "PhysicsControllerComponent": { "enabled": 1, "gravity": [0, -9.81, 0], "timeStep": 0.0166667, "maxSubsteps": 4, "debugDraw": 1, "groundEnabled": 1, "groundHeight": -1.5, "groundHalfExtent": 50, "groundThickness": 0.5 }
   },
   "ReferenceCube": {
     "Transform": { "position": [1.2, 0.1, 0.4], "rotation": [0, 0, 0, 1], "scale": [0.3, 0.6, 0.3] },

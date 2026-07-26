@@ -4,7 +4,7 @@
     "Opaque": [
       { "name": "Grid",     "pipeline": "core:pipelines/GridPipeline.json",     "enabled": true },
       { "name": "PbrSolid", "pipeline": "core:pipelines/PbrPipeline.json",      "enabled": true },
-      { "name": "PhysicsDebug", "pipeline": "physics:pipelines/PhysicsDebugPipeline.json", "enabled": false }
+      { "name": "PhysicsDebug", "pipeline": "physics:pipelines/PhysicsDebugPipeline.json", "enabled": true }
     ],
     "Transparent": [
       { "name": "Splat", "pipeline": "pipelines/GaussianSplatPipeline.json", "enabled": true },
