@@ -1,767 +1,553 @@
-# PLAN.md — ShaderLab-WebGPU 引擎本体整改规划
+# PLAN.md — Demo6 3DGS 自行车物理化改造
 
-> 版本: 1.0  
-> 目标: 消除特权代码，实现彻底插件化，加固资源生命周期，显式化 System 调度  
-> 约束: **不修改 Editor** | **保持所有现有 demo 可运行** | **零破坏重构**
-
----
-
-## 执行原则（给 AI 的元指令）
-
-1. **先读后写**: 每个任务开始前，先读取所有输入文件，理解当前实现后再生成修改方案。
-2. **最小变更**: 每个任务修改的文件数控制在 3-7 个以内。如果超出，拆分为子任务。
-3. **向后兼容**: 所有接口变更必须保留旧路径（deprecated alias 或兼容层），直到下一阶段明确移除。
-4. **验收驱动**: 每个任务必须有可自动验证的验收标准。无法自动验证的，必须提供手动验证步骤。
-5. **阶段隔离**: 同一阶段内的任务可以并行执行（无文件冲突时）。跨阶段任务必须按顺序执行。
-6. **回滚就绪**: 每个任务完成后，git commit 一次，commit message 前缀为 `[PLAN]`。
+> 版本: 1.0
+> 目标: 将 demo6 的 Gaussian Splatting 自行车从纯视觉展示改为物理驱动的可交互场景
+> 约束: **引擎零改动** | **不修改现有插件公共 API** | **保持原高斯渲染效果不变**
 
 ---
 
-## 阶段 1: 插件化清零（P0）
+## 背景
 
-**目标**: 消除所有绕过 PluginManager 的能力注入方式。所有可复用能力必须通过插件通道进入引擎。
+demo6 目前用 3DGS PLY 渲染一辆自行车，但场景是静态的 —— 相机可以绕转，物体不会动。
 
-**完成标准**: 
-- [ ] 全局搜索 `orbit.js` / `OrbitCameraController`，除 `public/plugins/orbit/` 外零命中
-- [ ] 所有可复用渲染组件（SpriteSheet/SpriteAnimation）迁移至独立插件
-- [ ] 所有 demo 的 `components.json` 仅含业务级局部组件
+改造目标：
+1. 从 PLY 的 splat 中心点云提取几何信息，生成凸包碰撞体
+2. 自行车成为一个 dynamic 刚体，会受重力、可以被球砸
+3. 高斯 splat 跟随物理驱动的 Transform 移动，视觉上自行车"活"了
+4. 加入地面、鼠标点击射球交互（类似 demo2）
 
 ---
 
-### Task 1.1: 统一 Orbit 机制 —— 删除 5 个 orbit.js 副本
+## 执行原则
 
-**优先级**: P0  
-**目标**: 将分散在 5 个 demo 中的 orbit camera 脚本统一收敛到 `orbit` 插件，消除复制粘贴。
+1. **先读后写**: 每个任务开始前，先读取所有输入文件
+2. **最小变更**: 每个任务修改 2-5 个文件
+3. **引擎零改动**: 所有能力通过插件提供，`src/` 一行不改
+4. **验证驱动**: 每个任务必须可编译、可通过 `npm run check:plugins`
+5. **阶段隔离**: 任务按依赖顺序执行，不可跳跃
+
+---
+
+## 阶段 1: 基础设施（P0）
+
+**目标**: 扩展 physics 插件支持 convexHull 形状，暴露 splat 点云数据。
+
+**完成标准**:
+- [ ] PhysicsSystem 支持 `convexHull` 和 `compound` 两种新碰撞形状
+- [ ] ColliderComponent schema 的 `shape` options 包含 `convexHull` 和 `compound`
+- [ ] GaussianSplatManager 暴露 `getCenters(): Float32Array | null`
+
+---
+
+### Task 1.1: PhysicsSystem 增加 convexHull / compound 形状支持
+
+**优先级**: P0
+**目标**: 让 PhysicsSystem 能构建 Rapier convex hull 和 compound 碰撞体。
 
 **输入文件**:
-- `public/plugins/orbit/index.ts` — OrbitComponent 定义
-- `public/plugins/orbit/OrbitSystem.ts` — OrbitSystem 实现
-- `public/apps/demo3_shadow/scripts/orbit.js`
-- `public/apps/demo5_deferred/scripts/orbit.js`
-- `public/apps/demo6_3dgsViewer/scripts/orbit.js`
-- `public/apps/demo7_multiView/scripts/orbitLeft.js`
-- `public/apps/demo7_multiView/scripts/orbitRight.js`
-- `public/apps/demo3_shadow/scene.json`
-- `public/apps/demo5_deferred/scene.json`
-- `public/apps/demo6_3dgsViewer/scene.json`
-- `public/apps/demo7_multiView/scene.json`
+- `public/plugins/physics/PhysicsSystem.ts` — COLLIDER_BUILDERS、buildColliderDesc、signature
+- `public/plugins/core/components.json` — ColliderComponent schema
 
 **输出文件**:
-- `public/plugins/orbit/index.ts` — 扩展 OrbitComponent schema
-- `public/apps/demo{3,5,6,7}/scene.json` — 替换 ScriptComponent 为 OrbitComponent
-- `public/apps/demo{3,5,6,7}/scripts/orbit*.js` — **删除**
-
-**依赖**: 无
+- `public/plugins/physics/PhysicsSystem.ts` — 新增 convexHull/compound builder
+- `public/plugins/core/components.json` — shape options 扩展
 
 **详细步骤**:
 
-1. **差异分析**: 读取 5 个 orbit.js 文件，提取所有硬编码常量（radius, speed, sensitivity, damping, minDistance, maxDistance, target offset 等），建立对照表。
-
-2. **扩展 Schema**: 在 `public/plugins/orbit/index.ts` 中扩展 `OrbitComponent` 的 schema，确保所有从 orbit.js 提取的常量都有对应字段：
-   ```typescript
-   static schema = {
-     radius:      { type: 'float', default: 5.0 },
-     speed:       { type: 'float', default: 1.0 },
-     spin:        { type: 'float', default: 0.0 },
-     sensitivity: { type: 'float', default: 1.0 },
-     damping:     { type: 'float', default: 0.9 },
-     minDistance: { type: 'float', default: 0.1 },
-     maxDistance: { type: 'float', default: 100.0 },
-     target:      { type: 'vec3',  default: [0, 0, 0] },
-     autoRotate:  { type: 'bool',  default: false },
+1. **扩展 ColliderComponent schema**（`components.json`）:
+   ```json
+   "shape": {
+     "type": "string", "default": "cuboid",
+     "options": ["cuboid", "ball", "capsule", "convexHull", "compound"]
    }
    ```
-   如果 OrbitSystem 目前未读取这些字段，同步修改 `OrbitSystem.ts` 使其从 Component 读取配置而非硬编码。
+   新增两个字段存放凸包/复合碰撞体的顶点数据：
+   ```json
+   "convexVerts": { "type": "vec3a", "default": [] },
+   "compoundShapes": { "type": "string", "default": "" }
+   ```
 
-3. **修改 Scene JSON**: 对每个受影响的 demo，找到其 `MainCamera` entity：
-   - 删除 `ScriptComponent`（或其中引用 orbit.js 的部分）
-   - 添加 `OrbitComponent`，字段值填入主 orbit.js 中提取的常量
-   - demo7 有两个相机（LeftCamera/RightCamera），分别配置不同的 OrbitComponent 参数
+2. **扩展 COLLIDER_BUILDERS**（`PhysicsSystem.ts`）:
+   ```typescript
+   convexHull: (R, _he, _radius, _halfHeight, verts?: Float32Array) => {
+       if (!verts || verts.length < 12) throw new Error('convexHull requires ≥4 points');
+       return R.ColliderDesc.convexHull(verts);
+   },
+   compound: (R, _he, _radius, _halfHeight, _verts, children?: RapierNS.ColliderDesc[]) => {
+       if (!children || children.length === 0) throw new Error('compound requires children');
+       return R.ColliderDesc.compound(children);
+   },
+   ```
+   修改 `ColliderBuilder` 签名加两个可选参数。
 
-4. **声明插件依赖**: 确保 demo3/5/6/7 的 `app.json` 中 `plugins` 数组包含 `"orbit"`。如果 orbit 已作为引擎级插件（在 `engine-config.json` 中），则无需修改。
+3. **程序化 API**（供 splat-physics 插件调用）:
+   在 PhysicsSystem 上暴露一个公开方法，让 splat-physics 可以直接用程序化顶点创建碰撞体，而不走 ColliderComponent / scene.json 路径：
+   ```typescript
+   /** Build a compound collider desc from an array of vertex groups (one convex hull each). */
+   buildConvexCompound(vertexGroups: Float32Array[]): RapierNS.ColliderDesc | null;
+   ```
 
-5. **清理**: 删除 5 个 orbit.js 文件。
+4. **signature() 更新**: 确保 `convexVerts` 字段参与签名计算以保证变更检测。
 
 **验收标准**:
-- [ ] `grep -r "orbit.js" public/apps/` 零命中（排除 plugins/orbit 目录）
-- [ ] `grep -r "OrbitCameraController" public/apps/` 零命中
-- [ ] demo3/5/6/7 在浏览器中加载后，相机轨道行为与整改前一致（视角、速度、阻尼）
-- [ ] demo7 双视口各自独立响应 orbit 控制
-
-**风险与回滚**:
-- 风险: OrbitSystem 可能目前依赖某些全局状态或特定初始化顺序，与脚本版行为不一致。
-- 回滚: 从 git history 恢复 orbit.js 文件，恢复 scene.json 的 ScriptComponent。
+- [ ] `grep "convexHull\|compound" public/plugins/physics/PhysicsSystem.ts` 有新 builder 实现
+- [ ] `npm run check:plugins` 通过
+- [ ] 语法上 ColliderComponent 可以声明 `"shape": "convexHull"` 而不报错
 
 ---
 
-### Task 1.2: Sprite 能力插件化
+### Task 1.2: GaussianSplatManager 暴露点云数据
 
-**优先级**: P0  
-**目标**: 将 `SpriteSheetComponent` 和 `SpriteAnimationComponent` 从 app 级 components.json 迁移至独立 `sprite` 插件。
+**优先级**: P0
+**目标**: 让 splat-physics 插件能通过 `splats` attachment 读取 splat 中心坐标。
 
 **输入文件**:
-- `public/apps/demo2/components.json`
-- `public/apps/demo4_spriteSheet/components.json`
-- `public/apps/demo4_spriteSheet/pipelines/` — Sprites 管线
-- `public/apps/demo4_spriteSheet/shaders/` — Sprites shader
-- `public/apps/demo2/app.json`
-- `public/apps/demo4_spriteSheet/app.json`
+- `public/plugins/splat/GaussianSplatManager.ts` — cpuCenters 为 private 字段
 
 **输出文件**:
-- `public/plugins/sprite/index.ts` — 新建，定义 SpriteSheetComponent + SpriteAnimationComponent
-- `public/plugins/sprite/SpriteSystem.ts` — 新建，处理动画更新（如当前由 AnimationSystem 兼管，则拆分）
-- `public/plugins/sprite/pipelines/SpritesPipeline.json` — 从 demo4 迁移
-- `public/plugins/sprite/shaders/Sprites.wgsl` — 从 demo4 迁移
-- `public/apps/demo2/components.json` — 删除 SpriteSheet/SpriteAnimation 声明
-- `public/apps/demo4_spriteSheet/components.json` — 删除 SpriteSheet/SpriteAnimation 声明
-- `public/apps/demo2/app.json` — 添加 `"sprite"` 到 plugins
-- `public/apps/demo4_spriteSheet/app.json` — 添加 `"sprite"` 到 plugins
-
-**依赖**: 无
+- `public/plugins/splat/GaussianSplatManager.ts` — 新增 public getter
 
 **详细步骤**:
 
-1. **新建插件目录**: `public/plugins/sprite/`
-
-2. **组件定义**: 在 `public/plugins/sprite/index.ts` 中定义：
+1. 在 `GaussianSplatManager` 类中添加公开方法：
    ```typescript
-   export class SpriteSheetComponent extends Component {
-     static schema = {
-       texture: { type: 'texture', default: null },
-       rows: { type: 'int', default: 1 },
-       cols: { type: 'int', default: 1 },
-       totalFrames: { type: 'int', default: 1 },
-     }
-   }
-   export class SpriteAnimationComponent extends Component {
-     static schema = {
-       currentFrame: { type: 'int', default: 0 },
-       frameRate: { type: 'float', default: 10 },
-       playing: { type: 'bool', default: true },
-       loop: { type: 'bool', default: true },
-     }
+   /** Expose splat center positions for external consumers (e.g. collision generation). */
+   getCenters(): Float32Array | null {
+       return this.cpuCenters;
    }
    ```
 
-3. **系统实现**: 如果 `AnimationSystem`（core 插件）目前负责 Sprite 动画，则在 `SpriteSystem.ts` 中接管：
-   - 查询所有带 `SpriteAnimationComponent` 的 entity
-   - 根据 `dt` 和 `frameRate` 更新 `currentFrame`
-   - 如果动画结束且 `loop=false`，设置 `playing=false`
-
-4. **资源迁移**: 将 demo4 的 Sprites 管线 JSON 和 WGSL shader 复制到 `public/plugins/sprite/pipelines/` 和 `shaders/`，并修改内部路径引用为 `<sprite>:pipelines/...` 和 `<sprite>:shaders/...`。
-
-5. **修改 App 配置**: 
-   - 从 demo2 和 demo4 的 `components.json` 中移除 SpriteSheetComponent 和 SpriteAnimationComponent 的声明。
-   - 在 `app.json` 的 `plugins` 数组中添加 `"sprite"`。
-
-6. **修改 Scene**: 如果 demo2/demo4 的 `scene.json` 中 entity 引用了这些组件，确保组件名不变（因为插件注册后 schemaRegistry 会全局注册组件名）。
+2. 无需其他改动。`cpuCenters` 在 `load()` 中被赋值，`dispose()` 中被置 null，生命周期正确。
 
 **验收标准**:
-- [ ] `grep -r "SpriteSheetComponent" public/apps/` 定义位置不在任何 `components.json` 中（应在 plugins/sprite/）
-- [ ] demo2 和 demo4 在浏览器中加载后，Sprite 动画行为与整改前一致
-- [ ] demo4 的精灵图正确显示并播放动画
-
-**风险与回滚**:
-- 风险: Sprite 管线可能依赖 demo4 特有的 render target 配置或 blending 状态。
-- 回滚: 恢复 components.json 中的声明，恢复 app.json 的 plugins 列表。
+- [ ] `splat-physics` 插件中 `ctx.getAttachment('splats')` 拿到对象后可以调用 `.getCenters()`
+- [ ] 在 splat 加载前调用返回 null（不崩溃）
+- [ ] `npm run check:plugins` 通过
 
 ---
 
-### Task 1.3: GameStateComponent 降级为局部组件
+## 阶段 2: splat-physics 插件（P0）
 
-**优先级**: P0  
-**目标**: 明确 `GameStateComponent` 是 demo2 的私有业务逻辑，不插件化，但需确保其不污染全局组件注册。
+**目标**: 新建独立插件，实现 splat 点云 → 凸包碰撞体的完整管线。
+
+**完成标准**:
+- [ ] `public/plugins/splat-physics/` 目录存在，含 index.ts + SplatCollider.ts
+- [ ] 插件依赖 `splat` + `physics`，在 demo6 中声明加载
+- [ ] 自行车加载后自动生成 ~30-50 个 convex hull 组成的 compound 碰撞体
+- [ ] 碰撞体随 GsEntity 的 Transform 正确放置
+
+---
+
+### Task 2.1: 实现 SplatCollider 核心算法
+
+**优先级**: P0
+**目标**: 体素聚类 + 凸包生成 + compound 组装。
 
 **输入文件**:
-- `public/apps/demo2/components.json`
-- `public/apps/demo2/scene.json`
-- `public/apps/demo2/scripts/game.js`
+- `public/plugins/physics/PhysicsSystem.ts` — buildConvexCompound API（来自 Task 1.1）
+- `public/plugins/splat/GaussianSplatManager.ts` — getCenters()（来自 Task 1.2）
 
 **输出文件**:
-- `public/apps/demo2/components.json` — 保留 GameStateComponent，但添加注释标记
-- `public/apps/demo2/scripts/game.js` — 可选：将状态管理移入脚本本地状态
-
-**依赖**: 无
+- `public/plugins/splat-physics/SplatCollider.ts` — **新建**
 
 **详细步骤**:
 
-1. **保留局部声明**: `GameStateComponent` 保留在 demo2 的 `components.json` 中。这是正确的——它是业务级组件。
+1. **降采样**（stride=200，~5M → ~25K）:
+   ```typescript
+   function downsample(centers: Float32Array, stride: number): Float32Array {
+       const n = Math.ceil(centers.length / (4 * stride));
+       const out = new Float32Array(n * 3);
+       for (let i = 0, j = 0; i < centers.length; i += stride * 4, j += 3) {
+           out[j] = centers[i];
+           out[j + 1] = centers[i + 1];
+           out[j + 2] = centers[i + 2];
+       }
+       return out;
+   }
+   ```
 
-2. **添加显式标记**: 在 `components.json` 顶部添加注释（或 metadata）：
+2. **体素聚类**（gridRes=5 → 最多 125 个格）:
+   ```typescript
+   function voxelCluster(points: Float32Array, gridRes: number): Float32Array[] {
+       // 1. 计算 AABB
+       // 2. 分配点到 grid[ix + iy*res + iz*res*res]
+       // 3. 合并点数 < 4 的格到最近的非空格
+       // 4. 返回每个格的顶点数组
+   }
+   ```
+
+3. **凸包生成**:
+   ```typescript
+   function buildHulls(RAPIER, clusters: Float32Array[], maxHulls: number): RapierNS.ColliderDesc[] {
+       const hulls: RapierNS.ColliderDesc[] = [];
+       for (const cluster of clusters) {
+           if (cluster.length < 12) continue; // 少于4个点无法构成凸包
+           hulls.push(RAPIER.ColliderDesc.convexHull(cluster));
+       }
+       // 按体积排序，保留最大的 maxHulls 个
+       // 合并最小的 hulls（可选）
+       return hulls.slice(0, maxHulls);
+   }
+   ```
+
+4. **体积估算**（用于排序）:
+   对于 convex hull desc，用 AABB 体积近似排序；Rapier 的 ColliderDesc 在创建前没有体积 API，所以用聚类点的 AABB。
+
+5. **导出主函数**:
+   ```typescript
+   export function generateSplatCollider(
+       RAPIER: typeof import('@dimforge/rapier3d-compat'),
+       centers: Float32Array,
+       options?: { stride?: number; gridRes?: number; maxHulls?: number }
+   ): { colliderDesc: RapierNS.ColliderDesc; hullCount: number };
+   ```
+
+**验收标准**:
+- [ ] `generateSplatCollider` 对有效输入返回 non-null 的 compound ColliderDesc
+- [ ] hullCount 在 10-50 范围内（对于自行车 PLY）
+- [ ] 算法在 JS 主线程执行时间 < 5 秒（对于 25K 点、125 格）
+- [ ] `npm run check:plugins` 通过
+
+---
+
+### Task 2.2: 实现 splat-physics 插件入口
+
+**优先级**: P0
+**目标**: 在 appLoaded 时机读取 splat 数据、生成碰撞体、创建物理体并绑定 GsEntity。
+
+**输入文件**:
+- `public/plugins/splat-physics/SplatCollider.ts` — 来自 Task 2.1
+- `public/plugins/physics/PhysicsSystem.ts` — buildConvexCompound API
+- `public/plugins/splat/GaussianSplatManager.ts` — getCenters()
+
+**输出文件**:
+- `public/plugins/splat-physics/index.ts` — **新建**
+- `public/plugins/splat-physics/tsconfig.json` — **新建**
+
+**详细步骤**:
+
+1. **插件声明**:
+   ```typescript
+   export default class SplatPhysicsPlugin extends EnginePlugin {
+       readonly meta = { id: 'splat-physics', dependencies: ['splat', 'physics'] };
+       
+       components = [];      // 不声明新组件
+       systemDefs = [];      // 不注册新系统
+       renderHooks = {};     // 不注册渲染 hook
+   }
+   ```
+
+2. **appLoaded 生命周期**:
+   ```typescript
+   async appLoaded(ctx: PluginContext, appBase: string): Promise<void> {
+       // 1. 从 attachments 获取 splat 管理器
+       const splatMgr = ctx.getAttachment('splats');
+       const centers = splatMgr?.getCenters();
+       if (!centers) return;
+       
+       // 2. 从 attachments 获取物理系统
+       const physics = ctx.getAttachment('physics');
+       if (!physics) throw new Error('splat-physics requires physics plugin');
+       
+       // 3. 找到 GsComponent 所在的 entity
+       let gsEid: number | null = null;
+       for (const [, eid] of ctx.scene.entityKeyMap) {
+           if (ctx.scene.hasComponent(eid, 'GsComponent')) { gsEid = eid; break; }
+       }
+       if (gsEid === null) return;
+       
+       // 4. 生成 compound convex hull 碰撞体
+       const { colliderDesc } = generateSplatCollider(RAPIER, centers);
+       
+       // 5. 创建 dynamic 刚体 + 挂载 compound 碰撞体
+       const pos = ctx.scene.getField(gsEid, 'Transform', 'position') as number[];
+       const rot = ctx.scene.getField(gsEid, 'Transform', 'rotation') as number[];
+       const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+           .setTranslation(pos[0], pos[1], pos[2])
+           .setRotation({ x: rot[0], y: rot[1], z: rot[2], w: rot[3] })
+           .setLinearDamping(0.1)
+           .setAngularDamping(0.1)
+           .setCcdEnabled(true);
+       
+       // 6. 通过 PhysicsSystem 的内部 world 创建（需要暴露 API）
+       //    或者: 直接在 GsEntity 上添加 ColliderComponent + RigidBodyComponent，
+       //    让 PhysicsSystem.reconcile 自动创建。
+       
+       // 推荐方案: 在 GsEntity 上添加 RigidBodyComponent（dynamic），
+       // 然后通过 PhysicsSystem.buildConvexCompound() 直接操作 Rapier world
+   }
+   ```
+
+3. **关键设计决策: 物理体如何绑定 GsEntity**
+
+   **方案 A（推荐）**: 在 `appLoaded` 中直接给 GsEntity 添加组件：
+   ```typescript
+   // 给 GsEntity 挂 dynamic 刚体标记
+   ctx.scene.addComponent(gsEid, 'RigidBodyComponent');
+   ctx.scene.setField(gsEid, 'RigidBodyComponent', 'bodyType', 'dynamic');
+   ctx.scene.setField(gsEid, 'RigidBodyComponent', 'ccd', 1);
+   ctx.scene.setField(gsEid, 'RigidBodyComponent', 'linearDamping', 0.05);
+   ctx.scene.setField(gsEid, 'RigidBodyComponent', 'angularDamping', 0.1);
+   
+   // 通过 PhysicsSystem 的公开 API 直接创建 compound 碰撞体
+   // （不通过 ColliderComponent，因为顶点数据太大，不适合 JSON）
+   physics.createCompoundCollider(gsEid, convexHullDescs);
+   ```
+   
+   **方案 B**: 通过 ColliderComponent 声明 `shape: "compound"`，顶点数据存 attachments。
+   
+   **选方案 A**，因为：
+   - 凸包顶点可能很大（数万个 float），不适合 JSON
+   - PhysicsSystem 已有 `createRecord` 内部方法，只需暴露一个程序化入口
+   - 复用现有的 reconcile / writeBodiesToTransforms 管道
+
+4. **PhysicsSystem 需要新增的公开 API**:
+   ```typescript
+   /** Programmatic compound collider creation (for splat-physics etc). */
+   createCompoundBody(eid: number, colliders: RapierNS.ColliderDesc[]): void {
+       if (!this.world) return;
+       // 读取 Transform 创建 body
+       // 创建 compound collider
+       // 注册到 records
+   }
+   ```
+
+5. **tsconfig.json**:
    ```json
    {
-     "_comment": "LOCAL COMPONENTS: 以下组件仅本 demo 使用，不具备复用性",
-     "components": [
-       { "name": "GameStateComponent", ... }
+       "extends": "../../tsconfig.base.json",
+       "compilerOptions": { "paths": { "@shaderlab/api": ["../../src/api.ts"] } }
+   }
+   ```
+
+**验收标准**:
+- [ ] demo6 加载后，GsEntity 上自动生成了动态刚体 + compound 碰撞体
+- [ ] 自行车受重力影响会落到地面上
+- [ ] 可以通过 physics debug 渲染看到凸包线框
+- [ ] `npm run check:plugins` 通过对 splat-physics 目录的检查
+
+---
+
+## 阶段 3: Demo6 场景改造（P1）
+
+**目标**: 把 demo6 从静态查看器改为物理沙盒。
+
+**完成标准**:
+- [ ] demo6 加载后自行车站在地面上，受重力约束
+- [ ] 有地面碰撞体，自行车不会掉落
+- [ ] 鼠标左键点击射出球体，可砸倒自行车
+- [ ] 碰撞触发火花粒子效果
+- [ ] 物理调试线框可选开关
+
+---
+
+### Task 3.1: 修改 demo6 场景与配置
+
+**优先级**: P1
+**目标**: 加入地面、物理世界、粒子系统、游戏脚本。
+
+**输入文件**:
+- `public/apps/demo6_3dgsViewer/app.json`
+- `public/apps/demo6_3dgsViewer/scene.json`
+- `public/apps/demo6_3dgsViewer/render.json`
+- `public/apps/demo6_3dgsViewer/systems.json`
+
+**输出文件**:
+- `public/apps/demo6_3dgsViewer/app.json` — 添加 splat-physics 插件
+- `public/apps/demo6_3dgsViewer/scene.json` — 加入 PhysicsWorld/Ground/粒子/GameState
+- `public/apps/demo6_3dgsViewer/render.json` — 加入 PhysicsDebug + ParticlePipeline
+- `public/apps/demo6_3dgsViewer/systems.json` — 加入 gaussianSplat（如需要）
+
+**详细步骤**:
+
+1. **app.json** 修改:
+   ```json
+   {
+     "name": "demo6_3dgsViewer",
+     "plugins": ["splat", "splat-physics"],
+     "scene": "scene.json",
+     "render": "render.json",
+     "systems": "systems.json"
+   }
+   ```
+   `physics` 已在 engine-config.json 中常驻，`particles` 同理。
+
+2. **scene.json** 新增实体:
+
+   - **PhysicsWorld**: PhysicsControllerComponent，gravity [0, -9.81, 0]，groundEnabled=true
+   - **Ground**: 可选，用 PhysicsController 的 ground 代替
+   - **Sparks**: ParticleSystemComponent（maxParticles 40000, gravity [0, -6, 0]）
+   - **SparkEmitter**: sphere emitter, radius 0.15, rate 24000, 默认 disabled
+   - **GameState**: GameStateComponent（ballSpeed 18, ballRadius 0.35, spawnHeight 6）
+   - **MainCamera ScriptComponent**: 改为引用 `scripts/orbit.js`（保持现有相机控制）
+
+3. **render.json** 新增管线:
+   ```json
+   {
+     "Opaque": [
+       { "name": "Grid", "pipeline": "core:pipelines/GridPipeline.json", "enabled": true },
+       { "name": "PbrSolid", "pipeline": "core:pipelines/PbrPipeline.json", "enabled": true },
+       { "name": "PhysicsDebug", "pipeline": "physics:pipelines/PhysicsDebugPipeline.json", "enabled": false }
+     ],
+     "Transparent": [
+       { "name": "Splat", "pipeline": "pipelines/GaussianSplatPipeline.json", "enabled": true },
+       { "name": "Particles", "pipeline": "particles:pipelines/ParticlePipeline.json", "enabled": true }
      ]
    }
    ```
 
-3. **可选优化**: 如果 `game.js` 中大量读写 `GameStateComponent`，考虑将部分状态（如 `ballSpeed`, `ballRadius`）改为 ScriptComponent 的局部变量，减少 ECS 查询开销。但**不做强制要求**。
+4. **systems.json** 不需要修改 —— `gaussianSplat` 已在清单中，`physics` 在 engine-config.json 默认顺序中。
 
 **验收标准**:
-- [ ] demo2 正常运行，游戏逻辑（球生成、碰撞火花）无回归
-- [ ] `GameStateComponent` 不出现在任何插件目录中
-
-**风险与回滚**:
-- 风险: 无。此任务主要是文档和标记工作。
+- [ ] `npm run build` 通过
+- [ ] `node scripts/validate-config.mjs` 通过
+- [ ] 浏览器加载 demo6 不报错
 
 ---
 
-## 阶段 2: 资源生命周期加固（P1）
+### Task 3.2: 编写游戏脚本 scripts/game.js
 
-**目标**: 消除单例隐患和实例限制，让引擎经得起快速切换 demo 的压力测试。
-
-**完成标准**:
-- [ ] 连续切换 8 个 demo 各 10 轮（共 80 次）不崩溃、不泄漏
-- [ ] GaussianSplatManager 支持多实例
-- [ ] PipelineLoader 缓存支持多 app 隔离
-
----
-
-### Task 2.1: GaussianSplatManager 多实例支持
-
-**优先级**: P1  
-**目标**: 移除 "单 GsComponent 限制"，支持同一 Scene 中多个 3DGS 实体。
+**优先级**: P1
+**目标**: 鼠标点击射球 + 碰撞触发火花。
 
 **输入文件**:
-- `public/plugins/splat/index.ts` — GsComponent 定义
-- `public/plugins/splat/GaussianSplatManager.ts` — 当前单实例实现
-- `public/plugins/splat/GaussianSplatSystem.ts` — 如存在
-- `public/apps/demo6_3dgsViewer/scene.json`
+- `public/apps/demo2/scripts/game.js` — 参考实现
 
 **输出文件**:
-- `public/plugins/splat/GaussianSplatManager.ts` — 重构为多实例
-- `public/plugins/splat/index.ts` — 如有需要，调整组件声明
-
-**依赖**: 无
+- `public/apps/demo6_3dgsViewer/scripts/game.js` — **新建**
 
 **详细步骤**:
 
-1. **读取当前实现**: 理解 GaussianSplatManager 如何存储 splat 数据（是否只有一个 `this.splat` 字段？）。
+1. 参考 demo2 的 game.js，功能完全一致：
+   - 左键点击：从相机位置向屏幕点击方向射出 dynamic 球体（icosphere）
+   - 碰撞监听：球碰到任何物体 → 在碰撞点触发 SparkEmitter 粒子爆发
+   - 清理：y < -10 的球体自动删除
 
-2. **重构核心数据结构**: 将单实例字段改为 Map：
-   ```typescript
-   class GaussianSplatManager {
-     private splatData: Map<number, GaussianSplatRenderData> = new Map();
-     private sortPipeline: GPUComputePipeline; // 全局共享排序管线
+2. 关键差异：
+   - 球的 target 可以是自行车（GsEntity key），但碰撞系统已经按 layer/mask 过滤
+   - GameStateComponent 字段沿用 demo2 的定义
 
-     onComponentAdded(entity: number, comp: GsComponent) {
-       const data = this.createRenderData(comp);
-       this.splatData.set(entity, data);
-     }
-
-     onComponentRemoved(entity: number) {
-       const data = this.splatData.get(entity);
-       if (data) {
-         this.releaseRenderData(data);
-         this.splatData.delete(entity);
-       }
-     }
-
-     update(ctx: FrameContext) {
-       // 收集所有可见的 splat
-       const visibleSplats: GaussianSplatRenderData[] = [];
-       for (const [entity, data] of this.splatData) {
-         if (this.isVisible(entity, ctx.camera)) {
-           visibleSplats.push(data);
-         }
-       }
-
-       // 如果需要全局排序（3DGS 性能关键），合并所有可见 splat 的索引到一个大 buffer
-       if (visibleSplats.length > 0) {
-         this.sortAndRender(visibleSplats, ctx);
-       }
-     }
-   }
-   ```
-
-3. **生命周期绑定**: 确保 `GaussianSplatSystem`（或对应 System）在 `update` 中调用 Manager，并在 entity 被删除时触发 `onComponentRemoved`。
-   - 如果当前通过 `scene.onEntityRemoved` 事件无法可靠通知，考虑在 System 的 `update` 中做差分检测（对比上一帧和当前帧的 GsComponent 集合）。
-
-4. **资源释放**: 每个 `GaussianSplatRenderData` 必须持有自己的 GPU Buffer/Texture 引用。在 `releaseRenderData` 中调用 `resourceManager.release(...)`。
-
-5. **测试数据**: 修改 demo6 的 `scene.json`，复制一份 `GsEntity`（重命名为 `GsEntity2`），加载不同的 PLY 文件（或同一文件），验证两者都能渲染。
+3. 脚本内容结构与 demo2/scripts/game.js 保持一致，使用 EventBus + scene API。
 
 **验收标准**:
-- [ ] demo6 的 scene.json 中包含两个 `GsEntity`（不同 key），浏览器中两者均正确渲染
-- [ ] Console 无 "multiple GsComponent, using last" 类警告
-- [ ] 删除其中一个 GsEntity 后，另一个仍然正常渲染，GPU 资源无泄漏
-
-**风险与回滚**:
-- 风险: 3DGS 的全局排序是性能核心。多实例合并排序可能引入复杂度或性能回归。
-- 回滚: 恢复单实例实现，保留多实例分支在 git 中。
+- [ ] 点击鼠标后球体从相机位置射出
+- [ ] 球碰到自行车触发火花
+- [ ] 球掉落出界被清理
+- [ ] 浏览器 console 无脚本错误
 
 ---
 
-### Task 2.2: App 切换压力测试脚本
+## 阶段 4: 验证与收尾（P2）
 
-**优先级**: P1  
-**目标**: 验证 15 个模块级单例在快速切换下的清理可靠性。
-
-**输入文件**:
-- `src/Engine.ts` — loadApp / unloadCurrentApp 实现
-- `src/render/ResourceManager.ts` — exitApp 实现
-- `src/render/BufferRegistry.ts` — exitApp 实现
-
-**输出文件**:
-- `tests/stress-app-switch.ts` — 压力测试脚本
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **编写测试脚本**: 在 `tests/stress-app-switch.ts`（或浏览器可执行的 JS）中：
-   ```typescript
-   export async function runStressTest(engine: Engine) {
-     const demos = ['demo1', 'demo2', 'demo3_shadow', 'demo4_spriteSheet', 
-                    'demo5_deferred', 'demo6_3dgsViewer', 'demo7_multiView', 'demo8_customSystem'];
-     const results = { passes: 0, fails: 0, leaks: [] as string[] };
-
-     for (let round = 0; round < 10; round++) {
-       for (const demo of demos) {
-         try {
-           await engine.loadApp(demo);
-           await new Promise(r => requestAnimationFrame(r)); // 至少跑一帧
-
-           // 检查点：资源泄漏
-           const preUnload = engine.getResourceStats?.(); // 如果 ResourceManager 有统计接口
-
-           await engine.unloadCurrentApp();
-
-           const postUnload = engine.getResourceStats?.();
-           if (preUnload && postUnload && postUnload.textureCount > 0) {
-             results.leaks.push(`${demo} round ${round}: ${postUnload.textureCount} textures remaining`);
-           }
-
-           results.passes++;
-         } catch (e) {
-           results.fails++;
-           console.error(`Failed at ${demo} round ${round}:`, e);
-         }
-       }
-     }
-
-     return results;
-   }
-   ```
-
-2. **暴露统计接口（如需）**: 如果 `ResourceManager` 没有 `getStats()` 方法，临时添加一个（标记为 `@internal`）：
-   ```typescript
-   getStats() {
-     return {
-       meshCount: this.meshes.size,
-       textureCount: this.textures.size,
-       targetCount: this.targets.size,
-       bufferCount: this.buffers.size,
-     }
-   }
-   ```
-
-3. **手动验证步骤**: 
-   - 打开 Chrome DevTools Performance 面板
-   - 运行压力测试
-   - 观察 GPU Memory 曲线：应呈现阶梯式上升后平台化，而非持续线性上升
-   - 检查 Console 是否有 `Device Lost`、`Buffer destroyed but still in use` 等错误
-
-**验收标准**:
-- [ ] 80 次切换中失败次数为 0
-- [ ] GPU Memory 曲线在初始 5-10 轮后进入平台期（允许 common 级资源常驻）
-- [ ] Console 无红色错误
-
-**风险与回滚**:
-- 风险: 压力测试可能暴露深层时序 bug（如异步 texture 上传与 unload 竞态）。
-- 回滚: 删除测试脚本，移除临时统计接口。
+**目标**: 完整验证改造结果，确保无回归。
 
 ---
 
-### Task 2.3: PipelineLoader 缓存命名空间隔离
+### Task 4.1: 端到端验收
 
-**优先级**: P1  
-**目标**: 防止不同 app/插件的同名管线/着色器互相覆盖。
+**优先级**: P2
+**目标**: 跑全量构建 + 校验 + 手动测试。
 
-**输入文件**:
-- `src/render/PipelineLoader.ts` — 静态缓存实现
+**步骤**:
 
-**输出文件**:
-- `src/render/PipelineLoader.ts` — 增加 owner 前缀隔离
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **读取缓存实现**: 确认 `virtualConfigs`、`virtualShaders`、`configs`、`shaderModules` 等 static Map/Record 的 key 结构。
-
-2. **修改缓存 key**: 所有缓存读写点增加 `owner` 前缀：
-   ```typescript
-   // 之前
-   static virtualConfigs: Map<string, any> = new Map();
-
-   // 之后
-   static virtualConfigs: Map<string, any> = new Map();
-
-   static getVirtualConfig(ref: string, owner: string): any {
-     const key = `${owner}::${ref}`;
-     return this.virtualConfigs.get(key);
-   }
-
-   static setVirtualConfig(ref: string, owner: string, config: any) {
-     const key = `${owner}::${ref}`;
-     this.virtualConfigs.set(key, config);
-   }
-   ```
-   对 `virtualShaders`、`configs`、`computeMeta`、`pipelineSlots`、`shaderModules` 执行同样改造。
-
-3. **修改调用点**: 在 `PipelineLoader.loadVirtualConfig` / `loadVirtualShader` / `loadConfig` 等入口中，确保 `owner` 参数被正确传递。`owner` 格式为 `app:<appId>` 或 `plugin:<pluginId>`。
-   - 检查 `PluginManager` 在加载插件时如何调用 PipelineLoader，确保 pluginId 传入。
-   - 检查 `Engine.loadApp` 在加载 app 级管线时如何调用，确保 appId 传入。
-
-4. **清理接口适配**: `removeVirtualsByPrefix(prefix)` 目前按前缀清理。修改为按 owner 精确清理：
-   ```typescript
-   static removeVirtualsByOwner(owner: string) {
-     const prefix = `${owner}::`;
-     [this.virtualConfigs, this.virtualShaders].forEach(map => {
-       for (const key of map.keys()) {
-         if (key.startsWith(prefix)) map.delete(key);
-       }
-     });
-   }
-   ```
-
-5. **向后兼容**: 如果某些调用点暂时无法传入 owner，使用默认 owner `"global"`。
-
-**验收标准**:
-- [ ] 创建两个测试 app，各自声明同名但 WGSL 内容不同的管线 `TestPipeline`，同时加载时两者使用各自的 shader，不互相覆盖
-- [ ] 所有现有 demo 加载后渲染结果无回归
-
-**风险与回滚**:
-- 风险: 调用点分散，可能遗漏某些缓存读写路径。
-- 回滚: 恢复原始 key 逻辑，保留 owner 参数但不使用。
-
----
-
-## 阶段 3: System 调度显式化（P2）
-
-**目标**: 从"全局硬编码 JSON 顺序"进化为"声明式 Phase + Priority"。
-
-**完成标准**:
-- [ ] demo6/8 不再需要覆盖整个 `systems.json` 来插入自定义 System
-- [ ] 新插件可以通过声明 phase 自动插入正确位置
-
----
-
-### Task 3.1: 引入 SystemPhase + Priority 机制
-
-**优先级**: P2  
-**目标**: 让 System 注册时声明执行阶段，SystemRegistry 支持自动排序。
-
-**输入文件**:
-- `src/ecs/SystemRegistry.ts` — System 注册和调度核心
-- `src/ecs/SystemRegistry.ts` — FrameContext 定义（如在同文件）
-- `src/plugins/Plugin.ts` — PluginContext 接口
-- `public/common/systems.json` — 默认系统顺序
-- `public/apps/demo6_3dgsViewer/systems.json` — override 示例
-- `public/apps/demo8_customSystem/systems.json` — override 示例
-
-**输出文件**:
-- `src/ecs/SystemRegistry.ts` — 增加 phase/priority 支持
-- `src/plugins/Plugin.ts` — 扩展 PluginContext.registerSystem 签名
-- `src/render/types.ts` — 如需要，扩展相关接口
-- `public/common/systems.json` — 增加 `"sortMode": "manual"` 标记（向后兼容）
-
-**依赖**: 阶段 1 完成（确保所有 System 都通过插件注册，无脚本直接 `new System`）
-
-**详细步骤**:
-
-1. **定义 Phase 枚举**: 在 `src/ecs/SystemRegistry.ts`（或新建 `src/ecs/SystemPhase.ts`）中：
-   ```typescript
-   export enum SystemPhase {
-     Input = 100,
-     Script = 200,
-     Physics = 300,
-     Animation = 400,
-     PreRender = 500,
-     Render = 600,
-     PostRender = 700,
-   }
-   ```
-
-2. **扩展 System 注册接口**:
-   ```typescript
-   export interface SystemDef {
-     name: string;
-     phase: SystemPhase;
-     priority: number; // 同 phase 内排序，升序
-     factory: (ctx: PluginContext) => System;
-   }
-
-   // PluginContext 扩展
-   registerSystem(
-     name: string, 
-     factory: (ctx: PluginContext) => System, 
-     options?: { phase?: SystemPhase; priority?: number; }
-   ): void;
-   ```
-
-3. **修改 SystemRegistry**:
-   - 内部存储从 `Map<string, System>` 改为 `Map<string, { system: System; phase: SystemPhase; priority: number }>`
-   - 增加 `sortSystems()` 方法：
-     ```typescript
-     private sortSystems(): void {
-       this.sortedSystems = Array.from(this.systems.values())
-         .sort((a, b) => {
-           if (a.phase !== b.phase) return a.phase - b.phase;
-           return a.priority - b.priority;
-         })
-         .map(entry => entry.system);
-     }
-     ```
-   - `update(ctx)` 改为遍历 `this.sortedSystems`
-
-4. **兼容 systems.json**:
-   - 读取 `systems.json` 时，检查 `"sortMode"` 字段：
-     - `"manual"`（默认）: 按 JSON 数组顺序执行，忽略 phase/priority（完全向后兼容）
-     - `"auto"`: 按 phase + priority 自动排序
-   - 如果 `systems.json` 中显式列出系统名（如 `["input", "script", ...]`），但 `sortMode: "auto"`，则这些名称仅作为"白名单"（只运行列出的系统，但顺序由 phase 决定）。
-
-5. **迁移 demo6/8**:
-   - demo6: 删除 `systems.json` override，在 `splat` 插件注册 `gaussianSplat` system 时声明 `phase: SystemPhase.PreRender, priority: 0`
-   - demo8: 删除 `systems.json` override，在 `orbit` 插件注册 `orbit` system 时声明 `phase: SystemPhase.Animation, priority: 10`（在 animation 之后）
-   - 两个 demo 的 `app.json` 中移除 `systems.json` 引用或标记 `"sortMode": "auto"`
-
-**验收标准**:
-- [ ] demo6 不依赖自定义 `systems.json`，`gaussianSplat` system 自动插入到 `animation` 之后、`render` 之前
-- [ ] demo8 不依赖自定义 `systems.json`，`orbit` system 自动插入到正确位置
-- [ ] `public/common/systems.json` 标记 `"sortMode": "manual"`，所有未迁移 demo 行为不变
-- [ ] 新增一个测试插件，注册 `phase: SystemPhase.PreRender` 的 System，在不修改任何 systems.json 的情况下正确执行
-
-**风险与回滚**:
-- 风险: 某些 System 可能有隐式的前后依赖（如 `light` 必须在 `camera` 之后），仅靠 phase 不够精细。
-- 回滚: 恢复 `systems.json` override，将 sortMode 改回 manual。
-
----
-
-### Task 3.2: RenderGraph Phase Behavior 插件注册
-
-**优先级**: P2  
-**目标**: 让插件可以注册自定义 Render Phase Behavior，解耦 Deferred 等复杂管线的硬编码。
-
-**输入文件**:
-- `src/render/RenderGraph.ts` — Phase 调度实现
-- `src/render/types.ts` — PhaseBehavior 接口
-- `public/apps/demo5_deferred/render.json` — Deferred 的 tight coupling 示例
-
-**输出文件**:
-- `src/render/RenderGraph.ts` — 支持动态注册 PhaseBehavior
-- `src/render/types.ts` — 扩展 IRenderer 或 PluginContext 接口
-- `public/apps/demo5_deferred/render.json` — 简化，利用新 behavior
-
-**依赖**: Task 3.1
-
-**详细步骤**:
-
-1. **读取当前 PhaseBehavior 实现**: 理解 `normal`、`shadow-clear`、`postprocess-chain` 三个默认 behavior 的实现方式。
-
-2. **扩展注册接口**: 在 `PluginContext` 中增加：
-   ```typescript
-   registerPhaseBehavior(name: string, behavior: PhaseBehavior): void;
-   ```
-   在 `RenderGraph` 中维护 `Map<string, PhaseBehavior>`。
-
-3. **Deferred Phase Behavior 插件化**:
-   - 新建或修改一个插件（如 `deferred` 插件，或放在 core 中但按需注册），提供 `gbuffer` behavior：
-     ```typescript
-     const gbufferBehavior: PhaseBehavior = {
-       perCamera: true,
-       run: (ctx) => {
-         // 1. 执行所有 target="gbufferA/B/C/D" 的 pass
-         // 2. 执行 DeferredLight pass（读取 GBuffer）
-       }
-     };
-     ```
-   - demo5 的 `render.json` 中，将 GBuffer → DeferredLight 的 tight coupling 改为引用 `"behavior": "gbuffer"`。
-
-4. **简化 render.json**: demo5 的 render.json 应该不再需要手动排列 GBuffer 和 DeferredLight 的 pass 顺序，而是由 behavior 内部处理依赖。
-
-**验收标准**:
-- [ ] demo5 的 deferred 渲染结果与整改前一致
-- [ ] `render.json` 中 GBuffer 和 DeferredLight 的 pass 顺序不再硬编码（或至少不依赖 app 级配置）
-- [ ] 新增一个自定义 behavior 插件，能在不修改 RenderGraph 核心代码的情况下注册并执行
-
-**风险与回滚**:
-- 风险: PhaseBehavior 的抽象可能过度设计，Deferred 的 tight coupling 可能难以完全解耦而不损失性能。
-- 回滚: 恢复硬编码的 render.json 配置。
-
----
-
-## 阶段 4: 组合冲突自动化（P3）
-
-**目标**: 为将来"多 demo 合并运行"扫清配置层面的障碍。
-
-**完成标准**:
-- [ ] 两个 scene.json 可以加载到同一 Scene 而不发生 entity key 冲突
-- [ ] PhysicsWorld 多控制器冲突可被检测或自动合并
-
----
-
-### Task 4.1: Entity Key 命名空间/前缀支持
-
-**优先级**: P3  
-**目标**: 消除 Scene 中 entity key 的唯一性冲突。
-
-**输入文件**:
-- `src/ecs/Scene.ts` — createEntity / getEntity 实现
-
-**输出文件**:
-- `src/ecs/Scene.ts` — 增加 key prefix / namespace 支持
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **读取当前实现**: 确认 `Scene.createEntity(key, components)` 和 `Scene.getEntity(key)` 的实现。
-
-2. **增加 Prefix 支持**:
-   ```typescript
-   class Scene {
-     private keyPrefix: string = '';
-
-     setKeyPrefix(prefix: string) {
-       this.keyPrefix = prefix;
-     }
-
-     createEntity(key: string, components: Record<string, any>): number {
-       const namespacedKey = this.keyPrefix ? `${this.keyPrefix}/${key}` : key;
-       // 使用 namespacedKey 作为唯一标识
-       // ...
-     }
-
-     getEntity(key: string): number | undefined {
-       const namespacedKey = this.keyPrefix ? `${this.keyPrefix}/${key}` : key;
-       return this.entityMap.get(namespacedKey);
-     }
-
-     // 兼容：也支持直接查询短名（如果全局唯一）
-     getEntityByShortName(key: string): number | undefined {
-       return this.entityMap.get(key);
-     }
-   }
-   ```
-
-3. **Engine 集成**: 在 `Engine.loadApp(appId)` 中，加载 scene 前调用 `scene.setKeyPrefix(appId)`。
-   - 注意：这会影响现有 demo 中脚本通过 key 查找 entity 的逻辑（如 `scene.getEntity('SunLight')`）。
-   - 如果脚本中使用了硬编码 key，需要修改为支持前缀查找，或在 `setKeyPrefix` 时同时注册无前缀别名（双重注册）。
-
-4. **双重注册策略（推荐）**: 
-   - `createEntity` 时，同时注册 `appId/key` 和 `key`（如果 `key` 尚未被占用）。
-   - `getEntity('SunLight')` 先尝试查找 `SunLight`，如果找不到且当前有 prefix，再查找 `appId/SunLight`。
-   - 这样单个 app 运行时不破坏现有行为，合并运行时才启用命名空间隔离。
-
-**验收标准**:
-- [ ] 单个 demo 运行时，`scene.getEntity('MainCamera')` 仍然正常工作（向后兼容）
-- [ ] 两个 demo 合并加载时（通过某种测试方式），同名 entity（如两个 `SunLight`）共存且不覆盖
-- [ ] `scene.toJSON()` 序列化时保留命名空间信息（或能正确还原）
-
-**风险与回滚**:
-- 风险: 脚本系统中大量硬编码 entity key，双重注册可能引入歧义。
-- 回滚: 移除 prefix 逻辑，恢复纯 key 模式。
-
----
-
-### Task 4.2: PhysicsWorld 冲突检测与合并策略
-
-**优先级**: P3  
-**目标**: 明确同一 Scene 中多个 PhysicsControllerComponent 的处理方式。
-
-**输入文件**:
-- `public/plugins/physics/PhysicsSystem.ts` — PhysicsWorld 初始化逻辑
-- `public/apps/demo1/scene.json` — PhysicsControllerComponent 配置
-- `public/apps/demo2/scene.json` — PhysicsControllerComponent 配置
-
-**输出文件**:
-- `public/plugins/physics/PhysicsSystem.ts` — 增加冲突检测/合并逻辑
-
-**依赖**: 无
-
-**详细步骤**:
-
-1. **读取当前实现**: 确认 PhysicsSystem 如何处理 `PhysicsControllerComponent`。是否一个 World 只能有一个 Controller？
-
-2. **选择策略**（根据当前实现选择其一）：
-
-   **策略 A: 自动合并**（如果参数可合并）：
-   ```typescript
-   // PhysicsSystem 初始化时
-   const controllers = scene.query(PhysicsControllerComponent);
-   if (controllers.length > 1) {
-     const mergedConfig = mergePhysicsConfigs(controllers.map(c => c.config));
-     this.world = createWorld(mergedConfig);
-   }
-   ```
-
-   **策略 B: 严格检测 + 清晰报错**（如果只能有一个）：
-   ```typescript
-   const controllers = scene.query(PhysicsControllerComponent);
-   if (controllers.length > 1) {
-     throw new Error(
-       `[PhysicsSystem] Multiple PhysicsControllerComponent detected in scene. ` +
-       `Only one is allowed per Scene. Found on entities: ${controllers.map(e => e.key).join(', ')}. ` +
-       `Suggestion: Merge physics config into a single entity, or use separate Scene instances.`
-     );
-   }
-   ```
-
-3. **推荐策略 B**: 因为 PhysicsWorld 的全局参数（gravity、ground plane）通常只能有一份，自动合并可能产生不可预期的物理行为。严格报错更利于早期发现问题。
-
-4. **文档化**: 在 `ARCHITECTURE.md` 或插件 README 中明确说明："一个 Scene 只能有一个 PhysicsControllerComponent"。
-
-**验收标准**:
-- [ ] 加载包含两个 PhysicsControllerComponent 的 scene 时，`loadApp` 阶段抛出清晰错误（而非静默异常）
-- [ ] 所有现有 demo（只有一个 Controller）正常运行
-- [ ] 错误消息包含 entity key 和修复建议
-
-**风险与回滚**:
-- 风险: 某些 demo 可能无意中包含多个 Controller（如 glTF 导入时自动添加）。
-- 回滚: 移除检测逻辑，恢复静默覆盖行为。
-
----
-
-## 附录 A: 术语表
-
-| 术语 | 含义 |
-|------|------|
-| `app.json` | App 级配置：声明插件、系统顺序、场景、渲染图 |
-| `scene.json` | 场景实体配置：entity key + component 数据 |
-| `render.json` | 渲染图配置：phases、passes、render targets |
-| `systems.json` | System 执行顺序表（将被 Phase 机制取代） |
-| `components.json` | App 级局部组件 Schema 声明 |
-| `owner-tag` | ResourceManager / BufferRegistry 的资源归属标记：`app:<id>` / `plugin:<id>` |
-| PhaseBehavior | RenderGraph 的相位策略：控制该 phase 下 pass 如何执行 |
-
-## 附录 B: 回滚策略
-
-每个 Task 完成后必须执行：
 ```bash
-git add .
-git commit -m "[PLAN] Task X.Y: <描述>"
+# 1. 构建与类型检查
+npm run build
+npm run check:plugins
+
+# 2. 配置校验
+node scripts/validate-config.mjs
+
+# 3. 插件装载冒烟
+node scripts/smoke-plugin-loader.mjs
+
+# 4. 手动浏览器测试
+# - 加载 demo6，确认自行车渲染正常
+# - 打开 PhysicsDebug，确认凸包线框可见
+# - 左键射球，确认自行车被砸动
+# - 碰撞时确认火花出现
+# - 切换 demo（demo1→demo6→demo2），确认无泄漏/崩溃
 ```
 
-如需回滚：
-```bash
-git log --oneline | grep "\[PLAN\]"  # 找到对应 commit
-git revert <commit-hash>              # 或 git reset --hard <commit-hash>
+**验收标准**:
+- [ ] 四项构建/校验命令全部通过
+- [ ] 浏览器中自行车物理行为正确（受重力、可被砸倒、不穿透地面）
+- [ ] 高斯 splat 渲染效果与改造前一致
+- [ ] 连续切换 demo 5 次无崩溃
+
+---
+
+## 附录 A: 文件变更总览
+
+| 文件 | 动作 | 所属阶段 |
+|------|------|----------|
+| `public/plugins/core/components.json` | 改 | 1.1 |
+| `public/plugins/physics/PhysicsSystem.ts` | 改 | 1.1 |
+| `public/plugins/splat/GaussianSplatManager.ts` | 改 | 1.2 |
+| `public/plugins/splat-physics/index.ts` | **新建** | 2.2 |
+| `public/plugins/splat-physics/SplatCollider.ts` | **新建** | 2.1 |
+| `public/plugins/splat-physics/tsconfig.json` | **新建** | 2.2 |
+| `public/apps/demo6_3dgsViewer/app.json` | 改 | 3.1 |
+| `public/apps/demo6_3dgsViewer/scene.json` | 改 | 3.1 |
+| `public/apps/demo6_3dgsViewer/render.json` | 改 | 3.1 |
+| `public/apps/demo6_3dgsViewer/scripts/game.js` | **新建** | 3.2 |
+
+总计: **6 新建 + 4 修改 = 10 个文件**，`src/` 零改动。
+
+---
+
+## 附录 B: 架构图
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  demo6 scene.json                                       │
+│  ┌──────────┐  ┌──────────────┐  ┌──────────────────┐  │
+│  │ GsEntity │  │ PhysicsWorld │  │ Sparks/Emitter    │  │
+│  │ (splat)  │  │ + Ground     │  │ + GameState      │  │
+│  └────┬─────┘  └──────────────┘  └──────────────────┘  │
+│       │                                                  │
+└───────┼──────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────┐
+│  splat-physics 插件 (appLoaded)       │
+│                                       │
+│  ① getCenters() ◄── splats attachment │
+│  ② voxelCluster() + convexHull()     │
+│  ③ createCompoundBody(eid, hulls)    │
+│  ④ 写入 RigidBodyComponent           │
+│     ┌─────────────────┐              │
+│     │  GsEntity        │              │
+│     │  Transform ◄─── PhysicsSystem  │
+│     │    │                ▲           │
+│     │    ▼                │           │
+│     │  GaussianSplatMgr  │           │
+│     │  (sort + render)   │           │
+│     └─────────────────┘              │
+└───────────────────────────────────────┘
+
+渲染管线:
+  Opaque:  Grid → PbrSolid → [PhysicsDebug]
+  Transparent: Splat (splat.draw hook) → Particles
 ```
 
-## 附录 C: AI 执行检查清单
+---
 
-在开始每个 Task 前，AI 必须确认：
-- [ ] 已读取所有输入文件并理解当前实现
-- [ ] 已识别该 Task 与其他 Task 的文件冲突（如有冲突，等待前置 Task 完成）
-- [ ] 已设计向后兼容方案（如接口变更）
-- [ ] 已准备验收测试步骤
+## 附录 C: 风险与回滚
 
-在每个 Task 完成后，AI 必须输出：
-- [ ] 修改的文件列表（含路径）
-- [ ] 关键代码 diff（如有接口变更）
-- [ ] 验收测试结果（通过/失败）
-- [ ] 发现的意外问题（如有）
+| 风险 | 缓解 | 回滚 |
+|------|------|------|
+| convex hull 生成太慢（阻塞主线程 > 5s） | 增大 stride、减小 gridRes | 改回静态展示，用预烘焙碰撞体 |
+| 凸包数量太多导致物理性能下降 | 限制 maxHulls=30，合并小 hull | 减少 gridRes |
+| compound 碰撞体形状不匹配 splat 视觉 | PhysicsDebug 线框可视化校对 | 调整 gridRes/stride 参数 |
+| 多个凸包组合导致自行车"粘"在地上 | 调整 density/friction 参数 | — |
+| splat 排序与物理更新时序冲突 | gaussianSplat 在 physics 之后执行（systems.json 已保证） | — |
+
+---
+
+## 附录 D: 后续扩展方向
+
+1. **Web Worker 凸包计算**: 将 `voxelCluster` + `convexHull` 移到 Worker，避免主线程卡顿
+2. **预烘焙碰撞体**: 首次生成后将 convexVerts 序列化缓存，下次直接加载
+3. **碎块效果**: 自行车被砸后，各凸包分离为独立刚体（碎块飞溅）
+4. **多 splat 实体**: 与 Task 2.1（原 PLAN.md）联动，支持多辆自行车同时物理交互
