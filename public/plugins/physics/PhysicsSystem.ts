@@ -28,12 +28,19 @@ interface BodyRecord {
     attachKey: string;
 }
 
-/** RAPIER collider shape builder lookup (option name â†?factory). */
-type ColliderBuilder = (R: typeof RAPIER, he: number[], radius: number, halfHeight: number) => RapierNS.ColliderDesc;
+/** RAPIER collider shape builder lookup (option name ï¿½?factory). */
+type ColliderBuilder = (R: typeof RAPIER, he: number[], radius: number, halfHeight: number, extra?: Record<string, unknown>) => RapierNS.ColliderDesc;
 const COLLIDER_BUILDERS: Record<string, ColliderBuilder> = {
     cuboid: (R, he) => R.ColliderDesc.cuboid(he[0], he[1], he[2]),
     ball: (R, _he, radius) => R.ColliderDesc.ball(radius),
     capsule: (R, _he, radius, halfHeight) => R.ColliderDesc.capsule(halfHeight, radius),
+    convexHull: (R, _he, _radius, _halfHeight, extra) => {
+        const verts = extra?.verts as Float32Array | undefined;
+        if (!verts || verts.length < 12) throw new Error('convexHull requires verts (Float32Array, â‰¥4 points)');
+        const desc = R.ColliderDesc.convexHull(verts);
+        if (!desc) throw new Error('Rapier convexHull returned null');
+        return desc;
+    },
 };
 
 export interface RayHit {
@@ -43,7 +50,7 @@ export interface RayHit {
     distance: number;
 }
 
-/** RAPIER rigid-body constructor lookup (option name â†?descriptor factory). */
+/** RAPIER rigid-body constructor lookup (option name ï¿½?descriptor factory). */
 const BODY_DESC_BUILDERS: Record<string, (R: typeof RAPIER) => RapierNS.RigidBodyDesc> = {
     dynamic: (R) => R.RigidBodyDesc.dynamic(),
     fixed: (R) => R.RigidBodyDesc.fixed(),
@@ -74,6 +81,24 @@ export class PhysicsSystem implements System {
     private groundBody: RapierNS.RigidBody | null = null;
     private groundSig = '';
 
+    private extraColliderHandles = new Map<number, number[]>();
+
+    buildConvexHullDesc(verts: Float32Array): RapierNS.ColliderDesc | null {
+        if (verts.length < 12) return null;
+        return RAPIER.ColliderDesc.convexHull(verts);
+    }
+
+    attachColliderToBody(eid: number, colliderDesc: RapierNS.ColliderDesc): boolean {
+        const rec = this.records.get(eid);
+        if (!rec || !this.world) return false;
+        const collider = this.world.createCollider(colliderDesc, rec.body);
+        this.handleToEid.set(collider.handle, eid);
+        let handles = this.extraColliderHandles.get(eid);
+        if (!handles) { handles = []; this.extraColliderHandles.set(eid, handles); }
+        handles.push(collider.handle);
+        return true;
+    }
+
     attach(scene: Scene, bus?: EventBus): void {
         this.scene = scene;
         this.bus = bus ?? null;
@@ -89,7 +114,7 @@ export class PhysicsSystem implements System {
         // Only remove root bodies: an "attached" collider record shares its parent
         // root's body object (see createRecord), and removeRigidBody(body) already
         // drops every collider attached to that body. Removing the parent and then
-        // the attached child's body would double-free the same body â†?WASM trap.
+        // the attached child's body would double-free the same body ï¿½?WASM trap.
         for (const rec of this.records.values()) {
             if (rec.attached) continue;
             this.world.removeRigidBody(rec.body);
@@ -101,6 +126,7 @@ export class PhysicsSystem implements System {
         }
         this.records.clear();
         this.handleToEid.clear();
+        this.extraColliderHandles.clear();
         this.accumulator = 0;
         this.debugVertexCount = 0;
     }
@@ -313,7 +339,7 @@ export class PhysicsSystem implements System {
             // The parent must already have been created as a root this frame.
             const parentEid = scene.entityKeyMap.get(attachTo);
             const parentRec = parentEid !== undefined ? this.records.get(parentEid) : undefined;
-            if (!parentRec) return;  // parent missing â€?skip until next frame
+            if (!parentRec) return;  // parent missing ï¿½?skip until next frame
             const collider = world.createCollider(this.buildColliderDesc(eid), parentRec.body);
             this.records.set(eid, { eid, body: parentRec.body, collider, sig, bodyType: 'fixed', attached: true, attachKey: attachTo });
             this.handleToEid.set(collider.handle, eid);
@@ -384,6 +410,11 @@ export class PhysicsSystem implements System {
         const rec = this.records.get(eid);
         if (!rec) return;
         this.handleToEid.delete(rec.collider.handle);
+        const extraHandles = this.extraColliderHandles.get(eid);
+        if (extraHandles) {
+            for (const h of extraHandles) this.handleToEid.delete(h);
+            this.extraColliderHandles.delete(eid);
+        }
         if (rec.attached) {
             // Remove just this collider; keep the parent body intact.
             world.removeCollider(rec.collider, true);
