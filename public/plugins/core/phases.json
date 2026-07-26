@@ -6,5 +6,6 @@
     { "name": "Opaque",      "order": 40, "behavior": "normal" },
     { "name": "Skybox",      "order": 50, "behavior": "normal" },
     { "name": "Transparent", "order": 60, "behavior": "normal" },
-    { "name": "Postprocess", "order": 70, "behavior": "postprocess-chain" }
+    { "name": "Postprocess", "order": 70, "behavior": "postprocess-chain" },
+    { "name": "UI",          "order": 80, "behavior": "normal" }
 ]
