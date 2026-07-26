@@ -99,6 +99,10 @@ export class PhysicsSystem implements System {
         return true;
     }
 
+    hasBodyRecord(eid: number): boolean {
+        return this.records.has(eid);
+    }
+
     attach(scene: Scene, bus?: EventBus): void {
         this.scene = scene;
         this.bus = bus ?? null;
