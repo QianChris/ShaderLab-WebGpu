@@ -49,6 +49,11 @@ export class GaussianSplatManager implements System {
     private cpuModel: Float32Array = IDENTITY_MAT4;
     private lastViewPos: Float32Array | null = null;
 
+    /** Expose splat center positions for external consumers (e.g. collision generation). */
+    getCenters(): Float32Array | null {
+        return this.cpuCenters;
+    }
+
     /** Load and upload a 3DGS PLY. Replaces any previously loaded splat data. */
     async load(url: string): Promise<void> {
         this.dispose();
