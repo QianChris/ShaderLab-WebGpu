@@ -26,7 +26,7 @@ Usage:
 import argparse
 import json
 import sys
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Callable
 
 
 def idx_at(i: int, j: int, k: int, n: int) -> int:
@@ -62,28 +62,114 @@ def build_surface_indices(n: int) -> List[int]:
     return out
 
 
-def select_centers(grid_n: int, spacing: int) -> List[Tuple[int, int, int]]:
-    """Greedy selection of cluster centers: iterate in grid order, skip any
-    particle within Chebyshev distance `spacing` of an already-selected center.
-    Deterministic (same input → same output)."""
+def make_rng(seed: int) -> Callable[[], float]:
+    """Seeded LCG random number generator (deterministic). Returns floats in [0, 1)."""
+    state = [seed & 0xFFFFFFFF or 1]
+    def _rng() -> float:
+        state[0] = (state[0] * 1664525 + 1013904223) & 0xFFFFFFFF
+        return state[0] / 0x100000000
+    return _rng
+
+
+def rand_int(rng: Callable[[], float], lo: int, hi: int) -> int:
+    return int(rng() * (hi - lo + 1)) + lo
+
+
+def shuffle(rng: Callable[[], float], arr: list) -> list:
+    for i in range(len(arr) - 1, 0, -1):
+        j = int(rng() * (i + 1))
+        arr[i], arr[j] = arr[j], arr[i]
+    return arr
+
+
+def select_centers(grid_n: int, radius_cells: int, spacing_cells: int,
+                   jitter: int, rng: Callable[[], float]) -> List[Tuple[int, int, int]]:
+    """Option C: jittered sublattice + greedy dedup + forced coverage.
+
+    1. Generate candidate centers on a regular sublattice (spacing = spacing_cells),
+       each displaced by ±jitter cells (clamped to grid).
+    2. Shuffle candidates (seeded) and greedily select, skipping any within
+       Chebyshev distance spacing_cells of an already-selected center.
+    3. Coverage check: every particle must be within radius_cells of some center.
+       Uncovered particles are force-added as new centers (may violate spacing —
+       coverage is mandatory, spacing is a soft constraint).
+
+    With radius_cells=R and spacing_cells=S, adjacent centers share (2R+1−S) layers
+    of particles. For 1–2 layers shared: S = 2R or S = 2R−1.
+    """
+    # 1. Sublattice candidates with jitter
+    candidates: List[Tuple[int, int, int]] = []
+    for k in range(0, grid_n, spacing_cells):
+        for j in range(0, grid_n, spacing_cells):
+            for i in range(0, grid_n, spacing_cells):
+                ci = max(0, min(grid_n - 1, i + rand_int(rng, -jitter, jitter)))
+                cj = max(0, min(grid_n - 1, j + rand_int(rng, -jitter, jitter)))
+                ck = max(0, min(grid_n - 1, k + rand_int(rng, -jitter, jitter)))
+                candidates.append((ci, cj, ck))
+
+    # Ensure the far edge is represented even if gridN isn't a multiple of spacing.
+    if (grid_n - 1) % spacing_cells != 0:
+        for j in range(0, grid_n, spacing_cells):
+            for i in range(0, grid_n, spacing_cells):
+                candidates.append((
+                    max(0, min(grid_n - 1, i + rand_int(rng, -jitter, jitter))),
+                    max(0, min(grid_n - 1, j + rand_int(rng, -jitter, jitter))),
+                    grid_n - 1,
+                ))
+        for i in range(0, grid_n, spacing_cells):
+            for k in range(0, grid_n, spacing_cells):
+                candidates.append((
+                    max(0, min(grid_n - 1, i + rand_int(rng, -jitter, jitter))),
+                    grid_n - 1,
+                    max(0, min(grid_n - 1, k + rand_int(rng, -jitter, jitter))),
+                ))
+        for j in range(0, grid_n, spacing_cells):
+            for k in range(0, grid_n, spacing_cells):
+                candidates.append((
+                    grid_n - 1,
+                    max(0, min(grid_n - 1, j + rand_int(rng, -jitter, jitter))),
+                    max(0, min(grid_n - 1, k + rand_int(rng, -jitter, jitter))),
+                ))
+
+    # 2. Shuffle + greedy select with min spacing
+    shuffle(rng, candidates)
     centers: List[Tuple[int, int, int]] = []
+    for (ci, cj, ck) in candidates:
+        too_close = False
+        for (si, sj, sk) in centers:
+            if (abs(ci - si) <= spacing_cells and
+                abs(cj - sj) <= spacing_cells and
+                abs(ck - sk) <= spacing_cells):
+                too_close = True
+                break
+        if not too_close:
+            centers.append((ci, cj, ck))
+
+    # 3. Coverage check: force-add centers for uncovered particles
+    added = 0
     for k in range(grid_n):
         for j in range(grid_n):
             for i in range(grid_n):
-                too_close = False
-                for (ci, cj, ck) in centers:
-                    if (abs(i - ci) <= spacing and
-                        abs(j - cj) <= spacing and
-                        abs(k - ck) <= spacing):
-                        too_close = True
+                covered = False
+                for (ci, cj, ck2) in centers:
+                    if (abs(i - ci) <= radius_cells and
+                        abs(j - cj) <= radius_cells and
+                        abs(k - ck2) <= radius_cells):
+                        covered = True
                         break
-                if not too_close:
+                if not covered:
                     centers.append((i, j, k))
+                    added += 1
+    if added > 0:
+        print(f"info: coverage check added {added} extra center(s) for uncovered particles",
+              file=sys.stderr)
+
     return centers
 
 
 def generate(grid_n: int, cell_size: float, cluster_radius: int,
-             cluster_spacing: int, mass: float) -> Dict[str, Any]:
+             cluster_spacing: int, jitter: int, seed: int,
+             mass: float) -> Dict[str, Any]:
     particle_count = grid_n ** 3
     inv_mass = particle_count / mass
     half = (grid_n - 1) / 2.0
@@ -101,8 +187,9 @@ def generate(grid_n: int, cell_size: float, cluster_radius: int,
     # ── surface indices ─────────────────────────────────────────────────
     surface_indices = build_surface_indices(grid_n)
 
-    # ── select cluster centers (greedy, min Chebyshev spacing) ───────────
-    centers = select_centers(grid_n, cluster_spacing)
+    # ── select cluster centers (jittered sublattice + greedy + coverage) ─
+    rng = make_rng(seed)
+    centers = select_centers(grid_n, cluster_radius, cluster_spacing, jitter, rng)
     cluster_count = len(centers)
 
     # First pass: count members per cluster
@@ -198,10 +285,12 @@ def generate(grid_n: int, cell_size: float, cluster_radius: int,
             "gridN": grid_n,
             "cellSize": cell_size,
             "mass": mass,
-            "clusterRadius": cluster_radius * cell_size,       # meters (actual, post-quantization)
-            "clusterSpacing": cluster_spacing * cell_size,     # meters (actual)
-            "clusterRadiusCells": cluster_radius,               # grid cells
-            "clusterSpacingCells": cluster_spacing,             # grid cells
+            "seed": seed,
+            "jitter": jitter,
+            "clusterRadius": cluster_radius * cell_size,
+            "clusterSpacing": cluster_spacing * cell_size,
+            "clusterRadiusCells": cluster_radius,
+            "clusterSpacingCells": cluster_spacing,
             "particleCount": particle_count,
             "clusterCount": cluster_count,
             "clusterEntries": cluster_entries,
@@ -224,6 +313,8 @@ def main():
     parser.add_argument("--clusterRadius", type=float, default=0.8, help="Chebyshev membership radius (meters)")
     parser.add_argument("--clusterSpacing", type=float, default=None,
                         help="min Chebyshev distance between cluster centers (meters, default: = clusterRadius)")
+    parser.add_argument("--jitter", type=int, default=1, help="sublattice jitter in cells (0 = regular grid)")
+    parser.add_argument("--seed", type=int, default=42, help="RNG seed for reproducible jitter")
     parser.add_argument("--mass", type=float, default=1.0, help="total mass (kg)")
     parser.add_argument("--output", type=str, default="softbody_asset.json", help="output file path")
     args = parser.parse_args()
@@ -237,12 +328,15 @@ def main():
     if args.clusterRadius <= 0:
         print(f"error: --clusterRadius must be > 0, got {args.clusterRadius}", file=sys.stderr)
         sys.exit(1)
+    if args.jitter < 0:
+        print(f"error: --jitter must be >= 0, got {args.jitter}", file=sys.stderr)
+        sys.exit(1)
 
     cluster_spacing_m = args.clusterSpacing if args.clusterSpacing is not None else args.clusterRadius
 
     # Convert meter values to grid cells (quantized — actual physical size may differ).
     cluster_radius = max(1, round(args.clusterRadius / args.cellSize))
-    cluster_spacing = max(0, round(cluster_spacing_m / args.cellSize))
+    cluster_spacing = max(1, round(cluster_spacing_m / args.cellSize))
 
     if cluster_radius > args.gridN - 1:
         print(f"error: --clusterRadius {args.clusterRadius}m = {cluster_radius} cells, "
@@ -257,7 +351,8 @@ def main():
         print(f"warning: --clusterSpacing {cluster_spacing_m}m quantized to {cluster_spacing} cells "
               f"= {cluster_spacing * args.cellSize:.3f}m", file=sys.stderr)
 
-    data = generate(args.gridN, args.cellSize, cluster_radius, cluster_spacing, args.mass)
+    data = generate(args.gridN, args.cellSize, cluster_radius, cluster_spacing,
+                    args.jitter, args.seed, args.mass)
 
     with open(args.output, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
@@ -265,13 +360,16 @@ def main():
     m = data["meta"]
     cube_edge = (m["gridN"] - 1) * m["cellSize"]
     max_cluster = (2 * m["clusterRadiusCells"] + 1) ** 3
+    shared_layers = max(0, 2 * m["clusterRadiusCells"] + 1 - m["clusterSpacingCells"])
     print(
         f"Generated {args.output}:\n"
         f"  gridN={m['gridN']}  cellSize={m['cellSize']}m  cubeEdge={cube_edge:.3f}m  cubeVolume={cube_edge**3:.3f}m³\n"
         f"  clusterRadius={m['clusterRadius']}m ({m['clusterRadiusCells']} cells)"
-        f"  clusterSpacing={m['clusterSpacing']}m ({m['clusterSpacingCells']} cells)  mass={m['mass']}\n"
+        f"  clusterSpacing={m['clusterSpacing']}m ({m['clusterSpacingCells']} cells)"
+        f"  jitter={m['jitter']}  seed={m['seed']}  mass={m['mass']}\n"
         f"  particles={m['particleCount']}  clusters={m['clusterCount']}  clusterEntries={m['clusterEntries']}\n"
-        f"  maxClusterMembers={max_cluster}  surfaceTriangles={m['surfaceVertexCount'] // 3}\n"
+        f"  maxClusterMembers={max_cluster}  sharedLayers≈{shared_layers}"
+        f"  surfaceTriangles={m['surfaceVertexCount'] // 3}\n"
         f"  perParticleMass={m['mass'] / m['particleCount']:.6f} kg  invMass={m['particleCount'] / m['mass']:.1f}"
     )
 

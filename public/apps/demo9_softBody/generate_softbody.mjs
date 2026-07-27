@@ -61,30 +61,132 @@ function buildSurfaceIndices(n) {
 }
 
 /**
- * Greedy selection of cluster centers: iterate in grid order, skip any
- * particle within Chebyshev distance `spacing` of an already-selected center.
- * Deterministic (same input → same output).
+ * Seeded LCG random number generator (deterministic — same seed → same output).
+ * Returns a function producing floats in [0, 1).
  */
-function selectCenters(gridN, spacing) {
-    const centers = [];
-    for (let k = 0; k < gridN; k++) {
-        for (let j = 0; j < gridN; j++) {
-            for (let i = 0; i < gridN; i++) {
-                let tooClose = false;
-                for (const [ci, cj, ck] of centers) {
-                    if (Math.abs(i - ci) <= spacing && Math.abs(j - cj) <= spacing && Math.abs(k - ck) <= spacing) {
-                        tooClose = true;
-                        break;
-                    }
-                }
-                if (!tooClose) centers.push([i, j, k]);
+function makeRng(seed) {
+    let state = (seed >>> 0) || 1;
+    return () => {
+        state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+        return state / 0x100000000;
+    };
+}
+
+function randInt(rng, min, max) {
+    return Math.floor(rng() * (max - min + 1)) + min;
+}
+
+function shuffle(rng, arr) {
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        const tmp = arr[i]; arr[i] = arr[j]; arr[j] = tmp;
+    }
+    return arr;
+}
+
+/**
+ * Option C: jittered sublattice + greedy dedup + forced coverage.
+ *
+ * 1. Generate candidate centers on a regular sublattice (spacing = spacingCells),
+ *    each displaced by ±jitter cells (clamped to grid).
+ * 2. Shuffle candidates (seeded) and greedily select, skipping any within
+ *    Chebyshev distance `spacingCells` of an already-selected center.
+ * 3. Coverage check: every particle must be within `radiusCells` of some center.
+ *    Uncovered particles are force-added as new centers (may violate spacing —
+ *    coverage is mandatory, spacing is a soft constraint).
+ *
+ * With radiusCells=R and spacingCells=S, adjacent centers share (2R+1−S) layers
+ * of particles. For 1–2 layers shared: S = 2R or S = 2R−1.
+ */
+function selectCenters(gridN, radiusCells, spacingCells, jitter, rng) {
+    // 1. Sublattice candidates with jitter
+    const candidates = [];
+    for (let k = 0; k < gridN; k += spacingCells) {
+        for (let j = 0; j < gridN; j += spacingCells) {
+            for (let i = 0; i < gridN; i += spacingCells) {
+                const ci = Math.max(0, Math.min(gridN - 1, i + randInt(rng, -jitter, jitter)));
+                const cj = Math.max(0, Math.min(gridN - 1, j + randInt(rng, -jitter, jitter)));
+                const ck = Math.max(0, Math.min(gridN - 1, k + randInt(rng, -jitter, jitter)));
+                candidates.push([ci, cj, ck]);
             }
         }
     }
+    // Ensure the far edge is represented even if gridN isn't a multiple of spacing.
+    if ((gridN - 1) % spacingCells !== 0) {
+        for (let j = 0; j < gridN; j += spacingCells) {
+            for (let i = 0; i < gridN; i += spacingCells) {
+                candidates.push([
+                    Math.max(0, Math.min(gridN - 1, i + randInt(rng, -jitter, jitter))),
+                    Math.max(0, Math.min(gridN - 1, j + randInt(rng, -jitter, jitter))),
+                    gridN - 1,
+                ]);
+            }
+        }
+        for (let i = 0; i < gridN; i += spacingCells) {
+            for (let k = 0; k < gridN; k += spacingCells) {
+                candidates.push([
+                    Math.max(0, Math.min(gridN - 1, i + randInt(rng, -jitter, jitter))),
+                    gridN - 1,
+                    Math.max(0, Math.min(gridN - 1, k + randInt(rng, -jitter, jitter))),
+                ]);
+            }
+        }
+        for (let j = 0; j < gridN; j += spacingCells) {
+            for (let k = 0; k < gridN; k += spacingCells) {
+                candidates.push([
+                    gridN - 1,
+                    Math.max(0, Math.min(gridN - 1, j + randInt(rng, -jitter, jitter))),
+                    Math.max(0, Math.min(gridN - 1, k + randInt(rng, -jitter, jitter))),
+                ]);
+            }
+        }
+    }
+
+    // 2. Shuffle + greedy select with min spacing
+    shuffle(rng, candidates);
+    const centers = [];
+    for (const [ci, cj, ck] of candidates) {
+        let tooClose = false;
+        for (const [si, sj, sk] of centers) {
+            if (Math.abs(ci - si) <= spacingCells &&
+                Math.abs(cj - sj) <= spacingCells &&
+                Math.abs(ck - sk) <= spacingCells) {
+                tooClose = true;
+                break;
+            }
+        }
+        if (!tooClose) centers.push([ci, cj, ck]);
+    }
+
+    // 3. Coverage check: force-add centers for uncovered particles
+    let added = 0;
+    for (let k = 0; k < gridN; k++) {
+        for (let j = 0; j < gridN; j++) {
+            for (let i = 0; i < gridN; i++) {
+                let covered = false;
+                for (const [ci, cj, ck2] of centers) {
+                    if (Math.abs(i - ci) <= radiusCells &&
+                        Math.abs(j - cj) <= radiusCells &&
+                        Math.abs(k - ck2) <= radiusCells) {
+                        covered = true;
+                        break;
+                    }
+                }
+                if (!covered) {
+                    centers.push([i, j, k]);
+                    added++;
+                }
+            }
+        }
+    }
+    if (added > 0) {
+        console.warn(`info: coverage check added ${added} extra center(s) for uncovered particles`);
+    }
+
     return centers;
 }
 
-function generate(gridN, cellSize, clusterRadius, clusterSpacing, mass) {
+function generate(gridN, cellSize, clusterRadius, clusterSpacing, jitter, seed, mass) {
     const particleCount = gridN ** 3;
     const invMass = particleCount / mass;
     const half = (gridN - 1) / 2;
@@ -107,8 +209,9 @@ function generate(gridN, cellSize, clusterRadius, clusterSpacing, mass) {
     // ── surface indices ─────────────────────────────────────────────────
     const surfaceIndices = buildSurfaceIndices(gridN);
 
-    // ── select cluster centers (greedy, min Chebyshev spacing) ───────────
-    const centers = selectCenters(gridN, clusterSpacing);
+    // ── select cluster centers (jittered sublattice + greedy + coverage) ─
+    const rng = makeRng(seed);
+    const centers = selectCenters(gridN, clusterRadius, clusterSpacing, jitter, rng);
     const clusterCount = centers.length;
 
     // First pass: count members per cluster
@@ -201,11 +304,11 @@ function generate(gridN, cellSize, clusterRadius, clusterSpacing, mass) {
 
     return {
         meta: {
-            gridN, cellSize, mass,
-            clusterRadius: clusterRadius * cellSize,       // meters (actual, post-quantization)
-            clusterSpacing: clusterSpacing * cellSize,     // meters (actual)
-            clusterRadiusCells: clusterRadius,             // grid cells
-            clusterSpacingCells: clusterSpacing,           // grid cells
+            gridN, cellSize, mass, seed, jitter,
+            clusterRadius: clusterRadius * cellSize,
+            clusterSpacing: clusterSpacing * cellSize,
+            clusterRadiusCells: clusterRadius,
+            clusterSpacingCells: clusterSpacing,
             particleCount, clusterCount, clusterEntries,
             surfaceVertexCount: surfaceIndices.length,
         },
@@ -223,6 +326,8 @@ const { values } = parseArgs({
         cellSize:       { type: 'string', default: '0.4' },
         clusterRadius:  { type: 'string', default: '0.8' },   // meters
         clusterSpacing: { type: 'string', default: '' },      // default: = clusterRadius
+        jitter:         { type: 'string', default: '1' },     // cells
+        seed:           { type: 'string', default: '42' },    // RNG seed
         mass:           { type: 'string', default: '1.0' },
         output:         { type: 'string', default: 'softbody_asset.json' },
     },
@@ -232,17 +337,20 @@ const gridN = parseInt(values.gridN, 10);
 const cellSize = parseFloat(values.cellSize);
 const clusterRadiusM = parseFloat(values.clusterRadius);
 const clusterSpacingM = values.clusterSpacing ? parseFloat(values.clusterSpacing) : clusterRadiusM;
+const jitter = parseInt(values.jitter, 10);
+const seed = parseInt(values.seed, 10);
 const mass = parseFloat(values.mass);
 
 // Convert meter values to grid cells (quantized — actual physical size may differ).
 const clusterRadius = Math.max(1, Math.round(clusterRadiusM / cellSize));
-const clusterSpacing = Math.max(0, Math.round(clusterSpacingM / cellSize));
+const clusterSpacing = Math.max(1, Math.round(clusterSpacingM / cellSize));
 
 if (gridN < 2) { console.error(`error: --gridN must be >= 2, got ${gridN}`); process.exit(1); }
 if (cellSize <= 0) { console.error(`error: --cellSize must be > 0, got ${cellSize}`); process.exit(1); }
 if (clusterRadiusM <= 0) { console.error(`error: --clusterRadius must be > 0, got ${clusterRadiusM}`); process.exit(1); }
 if (clusterRadius > gridN - 1) { console.error(`error: --clusterRadius ${clusterRadiusM}m = ${clusterRadius} cells, must be < gridN (${gridN}) = ${(gridN-1)*cellSize}m`); process.exit(1); }
 if (clusterSpacingM < 0) { console.error(`error: --clusterSpacing must be >= 0, got ${clusterSpacingM}`); process.exit(1); }
+if (jitter < 0) { console.error(`error: --jitter must be >= 0, got ${jitter}`); process.exit(1); }
 
 // Warn if quantization changed the actual value.
 if (clusterRadius * cellSize !== clusterRadiusM) {
@@ -252,18 +360,20 @@ if (clusterSpacing * cellSize !== clusterSpacingM) {
     console.warn(`warning: --clusterSpacing ${clusterSpacingM}m quantized to ${clusterSpacing} cells = ${(clusterSpacing * cellSize).toFixed(3)}m`);
 }
 
-const data = generate(gridN, cellSize, clusterRadius, clusterSpacing, mass);
+const data = generate(gridN, cellSize, clusterRadius, clusterSpacing, jitter, seed, mass);
 const outPath = resolve(values.output);
 writeFileSync(outPath, JSON.stringify(data, null, 2), 'utf-8');
 
 const m = data.meta;
 const cubeEdge = (m.gridN - 1) * m.cellSize;
 const maxCluster = (2 * m.clusterRadiusCells + 1) ** 3;
+const sharedLayers = Math.max(0, 2 * m.clusterRadiusCells + 1 - m.clusterSpacingCells);
 console.log(
     `Generated ${values.output}:\n` +
     `  gridN=${m.gridN}  cellSize=${m.cellSize}m  cubeEdge=${cubeEdge.toFixed(3)}m  cubeVolume=${(cubeEdge ** 3).toFixed(3)}m³\n` +
-    `  clusterRadius=${m.clusterRadius}m (${m.clusterRadiusCells} cells)  clusterSpacing=${m.clusterSpacing}m (${m.clusterSpacingCells} cells)  mass=${m.mass}\n` +
+    `  clusterRadius=${m.clusterRadius}m (${m.clusterRadiusCells} cells)  clusterSpacing=${m.clusterSpacing}m (${m.clusterSpacingCells} cells)` +
+    `  jitter=${m.jitter}  seed=${m.seed}  mass=${m.mass}\n` +
     `  particles=${m.particleCount}  clusters=${m.clusterCount}  clusterEntries=${m.clusterEntries}\n` +
-    `  maxClusterMembers=${maxCluster}  surfaceTriangles=${m.surfaceVertexCount / 3}\n` +
+    `  maxClusterMembers=${maxCluster}  sharedLayers≈${sharedLayers}  surfaceTriangles=${m.surfaceVertexCount / 3}\n` +
     `  perParticleMass=${(m.mass / m.particleCount).toFixed(6)} kg  invMass=${(m.particleCount / m.mass).toFixed(1)}`
 );
