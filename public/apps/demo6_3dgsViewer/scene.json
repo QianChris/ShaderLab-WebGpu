@@ -41,6 +41,10 @@
     "Transform": { "position": [0, 1, 0], "rotation": [0, 0, 1, 0], "scale": [1, 1, 1] },
     "GsComponent": { "ply": "../../assets/models/3dgs/bicycle-road.ply" }
   },
+  "GsEntity2": {
+    "Transform": { "position": [0.6, 2.8, 0], "rotation": [0, 0, 1, 0], "scale": [0.6, 0.6, 0.6] },
+    "GsComponent": { "ply": "../../assets/models/3dgs/bicycle-road.ply" }
+  },
   "Sparks": {
     "Transform": { "position": [0, 0, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] },
     "ParticleSystemComponent": { "maxParticles": 40000, "gravity": [0, -6.0, 0], "drag": 0.6 }
