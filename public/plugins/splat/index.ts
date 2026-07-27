@@ -38,8 +38,7 @@ export default class SplatPlugin extends EnginePlugin {
             components: ['GsComponent', 'Transform'],
             ubos: [],
             buffers: [],
-            needs: [],
-            before: ['camera'],
+            needs: ['camera'],
         },
     ];
 
