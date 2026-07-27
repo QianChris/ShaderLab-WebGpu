@@ -36,6 +36,8 @@ class SplatInstance {
     private cpuCenters: Float32Array | null = null;
     private cpuModel: Float32Array = IDENTITY_MAT4;
     private lastViewPos: Float32Array | null = null;
+    /** Local-space centroid (avg of centers); used for instance-level back-to-front sort. */
+    private localCentroid: Float32Array = new Float32Array(3);
 
     constructor(eid: number) {
         this.eid = eid;
@@ -73,6 +75,16 @@ class SplatInstance {
         this.uniformData[18] = this.splatScale; this.uniformData[19] = 0;
         this.modelUBO = resourceManager.getUniform(`gsSplatUniform${tag}`, this.uniformData, 80);
         this.cpuModel = IDENTITY_MAT4;
+
+        let sx = 0, sy = 0, sz = 0;
+        for (let i = 0; i < n; i++) {
+            sx += data.centers[i * 4];
+            sy += data.centers[i * 4 + 1];
+            sz += data.centers[i * 4 + 2];
+        }
+        this.localCentroid[0] = sx / n;
+        this.localCentroid[1] = sy / n;
+        this.localCentroid[2] = sz / n;
         this.ready = true;
     }
 
@@ -114,6 +126,14 @@ class SplatInstance {
         resourceManager.device.queue.writeBuffer(this.sortBuf, 0, this.sortIndex.buffer, this.sortIndex.byteOffset, this.sortIndex.byteLength);
     }
 
+    /** View-space z of the instance centroid (smaller = farther). 0 if not ready. */
+    viewDepth(view: Float32Array): number {
+        if (!this.ready) return 0;
+        const mv = mat4Mul(view, this.cpuModel);
+        const c = this.localCentroid;
+        return mv[2] * c[0] + mv[6] * c[1] + mv[10] * c[2] + mv[14];
+    }
+
     /** Bind group for @group(1) against the named "splat" layout. Cached per-instance. */
     bindGroup(): GPUBindGroup | null {
         if (!this.ready || !this.centersBuf || !this.colorsBuf || !this.covBuf || !this.sortBuf || !this.modelUBO) return null;
@@ -152,6 +172,7 @@ class SplatInstance {
         this.cpuCenters = null;
         this.cpuModel = IDENTITY_MAT4;
         this.lastViewPos = null;
+        this.localCentroid = new Float32Array(3);
     }
 
     private radixSortAscending(indices: Uint32Array, keys: Float32Array, n: number): void {
@@ -193,6 +214,8 @@ class SplatInstance {
  */
 export class GaussianSplatManager implements System {
     private instances = new Map<number, SplatInstance>();
+    /** Last view matrix seen in update(); reused in forEachReady for instance-level sort. */
+    private lastView: Float32Array | null = null;
 
     /** Legacy: whether any instance is ready. */
     get ready(): boolean {
@@ -209,11 +232,20 @@ export class GaussianSplatManager implements System {
         return total;
     }
 
-    /** Iterate all ready instances (for the render hook). */
+    /** Iterate all ready instances back-to-front (far first), so multi-instance
+     *  splat blending respects view depth across instances, not just within one. */
     forEachReady(cb: (inst: { count: number; bindGroup(): GPUBindGroup | null }) => void): void {
+        if (this.instances.size === 0) return;
+        const view = this.lastView;
+        const list: SplatInstance[] = [];
         for (const inst of this.instances.values()) {
-            if (inst.ready && inst.count > 0) cb(inst);
+            if (inst.ready && inst.count > 0) list.push(inst);
         }
+        if (list.length === 0) return;
+        if (view) {
+            list.sort((a, b) => a.viewDepth(view) - b.viewDepth(view));
+        }
+        for (const inst of list) cb(inst);
     }
 
     /** System interface: refresh model UBOs + re-sort all instances. */
@@ -221,6 +253,7 @@ export class GaussianSplatManager implements System {
         if (this.instances.size === 0) return;
         const camera = ctx.getSystem<CameraFeed>('camera');
         if (!camera) throw new Error(`gaussianSplat requires the 'camera' system (splat sort reads its view matrix)`);
+        this.lastView = camera.lastView ? new Float32Array(camera.lastView) : null;
         for (const inst of this.instances.values()) {
             if (!inst.ready) continue;
             inst.setModel(ctx.scene.getModelMatrix(inst.eid), ctx.cw, ctx.ch);

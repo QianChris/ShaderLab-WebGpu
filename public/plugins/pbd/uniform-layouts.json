@@ -7,6 +7,10 @@
     { "name": "solverIterations", "type": "u32" },
     { "name": "particleCount", "type": "u32" },
     { "name": "restitution", "type": "f32" },
-    { "name": "_pad0", "type": "f32" }
+    { "name": "clusterCount", "type": "u32" },
+    { "name": "atomFactor", "type": "f32" },
+    { "name": "stiffness", "type": "f32" },
+    { "name": "debugCluster", "type": "u32" },
+    { "name": "_pad1", "type": "f32" }
   ]
 }

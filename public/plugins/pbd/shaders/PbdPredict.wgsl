@@ -1,7 +1,5 @@
 // PBD Step 1 — predict positions.
-// One invocation per particle: integrate velocity under gravity, write predicted
-// position. Pinned particles (velocity.w > 0.5) are frozen. The solve step
-// (PbdSolve.wgsl) handles floor clamping; predict only advances dynamics.
+// v += g·dt;  p_pred = p + v·dt.  Pinned particles (v.w > 0.5) frozen.
 
 struct Params {
     dt: f32,
@@ -11,7 +9,11 @@ struct Params {
     solverIterations: u32,
     particleCount: u32,
     restitution: f32,
-    _pad0: f32,
+    clusterCount: u32,
+    atomFactor: f32,
+    stiffness: f32,
+    debugCluster: u32,
+    _pad1: f32,
 };
 
 @group(0) @binding(0) var<storage, read_write> positions: array<vec4f>;

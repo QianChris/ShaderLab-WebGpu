@@ -15,11 +15,10 @@
   "SoftBody": {
     "Transform": { "position": [0, 4, 0], "rotation": [0, 0, 0, 1], "scale": [1, 1, 1] },
     "PbdSoftBodyComponent": {
-      "gridN": 5,
-      "cellSize": 0.4,
+      "asset": "softbody_asset.json",
       "gravity": -9.81,
       "damping": 0.995,
-      "solverIterations": 8,
+      "solverIterations": 12,
       "compliance": 0.0,
       "restitution": 0.35,
       "mass": 1.0

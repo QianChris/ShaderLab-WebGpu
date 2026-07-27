@@ -14,6 +14,7 @@
     "aux": {
       "predict": "pbd:pipelines/PbdPredictPipeline.json",
       "solve": "pbd:pipelines/PbdSolvePipeline.json",
+      "apply": "pbd:pipelines/PbdApplyPipeline.json",
       "integrate": "pbd:pipelines/PbdIntegratePipeline.json"
     }
   }
