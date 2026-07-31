@@ -79,6 +79,11 @@ export class PipelineDriver {
     /** Precompiled mesh-name resolvers per geometry step (index buffer /
      *  vertex buffer mesh field). Null = default 'MeshComponent.mesh'. */
     private compiledMeshNames: Array<CompiledString | null> = [];
+    /** Reusable scratch model matrix for distance computation during render-sort. */
+    private sortScratch = new Float32Array(16);
+    /** Reusable sort entries (eid + squared distance to camera). The buffer
+     *  grows as needed; only the first `n` entries are sorted/iterated. */
+    private sortBuffer: Array<{ eid: number; dist: number }> = [];
 
     constructor(
         path: string,
@@ -197,10 +202,48 @@ export class PipelineDriver {
             return;
         }
 
+        // Render-sort: order entities by distance to the active camera.
+        // Transparent → far→near (painter's); opaque → near→far (early-z).
+        const camPos = frame.cameraPos;
+        const filter = this.decl.filter;
+        if (camPos && entities.length > 1) {
+            const transparent = this.decl.transparent ?? false;
+            // Grow the reusable buffer (objects are reused, not reallocated).
+            while (this.sortBuffer.length < entities.length) {
+                this.sortBuffer.push({ eid: 0, dist: 0 });
+            }
+            let count = 0;
+            for (const eid of entities) {
+                if (filter) {
+                    const v = scene.getField(eid, filter.component, filter.field);
+                    if ((Number(v) ?? 0) !== filter.value) continue;
+                }
+                const model = scene.getModelMatrix(eid, this.sortScratch);
+                const dx = model[12] - camPos[0];
+                const dy = model[13] - camPos[1];
+                const dz = model[14] - camPos[2];
+                this.sortBuffer[count] = {
+                    eid,
+                    dist: dx * dx + dy * dy + dz * dz,
+                };
+                count++;
+            }
+            const sorted = this.sortBuffer.slice(0, count);
+            sorted.sort((a, b) => transparent ? b.dist - a.dist : a.dist - b.dist);
+            for (let i = 0; i < count; i++) {
+                vctx.eid = sorted[i].eid;
+                pass.setPipeline(pipeline);
+                this.bindGroups(pass, vctx);
+                this.emitGeometry(pass, vctx);
+            }
+            return;
+        }
+
+        // No camera or single entity: use query order (no sort).
         for (const eid of entities) {
-            if (this.decl.filter) {
-                const v = scene.getField(eid, this.decl.filter.component, this.decl.filter.field);
-                if ((Number(v) ?? 0) !== this.decl.filter.value) continue;
+            if (filter) {
+                const v = scene.getField(eid, filter.component, filter.field);
+                if ((Number(v) ?? 0) !== filter.value) continue;
             }
             vctx.eid = eid;
             pass.setPipeline(pipeline);

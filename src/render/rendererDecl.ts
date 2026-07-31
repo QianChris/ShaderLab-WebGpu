@@ -19,6 +19,9 @@ export interface RendererDecl {
     tag?: string;
     /** Per-entity filter: skip entities where the component field doesn't match. */
     filter?: { component: string; field: string; value: number };
+    /** Marks this pipeline as transparent — entities are sorted far→near
+     *  (painter's algorithm). Opaque pipelines sort near→far (early-z benefit). */
+    transparent?: boolean;
     /** Participates in the post-process ping-pong chain (reads $framebuffer). */
     postProcess?: boolean;
     geometry: GeometryDecl;

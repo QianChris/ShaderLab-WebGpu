@@ -355,12 +355,14 @@ export class RenderGraph implements System, IRenderer {
 
     /** Per-frame info for drivers + hooks (attachments carry plugin objects). */
     private driverFrame(ctx: FrameContext, cw: number, ch: number): DriverFrame {
+        const cam = ctx.scene.getActiveCamera(ctx.aspect);
         return {
             time: ctx.time,
             dt: ctx.dt,
             cw, ch,
             attachments: ctx.attachments,
             computePipelines: this.computePipelines,
+            cameraPos: cam?.pos ?? null,
         };
     }
 
@@ -518,6 +520,8 @@ export class RenderGraph implements System, IRenderer {
         const cleared = new Set<string>();
         for (let ci = 0; ci < cameras.length; ci++) {
             const cam = cameras[ci];
+            // Update the frame's camera position for this camera's render-sort.
+            frame.cameraPos = cam.pos;
             // Copy this camera's data from staging into the shared camera UBO.
             enc.copyBufferToBuffer(staging, ci * camSize, camUBO, 0, camSize);
             // Pixel rect, clamped to the framebuffer so 1px rounding on odd
