@@ -323,6 +323,9 @@ export class RenderGraph implements System, IRenderer {
     }
 
     execute(ctx: FrameContext): void {
+        // Submit any compute dispatches batched by script/physics systems this
+        // frame so their results are visible to the render passes below.
+        ctx.flushCompute();
         const tex = ctx.context.getCurrentTexture();
         const cw = tex.width;
         const ch = tex.height;

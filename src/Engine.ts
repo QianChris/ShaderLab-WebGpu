@@ -124,6 +124,14 @@ export class Engine {
     private lastTime = 0;
     /** True while loadApp is in flight — frame() skips system updates. */
     private appLoading = false;
+    /** Pooled FrameContext — built once in init(), only mutable fields
+     *  (time/dt/aspect/cw/ch) are updated per frame. Closures bind to `this`
+     *  and module singletons, so they stay valid for the engine's lifetime. */
+    private frameCtx!: FrameContext;
+    /** Batched compute pass: dispatches from ctx.dispatchCompute accumulate
+     *  here, submitted together by flushCompute(). Null when no pass is open. */
+    private pendingComputeEncoder: GPUCommandEncoder | null = null;
+    private pendingComputePass: GPUComputePassEncoder | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -210,6 +218,10 @@ export class Engine {
         // Allocate every common-scoped buffer declared by the baseline systems
         // (camera / light / timeInput / pointShadowFaces UBOs from core's defs).
         bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
+
+        // Build the pooled FrameContext once — closures bind to `this` and
+        // module singletons, so only mutable fields update per frame.
+        this.frameCtx = this.buildFrameContext();
 
         this.assertSystemsResolve();
     }
@@ -603,6 +615,32 @@ export class Engine {
         this.canvas.height = this.canvas.clientHeight * this.dpr;
     }
 
+    /** Build the reusable FrameContext: stable references + closures that
+     *  bind to `this` and module singletons. Only time/dt/aspect/cw/ch update
+     *  per frame (assigned in frame()). */
+    private buildFrameContext(): FrameContext {
+        return {
+            scene: this.scene,
+            time: 0, dt: 0,
+            aspect: this.aspect(),
+            cw: this.canvas.width,
+            ch: this.canvas.height,
+            canvas: this.canvas,
+            device: this.device,
+            context: this.context,
+            format: this.format,
+            eventBus: this.eventBus,
+            attachments: this.attachmentsView,
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
+            getBuffer: (name: string) => bufferRegistry.get(name),
+            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
+            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
+                this.dispatchCompute(pipelineName, count, entries);
+            },
+            flushCompute: () => { this.flushCompute(); },
+        };
+    }
+
     private frame = (): void => {
         const now = performance.now();
         if (this.startTime === 0) { this.startTime = now; this.lastTime = now; }
@@ -616,31 +654,22 @@ export class Engine {
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        const ctx: FrameContext = {
-            scene: this.scene,
-            time, dt,
-            aspect: this.aspect(),
-            cw: this.canvas.width,
-            ch: this.canvas.height,
-            canvas: this.canvas,
-            device: this.device,
-            context: this.context,
-            format: this.format,
-            eventBus: this.eventBus,
-            attachments: this.attachmentsView,
-            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
-            // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
-            getBuffer: (name: string) => bufferRegistry.get(name),
-            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
-            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
-                this.dispatchCompute(pipelineName, count, entries);
-            },
-        };
+        // Reuse the pooled FrameContext — only mutable fields update per frame.
+        const ctx = this.frameCtx;
+        ctx.time = time;
+        ctx.dt = dt;
+        ctx.aspect = this.aspect();
+        ctx.cw = this.canvas.width;
+        ctx.ch = this.canvas.height;
 
         for (const sys of this.activeSystems) {
             const impl = systemRegistry.resolve(sys);
             impl?.update(ctx);
         }
+        // Safety-net flush for any compute dispatched by the render system or
+        // after it. The renderer also calls ctx.flushCompute() at the start of
+        // execute() so same-frame compute results are visible to render passes.
+        this.flushCompute();
         requestAnimationFrame(this.frame);
     };
 
@@ -649,26 +678,45 @@ export class Engine {
     }
 
     /** Dispatch a preloaded compute pipeline by name (script-system escape hatch).
-     *  Opens a per-call command encoder + submit — functional but not optimal;
-     *  batching multiple dispatches per frame is a future optimization. */
+     *  Dispatches are batched into one compute pass per frame and submitted
+     *  together by flushCompute() (called by the renderer before recording
+     *  render passes, and at end of frame as a safety net). */
     private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void {
         const pipeline = this.renderGraph.getComputePipeline(pipelineName);
         if (!pipeline) throw new Error(`compute pipeline '${pipelineName}' not loaded`);
         const meta = PipelineLoader.getComputeMeta(pipelineName);
         const tgs = meta?.workgroupSize ?? this.engineConfig.computeTgs;
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(pipeline);
+        // Lazily open one compute pass spanning all dispatches in this frame.
+        if (!this.pendingComputePass) {
+            if (!this.pendingComputeEncoder) {
+                this.pendingComputeEncoder = this.device.createCommandEncoder();
+            }
+            this.pendingComputePass = this.pendingComputeEncoder.beginComputePass();
+        }
+        this.pendingComputePass.setPipeline(pipeline);
         if (entries && entries.length > 0) {
             const bg = this.device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),
                 entries,
             });
-            pass.setBindGroup(0, bg);
+            this.pendingComputePass.setBindGroup(0, bg);
         }
-        pass.dispatchWorkgroups(Math.ceil(count / tgs));
-        pass.end();
-        this.device.queue.submit([encoder.finish()]);
+        this.pendingComputePass.dispatchWorkgroups(Math.ceil(count / tgs));
+    }
+
+    /** End the batched compute pass (if open) and submit it. Called by the
+     *  renderer at the start of execute() so compute results are visible to
+     *  render passes in the same frame, and again at end of frame as a
+     *  safety net (no-op when nothing was dispatched). */
+    private flushCompute(): void {
+        if (this.pendingComputePass) {
+            this.pendingComputePass.end();
+            this.pendingComputePass = null;
+        }
+        if (this.pendingComputeEncoder) {
+            this.device.queue.submit([this.pendingComputeEncoder.finish()]);
+            this.pendingComputeEncoder = null;
+        }
     }
 
     exportScene(): object {
