@@ -236,14 +236,21 @@ export class Scene {
         return mat4FromTRSInto(trs.pos, trs.rot, trs.scale, out ?? this.scratchModel);
     }
 
+    /** Export every entity's components as JSON. Uses the per-entity component
+     *  list (entityComponents) for O(E×avgC) instead of scanning every
+     *  registered component per entity (O(E×C)). */
     toJSON(): SceneData {
         const result: SceneData = {};
         for (const [key, eid] of this.entityKeyMap) {
             const entityData: Record<string, Record<string, unknown>> = {};
-            for (const compName of schemaRegistry.comps.keys()) {
-                const comp = schemaRegistry.get(compName)!;
-                if (!hasComponent(this.world, comp, eid)) continue;
-                entityData[compName] = schemaRegistry.readAllFields(compName, comp, eid);
+            const comps = this.entityComponents.get(eid);
+            if (comps) {
+                for (const compName of comps) {
+                    const comp = schemaRegistry.get(compName);
+                    if (comp && hasComponent(this.world, comp, eid)) {
+                        entityData[compName] = schemaRegistry.readAllFields(compName, comp, eid);
+                    }
+                }
             }
             result[key] = entityData;
         }
