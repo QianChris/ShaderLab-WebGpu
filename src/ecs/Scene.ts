@@ -1,7 +1,7 @@
 import { createWorld, addEntity, removeEntity, type World } from 'bitecs';
 import { addComponent, hasComponent, removeComponent } from 'bitecs/legacy';
 import { schemaRegistry } from './SchemaRegistry';
-import { buildCameraMatrices, mat4FromTRS, type TRS } from '../math';
+import { buildCameraMatricesInto, mat4FromTRSInto, type TRS } from '../math';
 
 export type SceneData = Record<string, Record<string, Record<string, unknown>>>;
 
@@ -23,6 +23,18 @@ export class Scene {
     world: World;
     entityKeyMap = new Map<string, number>();
     entityTags = new Map<number, string[]>();
+    /** Per-entity component list (for O(E×avgC) toJSON instead of O(E×C)). */
+    private entityComponents = new Map<number, string[]>();
+    /** Scratch model matrix — reused by getModelMatrix to avoid per-call
+     *  allocation. Safe because callers consume the result before the next
+     *  entity's matrix is computed (PipelineDriver processes entities serially). */
+    private scratchModel = new Float32Array(16);
+    /** Reusable camera pool: pre-allocated CameraView objects with pre-allocated
+     *  Float32Array fields, grown as needed. Avoids per-frame allocation in the
+     *  getActiveCameras hot path. */
+    private cameraPool: CameraView[] = [];
+    /** Number of camera pool entries currently populated this frame. */
+    private cameraCount = 0;
 
     constructor() {
         this.world = createWorld();
@@ -31,11 +43,13 @@ export class Scene {
     createEntity(key: string, data: Record<string, Record<string, unknown>>): number {
         const eid = addEntity(this.world);
         const tags: string[] = [];
+        const comps: string[] = [];
 
         // force NameComponent
         const nc = schemaRegistry.get('NameComponent')!;
         addComponent(this.world, nc, eid);
         schemaRegistry.setAllFields('NameComponent', nc, eid, { name: key });
+        comps.push('NameComponent');
 
         for (const [compName, compData] of Object.entries(data)) {
             const comp = schemaRegistry.get(compName);
@@ -47,6 +61,7 @@ export class Scene {
             }
             addComponent(this.world, comp, eid);
             schemaRegistry.setAllFields(compName, comp, eid, compData);
+            comps.push(compName);
 
             if (schemaRegistry.isRenderTag(compName)) {
                 tags.push(compName);
@@ -55,6 +70,7 @@ export class Scene {
 
         this.entityKeyMap.set(key, eid);
         this.entityTags.set(eid, tags);
+        this.entityComponents.set(eid, comps);
         return eid;
     }
 
@@ -64,6 +80,7 @@ export class Scene {
             removeEntity(this.world, eid);
             this.entityKeyMap.delete(key);
             this.entityTags.delete(eid);
+            this.entityComponents.delete(eid);
         }
     }
 
@@ -86,11 +103,17 @@ export class Scene {
         if (schemaRegistry.mandatory.has(compName)) return;
         const comp = schemaRegistry.get(compName);
         if (!comp) return;
+        const comps = this.entityComponents.get(eid);
         if (enabled && !hasComponent(this.world, comp, eid)) {
             addComponent(this.world, comp, eid);
             schemaRegistry.setAllFields(compName, comp, eid, {});
+            if (comps && !comps.includes(compName)) comps.push(compName);
         } else if (!enabled && hasComponent(this.world, comp, eid)) {
             removeComponent(this.world, comp, eid);
+            if (comps) {
+                const i = comps.indexOf(compName);
+                if (i >= 0) comps.splice(i, 1);
+            }
         }
     }
 
@@ -149,10 +172,11 @@ export class Scene {
      *  camera is supported — each carries its own on-screen viewport rect
      *  (Camera.viewport, normalized) and a per-camera aspect derived from the
      *  viewport's w/h times the canvas aspect. Insertion order (= scene.json
-     *  object order) is preserved, so the first declared camera is the "primary". */
+     *  object order) is preserved, so the first declared camera is the "primary".
+     *  Reuses a pre-allocated CameraView pool to avoid per-frame allocation. */
     getActiveCameras(canvasAspect: number): CameraView[] {
         const camComp = schemaRegistry.get('Camera')!;
-        const result: CameraView[] = [];
+        this.cameraCount = 0;
         for (const [, eid] of this.entityKeyMap) {
             if (!hasComponent(this.world, camComp, eid)) continue;
             const active = schemaRegistry.getScalar(camComp, eid, 'active');
@@ -166,13 +190,25 @@ export class Scene {
             const vx = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 0) || 0;
             const vy = schemaRegistry.getScalarField('Camera', camComp, eid, 'viewport', 1) || 0;
             const camAspect = canvasAspect * (vw / Math.max(1e-6, vh));
-            const m = buildCameraMatrices(this.getTransformTRS(eid), fov, camAspect, near, far);
-            result.push({
-                eid, vp: m.vp, ivp: m.ivp, pos: m.pos, view: m.view, proj: m.proj,
-                viewport: [vx, vy, vw, vh], aspect: camAspect,
-            });
+            // Grow the pool lazily — never shrinks (stale entries are harmless
+            // because cameraCount bounds the returned slice).
+            const idx = this.cameraCount++;
+            if (idx >= this.cameraPool.length) {
+                this.cameraPool.push({
+                    eid: 0,
+                    vp: new Float32Array(16), ivp: new Float32Array(16),
+                    pos: new Float32Array(4), view: new Float32Array(16), proj: new Float32Array(16),
+                    viewport: [0, 0, 1, 1], aspect: 1,
+                });
+            }
+            const cam = this.cameraPool[idx];
+            cam.eid = eid;
+            cam.viewport[0] = vx; cam.viewport[1] = vy;
+            cam.viewport[2] = vw; cam.viewport[3] = vh;
+            cam.aspect = camAspect;
+            buildCameraMatricesInto(this.getTransformTRS(eid), fov, camAspect, near, far, cam);
         }
-        return result;
+        return this.cameraPool.slice(0, this.cameraCount);
     }
 
     private getTransformTRS(eid: number): TRS {
@@ -191,9 +227,13 @@ export class Scene {
         };
     }
 
-    getModelMatrix(eid: number): Float32Array {
+    /** Compute an entity's model matrix. With no `out`, writes into a reusable
+     *  scratch buffer (safe for immediate consumption — callers must not retain
+     *  the reference across another getModelMatrix call). Pass `out` to write
+     *  into a caller-owned buffer for long-lived storage. */
+    getModelMatrix(eid: number, out?: Float32Array): Float32Array {
         const trs = this.getTransformTRS(eid);
-        return mat4FromTRS(trs.pos, trs.rot, trs.scale);
+        return mat4FromTRSInto(trs.pos, trs.rot, trs.scale, out ?? this.scratchModel);
     }
 
     toJSON(): SceneData {
