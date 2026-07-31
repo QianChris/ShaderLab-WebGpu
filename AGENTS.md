@@ -16,6 +16,8 @@
 | `npm run dev` / `run.bat` | Vite 开发服务器 |
 | `npm run build` | `tsc`（src/ 类型检查）+ `vite build`（产出 main + 固定名 `assets/engine-api.js`） |
 | `npm run check:plugins` | `tsc -p public/plugins`（插件 TS 类型检查，经 `@shaderlab/api`→src 源码映射） |
+| `npm test` | `vitest run`（129 个测试，纯逻辑 + 机制 + 集成，<1 秒） |
+| `npm run verify` | 一键全量：`build` + `check:plugins` + `test` + `validate` + `smoke` |
 | `node scripts/validate-config.mjs` | 静态校验组合层（场景组件、管线引用、hook 可达、插件存在等） |
 | `node scripts/smoke-plugin-loader.mjs` | Node 冒烟：对真实插件跑 转译→import 重写→装载→实例化 全链 |
 
@@ -139,6 +141,38 @@ export default class MyFxPlugin extends EnginePlugin {
 - `spriteEntity` uniform layout 仍在 core/uniform-layouts.json（sprite 插件的 SpritePipeline 引用它）；理论上应随 sprite 迁出，但 sprite 依赖 core 所以跨层引用可用。
 - gaussianSplat 用 `before: ['camera']` 自动插入，sort 使用上一帧 camera 数据（一帧延迟，对排序可接受）。
 - PhysicsWorld 多控制器冲突检测未实现（P3 暂缓）；当前多 `PhysicsControllerComponent` 会静默用最后一个。
+
+## 测试体系
+
+### 分层结构
+
+| 层级 | 目录 | 测试数 | 说明 |
+|------|------|--------|------|
+| **纯逻辑** | `tests/unit/` | 68 | 无 GPU 依赖，Node 直跑，覆盖 math/valueResolver/uniformLayout/systemRegistry/scene |
+| **机制** | `tests/mechanism/` | 52 | Mock GPU 设备，覆盖 resourceManager/pluginManager/pluginHost/renderGraph/pipelineDriver |
+| **集成** | `tests/integration/` | 9 | 多模块协作，覆盖插件完整生命周期/渲染数据面往返/跨 app 资源作用域 |
+
+### Mock 基础设施
+
+- `tests/mocks/gpu.ts`：MockGPUDevice（createBuffer/Texture/BindGroup, createCommandEncoder）、MockRenderPassEncoder（记录所有 setPipeline/setBindGroup/draw/drawIndexed 调用供断言）、MockComputePassEncoder。
+- `tests/mocks/pluginHost.ts`：MockPluginHost 记录 applyDeclarations/sweepOwner/beginOwner/endOwner 调用。
+- `tests/helpers/reset.ts`：`resetRegistries()` 清扫模块单例（schemaRegistry/uniformLayouts/systemRegistry/resourceManager/PipelineLoader/atomNamespaces），测试间隔离。
+- `tests/helpers/fixtures.ts`：共享测试数据（RendererDecl 变体、RenderGraphData、组件定义）。
+- `tests/setup.ts`：WebGPU 全局常量 polyfill（GPUBufferUsage/GPUTextureUsage/GPUShaderStage），Node 环境无 WebGPU API。
+
+### 运行
+
+- `npm test`：全量运行（129 tests, <1 秒）。
+- `npm run test:watch`：watch 模式。
+- `npm run verify`：一键全量验证（build + check:plugins + test + validate + smoke）。
+- CI（`.github/workflows/ci.yml`）在 push/PR 时自动运行 verify 套件。
+
+### 测试约定
+
+- 模块单例（schemaRegistry/resourceManager 等）无全局 reset；测试用 `owner: 'test'` 隔离，`afterEach` 调 `resetRegistries()`。
+- ResourceManager 用 `enterApp('test')` / `exitApp('test')` 隔离资源作用域。
+- `vi.spyOn(pm, 'importPluginModule')` mock 插件模块加载（按 baseUrl 返回不同插件类）。
+- PipelineDriver 测试用 `defineQuery` from bitecs 构建真实 query，MockRenderPassEncoder 记录绘制调用。
 
 ## 性能优化（已落地）
 
