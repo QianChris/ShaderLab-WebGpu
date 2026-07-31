@@ -59,6 +59,11 @@ export class ResourceManager {
     private textureList: (GPUTexture | null)[] = [null];
     private textureKeyToHandle = new Map<string, number>();
     private textures = new Map<string, GPUTexture>();
+    /** Free lists for handle recycling: destroyed resources' indices are
+     *  pushed here and reused on the next allocation, keeping the handle
+     *  tables proportional to live resource count rather than append-only. */
+    private bufferFreeList: number[] = [];
+    private textureFreeList: number[] = [];
 
     private bindLayoutDecls = new Map<string, BindEntryDecl[]>();
     private bindLayouts = new Map<string, GPUBindGroupLayout>();
@@ -199,6 +204,7 @@ export class ResourceManager {
             const handle = this.textureKeyToHandle.get(key);
             if (handle !== undefined) {
                 this.textureList[handle] = null;
+                this.textureFreeList.push(handle);
                 this.textureKeyToHandle.delete(key);
             }
         }
@@ -263,6 +269,16 @@ export class ResourceManager {
         gpu.index?.destroy();
         gpu.edgeBuffer?.destroy();
         gpu.pointBuffer?.destroy();
+        // Recycle registered handles so the handle tables stay proportional
+        // to live resources rather than growing without bound.
+        for (const handle of Object.values(gpu.slotHandles)) {
+            if (handle !== undefined) {
+                this.bufferList[handle] = null;
+                this.bufferFreeList.push(handle);
+            }
+        }
+        this.bufferList[gpu.indexHandle] = null;
+        this.bufferFreeList.push(gpu.indexHandle);
     }
 
     /* ── Named bind group layouts (bind-layouts.json) ─────── */
@@ -313,6 +329,11 @@ export class ResourceManager {
     /* ── Handle tables ────────────────────────────── */
 
     private registerBuffer(buffer: GPUBuffer): number {
+        const free = this.bufferFreeList.pop();
+        if (free !== undefined) {
+            this.bufferList[free] = buffer;
+            return free;
+        }
         this.bufferList.push(buffer);
         return this.bufferList.length - 1;
     }
@@ -685,8 +706,15 @@ export class ResourceManager {
     private registerTextureHandle(key: string, tex: GPUTexture): number {
         const existing = this.textureKeyToHandle.get(key);
         if (existing) { this.textureList[existing] = tex; return existing; }
-        this.textureList.push(tex);
-        const handle = this.textureList.length - 1;
+        const free = this.textureFreeList.pop();
+        let handle: number;
+        if (free !== undefined) {
+            this.textureList[free] = tex;
+            handle = free;
+        } else {
+            this.textureList.push(tex);
+            handle = this.textureList.length - 1;
+        }
         this.textureKeyToHandle.set(key, handle);
         return handle;
     }
