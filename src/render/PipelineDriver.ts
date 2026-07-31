@@ -84,6 +84,11 @@ export class PipelineDriver {
     /** Reusable sort entries (eid + squared distance to camera). The buffer
      *  grows as needed; only the first `n` entries are sorted/iterated. */
     private sortBuffer: Array<{ eid: number; dist: number }> = [];
+    /** Storage buffer for instanced model matrices (array<mat4x4f>).
+     *  Grows as needed; reused across frames. */
+    private instanceBuffer: GPUBuffer | null = null;
+    /** Reusable CPU-side matrix staging array for instanced writes. */
+    private instanceMatrices: Float32Array = new Float32Array(0);
 
     constructor(
         path: string,
@@ -134,6 +139,8 @@ export class PipelineDriver {
      *  collected. GPUBindGroup has no destroy(); dereferencing is the only lever. */
     dispose(): void {
         this.bgCache.clear();
+        this.instanceBuffer?.destroy();
+        this.instanceBuffer = null;
     }
 
     /** Encode compute work declared by this pipeline (script hook), before the render pass. */
@@ -202,10 +209,20 @@ export class PipelineDriver {
             return;
         }
 
+        // GPU instancing path: batch all matching entities into one draw call.
+        // Model matrices go into a storage buffer; the shader indexes via
+        // @builtin(instance_index). Requires the object bind group layout to
+        // declare a storage buffer. Incompatible with transparent (no per-instance
+        // sort). Falls through to per-entity path when <2 entities or no query.
+        const filter = this.decl.filter;
+        if (this.decl.instanced && entities.length > 1) {
+            this.recordInstanced(pass, scene, pipeline, frame, vctx, entities, filter);
+            return;
+        }
+
         // Render-sort: order entities by distance to the active camera.
         // Transparent → far→near (painter's); opaque → near→far (early-z).
         const camPos = frame.cameraPos;
-        const filter = this.decl.filter;
         if (camPos && entities.length > 1) {
             const transparent = this.decl.transparent ?? false;
             // Grow the reusable buffer (objects are reused, not reallocated).
@@ -253,6 +270,124 @@ export class PipelineDriver {
     }
 
     /* ── bind group assembly ──────────────────────── */
+
+    /** GPU-instanced draw: write all matching entities' model matrices into a
+     *  storage buffer, set bind groups once, and draw all instances in a single
+     *  drawIndexed(indexCount, instanceCount) call. The shader must use
+     *  @builtin(instance_index) to index into the matrix array. */
+    private recordInstanced(
+        pass: GPURenderPassEncoder,
+        scene: Scene,
+        pipeline: GPURenderPipeline,
+        frame: import('./types').DriverFrame,
+        vctx: ValueContext,
+        entities: readonly number[],
+        filter: { component: string; field: string; value: number } | undefined,
+    ): void {
+        // Collect matching entities (apply filter if declared).
+        const matching: number[] = [];
+        for (const eid of entities) {
+            if (filter) {
+                const v = scene.getField(eid, filter.component, filter.field);
+                if ((Number(v) ?? 0) !== filter.value) continue;
+            }
+            matching.push(eid);
+        }
+        if (matching.length === 0) return;
+
+        const n = matching.length;
+        const matFloats = 16;
+        const requiredBytes = n * matFloats * 4;
+
+        // Grow the storage buffer if needed (reused across frames).
+        if (!this.instanceBuffer || this.instanceBuffer.size < requiredBytes) {
+            this.instanceBuffer?.destroy();
+            this.instanceBuffer = resourceManager.device.createBuffer({
+                label: `instanced:${this.path}`,
+                size: requiredBytes,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            });
+        }
+        // Grow the CPU staging array if needed.
+        if (this.instanceMatrices.length < n * matFloats) {
+            this.instanceMatrices = new Float32Array(n * matFloats);
+        }
+        for (let i = 0; i < n; i++) {
+            const model = scene.getModelMatrix(matching[i], this.sortScratch);
+            this.instanceMatrices.set(model, i * matFloats);
+        }
+        resourceManager.device.queue.writeBuffer(
+            this.instanceBuffer, 0,
+            this.instanceMatrices.buffer,
+            this.instanceMatrices.byteOffset,
+            n * matFloats * 4,
+        );
+
+        // Set the pipeline + frame bind group (group 0) as usual.
+        pass.setPipeline(pipeline);
+        const names = PipelineLoader.getConfig(this.path)?.bindLayout ?? [];
+        if (names[0] === 'frame') {
+            pass.setBindGroup(0, resourceManager.frameBindGroup());
+        } else if (names[0] === 'frameShadow') {
+            pass.setBindGroup(0, resourceManager.frameShadowBindGroup());
+        }
+
+        // Set the instanced object bind group: storage buffer of model matrices.
+        // Uses the layout declared for the object group (must declare a storage
+        // buffer entry). The binding index comes from the bind group's uniform
+        // binding (or 0). Material bind groups are set normally.
+        for (const bg of this.decl.bindGroups ?? []) {
+            if (bg.uniform) {
+                const layoutName = this.layoutNameFor(bg.group);
+                const binding = bg.uniform.binding ?? 0;
+                const bgObj = resourceManager.genericBindGroup(layoutName, [
+                    { binding, resource: { buffer: this.instanceBuffer } },
+                ]);
+                pass.setBindGroup(bg.group, bgObj);
+            } else {
+                // Non-uniform bind groups (samplers, textures, static) set normally.
+                vctx.eid = 0;
+                const entries = this.buildEntries(bg, vctx, this.layoutNameFor(bg.group), this.indexOfBindGroup(bg));
+                pass.setBindGroup(bg.group, resourceManager.genericBindGroup(this.layoutNameFor(bg.group), entries));
+            }
+        }
+
+        // Emit geometry once (vertex buffers + index buffer) then draw all instances.
+        this.emitGeometryInstanced(pass, vctx, n);
+    }
+
+    /** Find the array index of a BindGroupDecl in this.decl.bindGroups. */
+    private indexOfBindGroup(bg: BindGroupDecl): number {
+        return (this.decl.bindGroups ?? []).indexOf(bg);
+    }
+
+    /** Emit vertex buffers + index buffer + a single instanced draw call. */
+    private emitGeometryInstanced(pass: GPURenderPassEncoder, vctx: ValueContext, instanceCount: number): void {
+        const steps = this.decl.geometry.steps ?? [];
+        for (let si = 0; si < steps.length; si++) {
+            const step = steps[si];
+            const meshNameFn = this.compiledMeshNames[si];
+            const meshName = meshNameFn ? meshNameFn(vctx) : 'MeshComponent.mesh';
+            const mesh = meshName && resourceManager.hasMesh(meshName)
+                ? resourceManager.getMesh(meshName) : null;
+
+            for (const vb of step.vertexBuffers ?? []) {
+                this.bindVertexBuffer(pass, vb, vctx, meshName);
+            }
+            if (step.indexBuffer && mesh?.index) {
+                pass.setIndexBuffer(mesh.index, mesh.indexFormat);
+            }
+            const draw = step.draw;
+            if (!draw) continue;
+            if (draw.type === 'drawIndexed') {
+                const count = mesh?.indexCount ?? 0;
+                if (count > 0) pass.drawIndexed(count, instanceCount);
+            } else {
+                const vCount = draw.vertexCount ?? 3;
+                pass.draw(vCount, instanceCount);
+            }
+        }
+    }
 
     private bindGroups(pass: GPURenderPassEncoder, vctx: ValueContext): void {
         // Auto-bind the frame group at @group(0) based on the pipeline's first layout name.

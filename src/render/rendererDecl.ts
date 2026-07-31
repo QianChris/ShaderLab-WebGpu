@@ -22,6 +22,14 @@ export interface RendererDecl {
     /** Marks this pipeline as transparent — entities are sorted far→near
      *  (painter's algorithm). Opaque pipelines sort near→far (early-z benefit). */
     transparent?: boolean;
+    /** GPU instancing: batch all matching entities into a single
+     *  drawIndexed(indexCount, instanceCount) call. Model matrices are
+     *  written to a storage buffer; the shader MUST use
+     *  @builtin(instance_index) to index into array<mat4x4f>.
+     *  Requires the object bind group layout to declare a storage buffer
+     *  (not uniform). Incompatible with transparent (instancing ignores
+     *  per-instance sort order). */
+    instanced?: boolean;
     /** Participates in the post-process ping-pong chain (reads $framebuffer). */
     postProcess?: boolean;
     geometry: GeometryDecl;
