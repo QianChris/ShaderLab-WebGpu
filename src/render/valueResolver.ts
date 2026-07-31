@@ -163,3 +163,122 @@ export function resolveString(src: string, ctx: ValueContext): string {
     const v = ctx.scene.getField(ctx.eid, head, field);
     return typeof v === 'string' ? v : String(v ?? '');
 }
+
+// ── Compile-time precompilation ──────────────────────────────────
+// The functions below pre-compile value-source strings into closures at
+// pipeline-construction time, so the per-entity hot path only invokes a
+// closure — no indexOf/split/schemaRegistry.get string parsing per frame.
+
+/** A precompiled value source: call with a ValueContext to get the value. */
+export type CompiledValue = (ctx: ValueContext) => number | ArrayLike<number>;
+
+/** Precompile a value-source string into a closure. */
+export function compileValue(src: string): CompiledValue {
+    const colon = src.indexOf(':');
+    const prefix = colon >= 0 ? src.slice(0, colon) : '';
+    const rest = colon >= 0 ? src.slice(colon + 1) : src;
+
+    switch (prefix) {
+        case 'pack':
+            return compilePack(rest);
+        case 'const': {
+            const nums = rest.split(',').map(s => Number(s.trim()));
+            return () => nums;
+        }
+        case 'script':
+            return (ctx) => {
+                const fn = ctx.scripts.get(rest);
+                if (!fn) {
+                    throw new Error(
+                        `Value script '${rest}' not found — is its file listed in render.json "renderScripts" ` +
+                        `and does it export that function?`,
+                    );
+                }
+                return fn(ctx);
+            };
+        default:
+            return compileAtom(src);
+    }
+}
+
+/** Precompile a single (non-prefixed) atom. */
+function compileAtom(src: string): CompiledValue {
+    const asNum = Number(src);
+    if (!Number.isNaN(asNum)) return () => asNum;
+
+    const dot = src.indexOf('.');
+    if (dot < 0) {
+        throw new Error(`Cannot compile value atom '${src}' (expected number, Comp.field, builtin.*, transform.* or tag.*)`);
+    }
+
+    const head = src.slice(0, dot);
+    const field = src.slice(dot + 1);
+
+    const ns = atomNamespaces[head];
+    if (ns) {
+        const fn = ns[field];
+        if (!fn) {
+            throw new Error(`Unknown value atom '${src}' (known ${head}.*: ${Object.keys(ns).join(', ')})`);
+        }
+        return fn;
+    }
+
+    if (!schemaRegistry.get(head)) {
+        throw new Error(`Value source '${src}' references unknown component '${head}'`);
+    }
+    const compName = head;
+    const fieldName = field;
+    return (ctx) => {
+        const v = ctx.scene.getField(ctx.eid, compName, fieldName);
+        if (Array.isArray(v)) return v.map(Number);
+        return Number(v ?? 0);
+    };
+}
+
+/** Precompile a pack: list into a closure that concatenates resolved atoms. */
+function compilePack(list: string): CompiledValue {
+    const parts: Array<{ num: number; fn: CompiledValue | null }> = [];
+    for (const raw of list.split(',')) {
+        const token = raw.trim();
+        if (token === '') continue;
+        if (/^-?\d*\.?\d+$/.test(token)) {
+            parts.push({ num: Number(token), fn: null });
+        } else {
+            parts.push({ num: 0, fn: compileAtom(token) });
+        }
+    }
+    return (ctx) => {
+        const out: number[] = [];
+        for (const p of parts) {
+            if (p.fn === null) { out.push(p.num); continue; }
+            const v = p.fn(ctx);
+            if (typeof v === 'number') {
+                out.push(v);
+            } else {
+                for (let i = 0; i < v.length; i++) out.push(v[i]);
+            }
+        }
+        return out;
+    };
+}
+
+/** A precompiled string source (mesh names). */
+export type CompiledString = (ctx: ValueContext) => string;
+
+/** Precompile a string-source into a closure. */
+export function compileString(src: string): CompiledString {
+    const dot = src.indexOf('.');
+    if (dot < 0) return () => src;
+    const head = src.slice(0, dot);
+    const field = src.slice(dot + 1);
+    if (head === 'builtin' || head === 'transform' || head === 'tag') return () => src;
+    if (!schemaRegistry.get(head)) {
+        throw new Error(`String source '${src}' references unknown component '${head}'`);
+    }
+    const compName = head;
+    const fieldName = field;
+    return (ctx) => {
+        const v = ctx.scene.getField(ctx.eid, compName, fieldName);
+        return typeof v === 'string' ? v : String(v ?? '');
+    };
+}

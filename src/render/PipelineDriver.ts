@@ -1,7 +1,7 @@
 import { resourceManager } from './ResourceManager';
 import { PipelineLoader } from './PipelineLoader';
 import { uniformLayouts } from './UniformLayout';
-import { resolveValue, resolveString, resolveHandle, type ValueContext } from './valueResolver';
+import { resolveHandle, compileValue, compileString, type ValueContext, type CompiledValue, type CompiledString } from './valueResolver';
 import type { Scene } from '../ecs/Scene';
 import type { RendererDecl, BindGroupDecl } from './rendererDecl';
 
@@ -68,6 +68,17 @@ export class PipelineDriver {
      *  name) and texture views (ResourceManager.textureView, cached per tex)
      *  are all stable objects, so the signature comparison is cheap and exact. */
     private bgCache = new Map<string, { bg: GPUBindGroup; sig: unknown[] }>();
+    /** Precompiled uniform write values: compiledWrites[bgIndex][writeIndex].
+     *  Built once at construction — eliminates per-entity string parsing. */
+    private compiledWrites: CompiledValue[][] = [];
+    /** Precompiled texture handle sources (for non-static texture bindings).
+     *  Null entries = the texture uses a static source (renderTarget:/asset:). */
+    private compiledTextureHandles: Array<Array<((ctx: ValueContext) => number) | null>> = [];
+    /** Precompiled draw count fields per geometry step. */
+    private compiledCounts: Array<{ count?: CompiledValue; instance?: CompiledValue }> = [];
+    /** Precompiled mesh-name resolvers per geometry step (index buffer /
+     *  vertex buffer mesh field). Null = default 'MeshComponent.mesh'. */
+    private compiledMeshNames: Array<CompiledString | null> = [];
 
     constructor(
         path: string,
@@ -83,6 +94,34 @@ export class PipelineDriver {
         this.valueScripts = valueScripts;
         this.geometryHooks = geometryHooks;
         this.computeHooks = computeHooks;
+        this.precompile();
+    }
+
+    /** Precompile value-source strings into closures at construction time so
+     *  the per-entity hot path only invokes closures — no string parsing. */
+    private precompile(): void {
+        const bgs = this.decl.bindGroups ?? [];
+        this.compiledWrites = bgs.map(bg =>
+            (bg.uniform?.writes ?? []).map(w => compileValue(w.value)),
+        );
+        this.compiledTextureHandles = bgs.map(bg =>
+            (bg.textures ?? []).map(t => {
+                const s = t.source;
+                if (s.startsWith('renderTarget:') || s.startsWith('asset:')) return null;
+                return (ctx: ValueContext) => resolveHandle(s, ctx);
+            }),
+        );
+        const steps = this.decl.geometry.steps ?? [];
+        this.compiledCounts = steps.map(step => ({
+            count: step.draw?.countField ? compileValue(step.draw.countField) : undefined,
+            instance: step.draw?.instanceCountField ? compileValue(step.draw.instanceCountField) : undefined,
+        }));
+        this.compiledMeshNames = steps.map(step => {
+            const meshSrc = step.indexBuffer?.mesh
+                ?? step.vertexBuffers?.find(vb => vb.source === 'meshSlots' || vb.source === 'meshField')?.mesh;
+            if (!meshSrc) return null;
+            return compileString(meshSrc);
+        });
     }
 
     /** Release cached GPU objects so they are GC-eligible immediately on app
@@ -188,9 +227,11 @@ export class PipelineDriver {
             );
         }
 
-        for (const bg of this.decl.bindGroups ?? []) {
+        const bgs = this.decl.bindGroups ?? [];
+        for (let bgIndex = 0; bgIndex < bgs.length; bgIndex++) {
+            const bg = bgs[bgIndex];
             const layoutName = this.layoutNameFor(bg.group);
-            const entries = this.buildEntries(bg, vctx, layoutName);
+            const entries = this.buildEntries(bg, vctx, layoutName, bgIndex);
             // Per-entity bind-group reuse: only rebuild when a bound resource
             // changes identity (uniform buffer/sampler/view are all cached +
             // stable, so the common case is a cache hit → no new GPUBindGroup).
@@ -209,14 +250,16 @@ export class PipelineDriver {
         }
     }
 
-    private buildEntries(bg: BindGroupDecl, vctx: ValueContext, layoutName: string): GPUBindGroupEntry[] {
+    private buildEntries(bg: BindGroupDecl, vctx: ValueContext, layoutName: string, bgIndex: number): GPUBindGroupEntry[] {
         const entries: GPUBindGroupEntry[] = [];
 
         if (bg.uniform) {
             const layout = uniformLayouts.get(bg.uniform.layoutRef);
             const buf = layout.createBuffer();
-            for (const w of bg.uniform.writes) {
-                layout.write(buf, w.member, resolveValue(w.value, vctx));
+            const writes = bg.uniform.writes;
+            const compiled = this.compiledWrites[bgIndex];
+            for (let i = 0; i < writes.length; i++) {
+                layout.write(buf, writes[i].member, compiled[i](vctx));
             }
             const key = `bg_${this.path}_${bg.group}_${vctx.eid}`;
             entries.push({ binding: bg.uniform.binding ?? 0, resource: { buffer: resourceManager.getUniform(key, buf, layout.byteSize) } });
@@ -226,7 +269,11 @@ export class PipelineDriver {
             entries.push({ binding: s.binding, resource: resourceManager.namedSampler(s.name ?? 'default') });
         }
 
-        for (const t of bg.textures ?? []) {
+        const compiledTex = this.compiledTextureHandles[bgIndex] ?? [];
+        const textures = bg.textures ?? [];
+        for (let ti = 0; ti < textures.length; ti++) {
+            const t = textures[ti];
+            // Static sources (renderTarget:/asset:) — no per-entity resolution.
             if (t.source.startsWith('renderTarget:')) {
                 const rtName = t.source.slice('renderTarget:'.length);
                 entries.push({
@@ -244,7 +291,9 @@ export class PipelineDriver {
                 });
                 continue;
             }
-            const handle = resolveHandle(t.source, vctx);
+            // Per-entity handle source — use precompiled closure.
+            const handleFn = compiledTex[ti];
+            const handle = handleFn ? handleFn(vctx) : 0;
             const tex = resourceManager.getTextureByHandle(handle);
             entries.push({
                 binding: t.binding,
@@ -269,36 +318,30 @@ export class PipelineDriver {
         vctx: ValueContext,
     ): void {
         const steps = this.decl.geometry.steps ?? [];
-        for (const step of steps) {
-            // Resolve the mesh once per step (used by vertex buffers, index buffer, draw counts).
-            const meshName = resolveString(
-                step.indexBuffer?.mesh
-                ?? step.vertexBuffers?.find(vb => vb.source === 'meshSlots' || vb.source === 'meshField')?.mesh
-                ?? 'MeshComponent.mesh',
-                vctx,
-            );
+        for (let si = 0; si < steps.length; si++) {
+            const step = steps[si];
+            // Resolve mesh name via precompiled closure (avoids per-entity string parsing).
+            const meshNameFn = this.compiledMeshNames[si];
+            const meshName = meshNameFn ? meshNameFn(vctx) : 'MeshComponent.mesh';
             const mesh = meshName && resourceManager.hasMesh(meshName)
                 ? resourceManager.getMesh(meshName) : null;
 
             for (const vb of step.vertexBuffers ?? []) {
-                this.bindVertexBuffer(pass, vb, vctx);
+                this.bindVertexBuffer(pass, vb, vctx, meshName);
             }
             if (step.indexBuffer && mesh?.index) {
                 pass.setIndexBuffer(mesh.index, mesh.indexFormat);
             }
             const draw = step.draw;
             if (!draw) continue;
+            const compiled = this.compiledCounts[si];
             if (draw.type === 'drawIndexed') {
-                let count = draw.countField
-                    ? Number(resolveValue(draw.countField, vctx)) || 0
-                    : 0;
+                let count = compiled.count ? (Number(compiled.count(vctx)) || 0) : 0;
                 if (count === 0 && mesh) count = mesh.indexCount;
                 if (count > 0) pass.drawIndexed(count);
             } else {
                 const vCount = draw.vertexCount ?? 3;
-                let iCount = draw.instanceCountField
-                    ? Number(resolveValue(draw.instanceCountField, vctx)) || 1
-                    : (draw.instanceCount ?? 1);
+                let iCount = compiled.instance ? (Number(compiled.instance(vctx)) || 1) : (draw.instanceCount ?? 1);
                 // Fall back to mesh's edgeCount/pointCount for instanced-quad.
                 if (iCount <= 1 && mesh && draw.instanceCountField) {
                     const field = draw.instanceCountField.split('.').pop();
@@ -314,6 +357,7 @@ export class PipelineDriver {
         pass: GPURenderPassEncoder,
         vb: import('./rendererDecl').VertexBufferBinding,
         vctx: ValueContext,
+        meshName: string,
     ): void {
         if (vb.source === 'vbo') {
             const vboName = vb.vbo ?? 'quad';
@@ -324,7 +368,7 @@ export class PipelineDriver {
             pass.setVertexBuffer(vb.slot, buf);
             return;
         }
-        const meshName = resolveString(vb.mesh ?? 'MeshComponent.mesh', vctx);
+        // Use the mesh name already resolved by emitGeometry (avoids re-parsing).
         if (!meshName || !resourceManager.hasMesh(meshName)) return;
         const mesh = resourceManager.getMesh(meshName);
 
