@@ -49,6 +49,11 @@ export class RenderGraph implements System, IRenderer {
     private multiView = false;
     /** Scratch buffer for per-camera UBO uploads in multi-view mode. */
     private cameraData: Float32Array = new Float32Array(0);
+    /** Staging buffer for multi-view camera UBO updates: all cameras' data
+     *  is written here via queue.writeBuffer, then copyBufferToBuffer copies
+     *  each camera's slice into the shared camera UBO between render passes
+     *  within a single command encoder. Avoids per-camera submit. */
+    private cameraStagingBuffer: GPUBuffer | null = null;
 
     private valueScripts = new Map<string, (ctx: ValueContext) => number[] | number>();
     private geometryHooks = new Map<string, GeometryHook>();
@@ -129,6 +134,8 @@ export class RenderGraph implements System, IRenderer {
         // GPUBindGroups dereferenced now rather than after driver GC).
         for (const d of this.drivers) d.dispose();
         this.drivers = [];
+        this.cameraStagingBuffer?.destroy();
+        this.cameraStagingBuffer = null;
         this.removeHooksByOwner('app');
     }
 
@@ -443,9 +450,12 @@ export class RenderGraph implements System, IRenderer {
         ctx.device.queue.submit([encoder.finish()]);
     }
 
-    /** Multi-view path: per-frame behaviors (perCamera: false — e.g. shadow)
-     *  run once in stage 1; then each camera gets its own command buffer with
-     *  every perCamera behavior scoped to its viewport. */
+    /** Multi-view path: compute + per-frame behaviors + per-camera passes all
+     *  recorded into a single command encoder and submitted once. Per-camera
+     *  UBO updates use copyBufferToBuffer between passes (the staging buffer
+     *  holds all cameras' data, pre-written via queue.writeBuffer before the
+     *  encoder is built, so each copy loads the right camera's matrices
+     *  in-encoder-order without extra submits). */
     private executeMultiView(
         ctx: FrameContext, cw: number, ch: number, swapView: GPUTextureView, cameras: CameraView[],
     ): void {
@@ -455,11 +465,38 @@ export class RenderGraph implements System, IRenderer {
         // single screen target); validated out at compile(). Scene IS the screen.
         this.sceneIsScreen = true;
 
-        // ── stage 1: compute + per-frame behaviors, one submit ──
-        const enc0 = ctx.device.createCommandEncoder();
+        // ── Pre-write all cameras' data into the staging buffer ──
+        const camLayout = uniformLayouts.get('camera');
+        const camSize = camLayout.byteSize;
+        const requiredSize = cameras.length * camSize;
+        if (!this.cameraStagingBuffer || this.cameraStagingBuffer.size < requiredSize) {
+            this.cameraStagingBuffer?.destroy();
+            this.cameraStagingBuffer = ctx.device.createBuffer({
+                label: 'camera-staging',
+                size: requiredSize,
+                usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            });
+        }
+        const staging = this.cameraStagingBuffer;
+        const buf = this.cameraData;
+        for (let i = 0; i < cameras.length; i++) {
+            const cam = cameras[i];
+            camLayout.write(buf, 'vp', cam.vp);
+            camLayout.write(buf, 'ivp', cam.ivp);
+            camLayout.write(buf, 'pos', cam.pos);
+            camLayout.write(buf, 'view', cam.view);
+            camLayout.write(buf, 'proj', cam.proj);
+            ctx.device.queue.writeBuffer(staging, i * camSize, buf.buffer, buf.byteOffset, buf.byteLength);
+        }
+        const camUBO = resourceManager.cameraUBO;
+
+        // ── Single encoder for compute + per-frame + per-camera passes ──
+        const enc = ctx.device.createCommandEncoder();
+
+        // Stage 1: compute + per-frame behaviors (perCamera: false — e.g. shadow)
         for (const d of this.drivers) {
             if (!d.entry.enabled) continue;
-            d.compute(enc0, {
+            d.compute(enc, {
                 scene: ctx.scene,
                 time: ctx.time,
                 dt: ctx.dt,
@@ -471,16 +508,18 @@ export class RenderGraph implements System, IRenderer {
         for (const phase of this.phaseList) {
             const behavior = this.behaviorFor(phase);
             if (behavior.perCamera !== false) continue;
-            behavior.run(this.behaviorContext(ctx, enc0, phase, frame, cw, ch, swapView, cleared0, null));
+            behavior.run(this.behaviorContext(ctx, enc, phase, frame, cw, ch, swapView, cleared0, null));
         }
-        ctx.device.queue.submit([enc0.finish()]);
 
-        // ── stage 2: one command buffer per camera ──
-        // cleared is shared across cameras so the first camera clears the screen
-        // target and subsequent cameras load it (preserving prior viewports).
+        // Stage 2: per-camera passes — copy each camera's UBO slice, then run
+        // the perCamera behaviors scoped to its viewport. `cleared` is shared
+        // across cameras so the first camera clears the screen target and
+        // subsequent cameras load it (preserving prior viewports).
         const cleared = new Set<string>();
-        for (const cam of cameras) {
-            this.writeCameraUBO(cam);
+        for (let ci = 0; ci < cameras.length; ci++) {
+            const cam = cameras[ci];
+            // Copy this camera's data from staging into the shared camera UBO.
+            enc.copyBufferToBuffer(staging, ci * camSize, camUBO, 0, camSize);
             // Pixel rect, clamped to the framebuffer so 1px rounding on odd
             // canvas sizes can't overflow the scissor/viewport (WebGPU validation).
             let vx = Math.round(cam.viewport[0] * cw);
@@ -493,29 +532,14 @@ export class RenderGraph implements System, IRenderer {
             if (vy + vh > ch) vh = ch - vy;
             if (vw <= 0 || vh <= 0) continue;
             const vp: ViewportRect = { x: vx, y: vy, w: vw, h: vh };
-            const enc = ctx.device.createCommandEncoder();
             for (const phase of this.phaseList) {
                 const behavior = this.behaviorFor(phase);
                 if (behavior.perCamera === false) continue;
                 behavior.run(this.behaviorContext(ctx, enc, phase, frame, cw, ch, swapView, cleared, vp));
             }
-            ctx.device.queue.submit([enc.finish()]);
         }
-    }
 
-    /** Upload one camera's matrices to the shared camera UBO. Used by the
-     *  multi-view path only; the single-camera path relies on the camera system
-     *  having already written the primary camera's matrices. */
-    private writeCameraUBO(cam: CameraView): void {
-        const buf = this.cameraData;
-        const camLayout = uniformLayouts.get('camera');
-        camLayout.write(buf, 'vp', cam.vp);
-        camLayout.write(buf, 'ivp', cam.ivp);
-        camLayout.write(buf, 'pos', cam.pos);
-        camLayout.write(buf, 'view', cam.view);
-        camLayout.write(buf, 'proj', cam.proj);
-        const ubo = resourceManager.cameraUBO;
-        resourceManager.device.queue.writeBuffer(ubo, 0, buf.buffer, buf.byteOffset, buf.byteLength);
+        ctx.device.queue.submit([enc.finish()]);
     }
 
     /** Default 'normal' behavior body: merge consecutive enabled drivers that
