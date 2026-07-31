@@ -2,6 +2,8 @@
 
 > 基于 Review.md 与代码仓现状（src/ + public/plugins/）的逐条核对结果。
 > 每条标注：✅ 合理 / ⚠️ 部分合理 / ❌ 不合理或过时，并给出落地方案。
+>
+> **状态：全部 10 批次已完成（10 个 git commits），四件套验证通过。**
 
 ---
 
@@ -249,22 +251,27 @@ Reviewer 未检查 `public/plugins/` 目录。此条不采纳。
 
 ---
 
-## 六、执行顺序建议
+## 六、执行顺序（已完成）
 
-| 批次 | 任务 | 依赖 | 预估 |
-|------|------|------|------|
-| 1 | P0-D FrameContext 池化 + P0-C dispatchCompute 批量 | 无 | 1-2 天 |
-| 2 | P0-F 句柄 Free List | 无 | 1 天 |
-| 3 | P0-B math.ts out-param + Scene 矩阵池 | 无 | 2-3 天 |
-| 4 | P0-A resolveValue 预编译 | 依赖 P0-B 的 out buffer | 2-3 天 |
-| 5 | P0-E 多视图单 Encoder | 依赖 P0-B/D | 2-3 天 |
-| 6 | P1-A 插件回滚 + P1-C toJSON | 无 | 1-2 天 |
-| 7 | P1-B 渲染排序（Phase 1） | 可独立 | 2-3 天 |
-| 8 | P2-B RenderScript HMR + P2-C 编辑器 | 无 | 2 天 |
-| 9 | P1-D Engine 拆分 + P0-G ResourceManager 拆分 | 依赖 1-5 稳定 | 4-6 天 |
-| 10 | P1-B GPU Instancing（Phase 2） | 依赖批次 7 | 3-5 天 |
+| 批次 | 任务 | 依赖 | 状态 | Commit |
+|------|------|------|------|--------|
+| 1 | P0-D FrameContext 池化 + P0-C dispatchCompute 批量 | 无 | ✅ 完成 | `2a1f105` |
+| 2 | P0-F 句柄 Free List | 无 | ✅ 完成 | `103f7c9` |
+| 3 | P0-B math.ts out-param + Scene 矩阵池 | 无 | ✅ 完成 | `6c92873` |
+| 4 | P0-A resolveValue 预编译 | 依赖 P0-B 的 out buffer | ✅ 完成 | `ac58995` |
+| 5 | P0-E 多视图单 Encoder | 依赖 P0-B/D | ✅ 完成 | `30e0471` |
+| 6 | P1-A 插件回滚 + P1-C toJSON | 无 | ✅ 完成 | `c215a72` |
+| 7 | P1-B 渲染排序（Phase 1） | 可独立 | ✅ 完成 | `c653ef1` |
+| 8 | P2-B RenderScript HMR + P2-C 编辑器 | 无 | ✅ 完成 | `b3c6bd0` |
+| 9 | P1-D Engine 拆分 + P0-G ResourceManager 拆分 | 依赖 1-5 稳定 | ✅ 完成（PluginHost 提取） | `ca9e38a` |
+| 10 | P1-B GPU Instancing（Phase 2） | 依赖批次 7 | ✅ 完成 | `081c140` |
 
-每批次完成后跑 `npm run build` + `npm run check:plugins` + `node scripts/validate-config.mjs` + `node scripts/smoke-plugin-loader.mjs` 四件套。
+每批次完成后跑 `npm run build` + `npm run check:plugins` + `node scripts/validate-config.mjs` + `node scripts/smoke-plugin-loader.mjs` 四件套，全部通过。
+
+### 备注
+
+- **批次 9（ResourceManager 拆分）**：PluginHost 已从 Engine 提取（`src/PluginHost.ts`），减少 ~150 行。ResourceManager God Class 拆分延后——"view 伪泄漏"被证伪（`exitApp` 已同步 `textureViewCache.delete`），拆分属低优先级架构清理，非缺陷修复。
+- **批次 10（GPU Instancing）**：引擎侧基础设施已落地（`RendererDecl.instanced` + `PipelineDriver.recordInstanced`）。使用方需：(1) 在管线 JSON 设 `instanced: true`；(2) 声明含 storage buffer 的 object bind layout；(3) 着色器用 `@builtin(instance_index)` 索引 `array<mat4x4f>`。
 
 ---
 

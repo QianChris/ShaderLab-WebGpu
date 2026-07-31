@@ -139,3 +139,33 @@ export default class MyFxPlugin extends EnginePlugin {
 - `spriteEntity` uniform layout 仍在 core/uniform-layouts.json（sprite 插件的 SpritePipeline 引用它）；理论上应随 sprite 迁出，但 sprite 依赖 core 所以跨层引用可用。
 - gaussianSplat 用 `before: ['camera']` 自动插入，sort 使用上一帧 camera 数据（一帧延迟，对排序可接受）。
 - PhysicsWorld 多控制器冲突检测未实现（P3 暂缓）；当前多 `PhysicsControllerComponent` 会静默用最后一个。
+
+## 性能优化（已落地）
+
+### 热路径
+
+- **FrameContext 池化**：`Engine.frameCtx` 在 `init()` 一次性创建（闭包绑定 `this` + 模块单例），每帧只更新 `time`/`dt`/`aspect`/`cw`/`ch`。不再每帧 `new` 14 字段对象 + 4 闭包。
+- **dispatchCompute 批量**：`FrameContext.dispatchCompute` 将 dispatch 录入帧级 compute pass（`pendingComputeEncoder`/`pendingComputePass`），由 `flushCompute()` 统一提交。渲染器在 `execute()` 开头调 `ctx.flushCompute()` 保证 compute 结果同帧可见。
+- **resolveValue 预编译**：`valueResolver.compileValue(src)` 在 `PipelineDriver` 构造期将值源字符串编译为 `CompiledValue` 闭包。运行时每实体每帧只执行闭包——无 `indexOf`/`split`/`schemaRegistry.get` 字符串解析。纹理句柄、mesh 名、draw count 同样预编译。
+- **math out-param**：`mat4MulInto`/`mat4InverseInto`/`mat4FromTRSInto`/`mat4PerspectiveInto`/`normalMatrixInto`/`buildCameraMatricesInto` 写入调用方提供的 `out: Float32Array`，避免 `new Float32Array(16)`。`Scene.getModelMatrix(eid, out?)` 默认用 scratch；`getActiveCameras` 用预分配 `CameraView` 池（Float32Array 字段复用）。所有 `*Into` 变体经 `api.ts` 导出。
+- **多视图单 Encoder**：`executeMultiView` 将 compute + per-frame + per-camera 全部录入一个 `GPUCommandEncoder`，末尾一次 `submit`（原 1+N 次）。相机 UBO 更新用 `copyBufferToBuffer` 从 staging buffer 在 encoder 内按相机顺序复制（解决 write-after-write 冒险）。
+
+### 资源管理
+
+- **句柄 Free List**：`ResourceManager.bufferFreeList`/`textureFreeList` 回收销毁资源的句柄索引，分配时优先复用。句柄表大小与存活资源数成正比，不再只增不减。
+- **插件加载回滚**：`PluginManager.loadOne` 在 `init`/`applyDeclarations`/`setup` 失败时调 `sweepOwner` 完全回滚已注册声明（schema/uniform/pipeline/hook/tool/atom/attachment），防止半初始化状态泄漏给依赖插件。
+
+### 渲染排序与 Instancing
+
+- **渲染排序（Phase 1）**：`PipelineDriver.record` 在有相机位置 + >1 实体时按距离排序。`RendererDecl.transparent: true` → 远→近（painter's）；默认（opaque）→ 近→远（early-z）。排序缓冲对象复用，不每帧分配。多视图时每相机用各自 `cameraPos`。
+- **GPU Instancing（Phase 2）**：`RendererDecl.instanced: true` → `PipelineDriver.recordInstanced` 将所有匹配实体的 model 矩阵写入 storage buffer（`array<mat4x4f>`），一次 `drawIndexed(count, instanceCount)` 绘制全部实例。**着色器契约**：顶点着色器必须用 `@builtin(instance_index)` 索引 storage buffer；object bind layout 必须声明 storage buffer（非 uniform）。与 `transparent` 不兼容（instancing 忽略逐实例排序）。
+
+### 编辑器
+
+- **虚拟滚动**：`EditorPanel` 实体列表用虚拟滚动——仅渲染可见行 + overscan 缓冲，滚动位置跨重渲染保持。DOM 节点数与可见行数成正比，不随实体数线性增长。
+- **Undo/Redo**：`PipelinePanel` 维护 JSON 快照栈（`history`/`future`），每次变更前调 `snapshot()`。`Ctrl+Z` = undo，`Ctrl+Y`/`Ctrl+Shift+Z` = redo。面板 `tabIndex=0` 可聚焦接收键盘事件。
+- **RenderScript HMR**：`RenderScriptLoader.load` 在 `import.meta.env.DEV` 跳过 `loaded` Map 缓存，脚本编辑无需刷新页面即可生效。
+
+### 架构
+
+- **PluginHost 提取**：`src/PluginHost.ts` 封装插件声明应用（`applyDeclarations`）、owner 清扫（`sweepOwner`）、render-hook 注册、mesh-catalog 构建。Engine 在 `init()` 创建 `PluginHostHelper` 并委托。减少 Engine ~150 行，使插件注册生命周期可独立测试。`Engine.customRenderer`/`customRendererOwner`/`pluginLedgers` 改为 public 供 helper 访问。
