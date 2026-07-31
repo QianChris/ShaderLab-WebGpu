@@ -54,7 +54,7 @@ export function apiModuleUrl(): string {
         : `${location.origin}/assets/engine-api.js`;
 }
 
-class PluginManager {
+export class PluginManager {
     private host: PluginHost | null = null;
     private loaded = new Map<string, LoadedPlugin>();
     /** Topological load order (dependencies before dependents). */
