@@ -8,11 +8,12 @@ import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
-import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
+import { PRESET_MESHES, PRESET_PBR_MESHES, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
 import { loadVertexSlots, removeVertexSlotsByOwner, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
+import { PluginHostHelper, type PluginLedger } from './PluginHost';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
 import type { RenderGraphData, IRenderer } from './render/types';
 
@@ -82,13 +83,9 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 };
 
 /** Tracks what a plugin registered through its ctx / declarations, so the
- *  open registries (tools, generators, atoms, phases) can be swept on unload. */
-interface PluginLedger {
-    tools: string[];
-    generators: string[];
-    atoms: Array<[string, string]>;
-    phases: string[];
-}
+ *  open registries (tools, generators, atoms, phases) can be swept on unload.
+ *  Re-exported from PluginHost for back-compat with any internal consumers. */
+export type { PluginLedger } from './PluginHost';
 
 export class Engine {
     device!: GPUDevice;
@@ -113,10 +110,12 @@ export class Engine {
     /** Plain-object view of attachments handed to FrameContext / hooks. */
     private attachmentsView: Record<string, unknown> = {};
     /** Per-plugin registration ledger (for owner sweeps of open registries). */
-    private pluginLedgers = new Map<string, PluginLedger>();
+    pluginLedgers = new Map<string, PluginLedger>();
     /** Replacement renderer installed via ctx.replaceRenderer (null = built-in). */
-    private customRenderer: IRenderer | null = null;
-    private customRendererOwner: string | null = null;
+    customRenderer: IRenderer | null = null;
+    customRendererOwner: string | null = null;
+    /** Extracted plugin declaration/sweep logic (reduces Engine God Class). */
+    private pluginHost!: PluginHostHelper;
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
@@ -198,11 +197,12 @@ export class Engine {
         // goes through the registries populated below. All capability systems
         // (input/script/camera/light/animation/render/physics/…) come from here.
         PipelineLoader.pluginsRoot = this.engineConfig.pluginsRoot ?? '/plugins';
+        this.pluginHost = new PluginHostHelper(this);
         pluginManager.configure({
             pluginsRoot: this.engineConfig.pluginsRoot ?? '/plugins',
             makeCtx: (id, baseUrl) => this.makePluginContext(id, baseUrl),
-            applyDeclarations: (id, plugin) => this.applyPluginDeclarations(id, plugin),
-            sweepOwner: (owner) => this.sweepPluginOwner(owner),
+            applyDeclarations: (id, plugin) => this.pluginHost.applyDeclarations(id, plugin, pluginOwner(id)),
+            sweepOwner: (owner) => this.pluginHost.sweepOwner(owner),
             beginOwner: (owner) => {
                 const prev = resourceManager.currentOwnerId;
                 resourceManager.enterApp(owner);
@@ -229,7 +229,7 @@ export class Engine {
     /** Build the per-plugin context: identity (baseUrl) + owner-tracked registration surface. */
     private makePluginContext(id: string, baseUrl: string): PluginContext {
         const owner = pluginOwner(id);
-        const ledger = this.ledgerFor(owner);
+        const ledger = this.pluginHost.ledgerFor(owner);
         return {
             device: this.device,
             scene: this.scene,
@@ -240,7 +240,7 @@ export class Engine {
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
             registerAttachment: (name, obj) => this.setAttachment(name, obj, owner),
-            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn, owner),
+            registerRenderHook: (name, fn) => this.pluginHost.registerRenderHook(name, fn, owner),
             registerPhaseBehavior: (name, behavior) => this.renderGraph.registerPhaseBehavior(name, behavior, owner),
             replaceRenderer: (r) => {
                 // Renderer seam: swap the 'render' system dispatch target. The
@@ -268,132 +268,11 @@ export class Engine {
         };
     }
 
-    private ledgerFor(owner: string): PluginLedger {
-        let ledger = this.pluginLedgers.get(owner);
-        if (!ledger) {
-            ledger = { tools: [], generators: [], atoms: [], phases: [] };
-            this.pluginLedgers.set(owner, ledger);
-        }
-        return ledger;
-    }
-
-    /** One name, all three hook namespaces (mirrors RenderScriptLoader.loadAll). */
-    private registerRenderHook(name: string, fn: unknown, owner: string): void {
-        this.renderGraph.registerValueScript(name, fn as never, owner);
-        this.renderGraph.registerGeometryHook(name, fn as never, owner);
-        this.renderGraph.registerComputeHook(name, fn as never, owner);
-    }
-
-    /** Merge a plugin's declaration fields into the engine registries. */
-    private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
-        const owner = pluginOwner(id);
-        const ledger = this.ledgerFor(owner);
-        if (plugin.components) schemaRegistry.registerDefs(plugin.components, owner);
-        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts, owner);
-        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots, owner);
-        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs, owner);
-        if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
-        if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
-        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets, owner);
-        if (plugin.fallbackTextures) resourceManager.loadFallbackTextures(plugin.fallbackTextures);
-        if (plugin.vboPresets) resourceManager.loadVboPresets(plugin.vboPresets);
-        if (plugin.renderTargets) {
-            resourceManager.loadRenderTargets(plugin.renderTargets);
-            this.renderGraph.mergeRenderTargets(plugin.renderTargets);
-        }
-        if (plugin.phases) {
-            this.renderGraph.addPhases(plugin.phases);
-            for (const p of plugin.phases) ledger.phases.push(p.name);
-        }
-        if (plugin.meshes) this.registerMeshCatalog(plugin.meshes);
-        if (plugin.systemDefs) {
-            for (const def of plugin.systemDefs) systemRegistry.addDef(def, owner);
-        }
-        if (plugin.pipelines) {
-            for (const [key, config] of Object.entries(plugin.pipelines)) {
-                PipelineLoader.registerVirtualConfig(key.includes(':') ? key : `${id}:${key}`, config);
-            }
-        }
-        if (plugin.shaders) {
-            for (const [key, src] of Object.entries(plugin.shaders)) {
-                PipelineLoader.registerVirtualShader(key.includes(':') ? key : `${id}:${key}`, src);
-            }
-        }
-        if (plugin.renderHooks) {
-            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn, owner);
-        }
-        if (plugin.meshGenerators) {
-            for (const [name, fn] of Object.entries(plugin.meshGenerators)) {
-                registerMeshGenerator(name, fn);
-                ledger.generators.push(name);
-            }
-        }
-        if (plugin.toolTypes) {
-            for (const [name, factory] of Object.entries(plugin.toolTypes)) {
-                registerToolType(name, factory);
-                ledger.tools.push(name);
-            }
-        }
-        if (plugin.valueAtoms) {
-            for (const [ns, atoms] of Object.entries(plugin.valueAtoms)) {
-                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
-                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
-            }
-        }
-    }
-
-    /** Release everything a plugin registered (called on plugin unload). */
-    private sweepPluginOwner(owner: string): void {
-        resourceManager.exitApp(owner);
-        bufferRegistry.exitApp(owner);
-        systemRegistry.removeDefsByOwner(owner);
-        systemRegistry.removeSystemsByOwner(owner);
-        schemaRegistry.removeOwner(owner);
-        uniformLayouts.removeOwner(owner);
-        removeVertexSlotsByOwner(owner);
-        PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
-        PipelineLoader.removeInputsByOwner(owner);
-        PipelineLoader.removeBlendPresetsByOwner(owner);
-        this.renderGraph.removeHooksByOwner(owner);
-        this.renderGraph.removePhaseBehaviorsByOwner(owner);
-        if (this.customRendererOwner === owner) {
-            // The replacement renderer is gone — restore the built-in graph.
-            this.customRenderer = null;
-            this.customRendererOwner = null;
-            systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
-        }
-        for (const [name, entry] of this.attachments) {
-            if (entry.owner === owner) this.deleteAttachment(name);
-        }
-        const ledger = this.pluginLedgers.get(owner);
-        if (ledger) {
-            for (const t of ledger.tools) unregisterToolType(t);
-            for (const g of ledger.generators) unregisterMeshGenerator(g);
-            for (const [ns, name] of ledger.atoms) {
-                if (atomNamespaces[ns]) delete atomNamespaces[ns][name];
-            }
-            if (ledger.phases.length > 0) this.renderGraph.removePhases(ledger.phases);
-            this.pluginLedgers.delete(owner);
-        }
-    }
-
-    /** Build meshes from a catalog (meshes.json or a plugin `meshes` field). */
-    private registerMeshCatalog(entries: MeshCatalogEntry[]): void {
-        for (const entry of entries) {
-            const gen = meshGenerators[entry.generator];
-            if (!gen) {
-                throw new Error(
-                    `Mesh catalog entry '${entry.name}' references unknown generator '${entry.generator}' ` +
-                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
-                );
-            }
-            const data = gen(entry.params ?? {});
-            if (isPbrMeshData(data)) {
-                resourceManager.registerPbrMesh(entry.name, data);
-            } else {
-                resourceManager.registerMesh(entry.name, data);
-            }
-        }
+    /** Restore the built-in renderer after a replacement renderer's owner is swept. */
+    restoreBuiltinRenderer(): void {
+        this.customRenderer = null;
+        this.customRendererOwner = null;
+        systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
     }
 
     /** The active renderer: a plugin replacement when installed, else the built-in graph. */
