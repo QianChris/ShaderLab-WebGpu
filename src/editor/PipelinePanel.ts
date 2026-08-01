@@ -1,4 +1,4 @@
-import type { Engine } from '../Engine';
+import type { EditorHost } from './EditorHost';
 import { type PipelineEntry, type PipelineConfig } from '../render/types';
 import { PipelineLoader } from '../render/PipelineLoader';
 import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
@@ -14,7 +14,7 @@ const COMPARE_OPTIONS: string[] = [
 
 export class PipelinePanel {
     private panel: HTMLElement;
-    private engine!: Engine;
+    private host!: EditorHost;
     /** Undo/redo stacks: JSON snapshots of render graph data (phases + params). */
     private history: string[] = [];
     private future: string[] = [];
@@ -30,8 +30,8 @@ export class PipelinePanel {
         this.panel = container;
     }
 
-    attach(engine: Engine): void {
-        this.engine = engine;
+    attach(host: EditorHost): void {
+        this.host = host;
         this.panel.tabIndex = 0;
         this.panel.addEventListener('keydown', (e) => {
             if (e.ctrlKey && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
@@ -46,7 +46,7 @@ export class PipelinePanel {
 
     /** Snapshot the current render graph state before a mutation (for undo). */
     private snapshot(): void {
-        const data = JSON.stringify(this.engine.renderGraph.toData());
+        const data = JSON.stringify(this.host.renderGraph.toData());
         this.history.push(data);
         if (this.history.length > this.MAX_HISTORY) this.history.shift();
         this.future.length = 0;
@@ -54,19 +54,19 @@ export class PipelinePanel {
 
     private undo(): void {
         if (this.history.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
+        const current = JSON.stringify(this.host.renderGraph.toData());
         this.future.push(current);
         const prev = this.history.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(prev));
+        this.host.renderGraph.fromData(JSON.parse(prev));
         this.render();
     }
 
     private redo(): void {
         if (this.future.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
+        const current = JSON.stringify(this.host.renderGraph.toData());
         this.history.push(current);
         const next = this.future.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(next));
+        this.host.renderGraph.fromData(JSON.parse(next));
         this.render();
     }
 
@@ -77,8 +77,8 @@ export class PipelinePanel {
         head.appendChild(ce('span', 'ed-title', 'Render Pipeline'));
         this.panel.appendChild(head);
 
-        const phases = this.engine.renderGraph.phases;
-        const phaseNames = this.engine.renderGraph.getPhaseNames();
+        const phases = this.host.renderGraph.phases;
+        const phaseNames = this.host.renderGraph.getPhaseNames();
         for (const phase of phaseNames) {
             const section = ce('div', 'pp-phase');
             section.appendChild(ce('div', 'pp-phase-title', phase));
@@ -135,7 +135,7 @@ export class PipelinePanel {
     private renderConfig(entry: PipelineEntry, config: PipelineConfig): HTMLElement {
         const box = ce('div', 'pp-config');
         const recompile = (): void => {
-            this.engine.renderGraph.rebuildPipeline(this.engine.device, entry.pipeline);
+            this.host.renderGraph.rebuildPipeline(this.host.engine.device, entry.pipeline);
         };
 
         // ── Primitive ──

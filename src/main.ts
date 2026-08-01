@@ -1,4 +1,5 @@
 import { Engine } from './Engine';
+import { EditorHost } from './editor/EditorHost';
 import { EditorPanel } from './editor/EditorPanel';
 import { PipelinePanel } from './editor/PipelinePanel';
 
@@ -36,11 +37,12 @@ async function main(): Promise<void> {
         window.addEventListener('resize', () => engine.resize());
 
         const editor = new EditorPanel(editorEl);
-        editor.attach(engine);
-        editor.render();
-
         const pipelinePanel = new PipelinePanel(pipelineEl);
-        pipelinePanel.attach(engine);
+
+        const host = new EditorHost(engine);
+        editor.attach(host);
+        editor.render();
+        pipelinePanel.attach(host);
         pipelinePanel.render();
 
         setupTabs();
@@ -68,6 +70,7 @@ async function main(): Promise<void> {
         editor.onAppSwitch = switchToApp;
         (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = switchToApp;
         (window as unknown as { engine: unknown }).engine = engine;
+        (window as unknown as { host: unknown }).host = host;
 
         console.log('[ShaderLab] initialized');
         console.log('[ShaderLab] scene:', JSON.stringify(engine.exportScene(), null, 2));

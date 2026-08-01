@@ -268,6 +268,11 @@ export class Scene {
         return [...schemaRegistry.comps.keys()];
     }
 
+    /** Return the component names registered on a specific entity. */
+    getEntityComponentNames(eid: number): string[] {
+        return this.entityComponents.get(eid) ?? [];
+    }
+
     getEnvironmentAmbient(): [number, number, number, number] {
         const comp = schemaRegistry.get('EnvironmentComponent')!;
         for (const [, eid] of this.entityKeyMap) {
