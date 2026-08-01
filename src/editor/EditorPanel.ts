@@ -9,6 +9,12 @@ export class EditorPanel {
     private syncers: (() => void)[] = [];
     private syncTimer = 0;
     private lastEntityCount = -1;
+    /** Scroll position of the entity list (preserved across re-renders). */
+    private entityScrollTop = 0;
+    /** Estimated entity row height in pixels (matches CSS ed-ent-row). */
+    private readonly ROW_H = 28;
+    /** Maximum visible rows in the entity list viewport. */
+    private readonly VISIBLE_ROWS = 18;
     /** Called when loadJSON receives an app.json manifest; main.ts wires this to
      *  engine.loadApp + panel refresh so glTF / render graph / tools all reload. */
     onAppSwitch?: (name: string) => Promise<void>;
@@ -49,7 +55,7 @@ export class EditorPanel {
         head.appendChild(btns);
         this.panel.appendChild(head);
 
-        // ── Entity list ──
+        // ── Entity list (virtual scroll) ──
         const list = ce('div', 'ed-ent-list');
         const listHead = ce('div', 'ed-ent-list-head');
         listHead.appendChild(ce('span', '', 'Entities'));
@@ -59,15 +65,26 @@ export class EditorPanel {
         listHead.appendChild(ab);
         list.appendChild(listHead);
 
-        const rows = ce('div', 'ed-ent-rows');
-        for (const { key } of scene.getAllEntities()) {
-            const row = ce('div', `ed-ent-row ${this.selected === key ? 'ed-ent-sel' : ''}`);
-            const name = scene.getField(scene.entityKeyMap.get(key)!, 'NameComponent', 'name') as string ?? key;
-            row.appendChild(ce('span', 'ed-ent-name', name));
-            row.onclick = () => { this.selected = key; this.render(); };
-            rows.appendChild(row);
-        }
-        list.appendChild(rows);
+        const allEntities = scene.getAllEntities();
+        const total = allEntities.length;
+        const rowsScroll = ce('div', 'ed-ent-rows');
+        rowsScroll.style.maxHeight = `${this.ROW_H * this.VISIBLE_ROWS}px`;
+        rowsScroll.style.overflowY = 'auto';
+        rowsScroll.style.position = 'relative';
+        rowsScroll.scrollTop = this.entityScrollTop;
+        rowsScroll.onscroll = () => {
+            this.entityScrollTop = rowsScroll.scrollTop;
+            this.renderVisibleRows(content, allEntities);
+        };
+
+        // Content container sized to the full list height so the scrollbar
+        // reflects the true entity count; only visible rows are in the DOM.
+        const content = ce('div');
+        content.style.height = `${total * this.ROW_H}px`;
+        content.style.position = 'relative';
+        this.renderVisibleRows(content, allEntities);
+        rowsScroll.appendChild(content);
+        list.appendChild(rowsScroll);
 
         if (!this.selected && scene.entityKeyMap.size > 0) {
             this.selected = [...scene.entityKeyMap.keys()][0];
@@ -79,6 +96,34 @@ export class EditorPanel {
             const eid = scene.entityKeyMap.get(this.selected)!;
             const detail = this.renderDetail(eid);
             this.panel.appendChild(detail);
+        }
+    }
+
+    /** Render only the entity rows visible in the scroll viewport (+ a small
+     *  overscan buffer). Rows are absolutely positioned within the content
+     *  container so the scrollbar reflects the true entity count without
+     *  materializing a DOM node per entity. */
+    private renderVisibleRows(content: HTMLElement, allEntities: { key: string }[]): void {
+        content.innerHTML = '';
+        const total = allEntities.length;
+        const overscan = 5;
+        const start = Math.max(0, Math.floor(this.entityScrollTop / this.ROW_H) - overscan);
+        const end = Math.min(total, start + this.VISIBLE_ROWS + overscan * 2);
+        for (let i = start; i < end; i++) {
+            const { key } = allEntities[i];
+            const row = ce('div', `ed-ent-row ${this.selected === key ? 'ed-ent-sel' : ''}`);
+            row.style.position = 'absolute';
+            row.style.top = `${i * this.ROW_H}px`;
+            row.style.height = `${this.ROW_H}px`;
+            row.style.width = '100%';
+            row.style.boxSizing = 'border-box';
+            const eid = this.engine.scene.entityKeyMap.get(key);
+            const name = eid != null
+                ? (this.engine.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
+                : key;
+            row.appendChild(ce('span', 'ed-ent-name', name));
+            row.onclick = () => { this.selected = key; this.render(); };
+            content.appendChild(row);
         }
     }
 

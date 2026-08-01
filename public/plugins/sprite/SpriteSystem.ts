@@ -30,8 +30,12 @@ interface SheetData {
  *   "pingpong" – forward then backward (0,1,…,n-1,n-2,…,1,0,1,…)
  *   "loop"     – wrap around (0,1,…,n-1,0,1,…)
  *   "once"     – play forward once then stop (sets playing=0)
+ *
+ * Migrated from core/AnimationSystem.ts — the sprite plugin now owns the
+ * component declarations, the system, and the pipeline. The system name
+ * remains 'animation' (systems.json order unchanged).
  */
-export class AnimationSystem implements System {
+export class SpriteSystem implements System {
     private scene!: Scene;
     private baseDir = '';
     private sheets = new Map<string, SheetData | null>();
@@ -80,11 +84,6 @@ export class AnimationSystem implements System {
             scene.setField(eid, 'SpriteSheetComponent', 'columns', sheet.columns);
             scene.setField(eid, 'SpriteSheetComponent', 'rows', sheet.rows);
 
-            // Drive the texture load from update() (mirrors getSheet's retry
-            // pattern): if the sheet is loaded but the texture handle is still
-            // missing and no load is in flight, (re)start it. This self-heals
-            // transient texture-load failures (fetch/createImageBitmap hiccups)
-            // instead of leaving the sprite permanently on the white fallback.
             if (!this.texHandles.has(sheetPath) && !this.texLoading.has(sheetPath)) {
                 this.loadTexture(sheetPath, sheet);
             }
@@ -169,9 +168,7 @@ export class AnimationSystem implements System {
                     this.sheets.set(path, data as SheetData);
                 })
                 .catch(err => {
-                    console.error(`[AnimationSystem] failed to load sheet '${path}' (will retry):`, err);
-                    // Do NOT cache the failure — leave sheets.get(path) undefined so
-                    // the next update() tick retries (mirrors ScriptSystem's pattern).
+                    console.error(`[SpriteSystem] failed to load sheet '${path}' (will retry):`, err);
                 })
                 .finally(() => { this.loading.delete(path); });
         }
@@ -181,8 +178,6 @@ export class AnimationSystem implements System {
     private loadTexture(sheetPath: string, data: SheetData): void {
         const texPath = data.texture;
         if (!texPath) {
-            // Sheet declares no texture: record handle 0 (white fallback) so
-            // update() does not retry every frame.
             this.texHandles.set(sheetPath, 0);
             this.texLoading.delete(sheetPath);
             return;
@@ -194,9 +189,7 @@ export class AnimationSystem implements System {
                 this.texHandles.set(sheetPath, resourceManager.textureHandle(texUrl));
             })
             .catch(err => {
-                console.error(`[AnimationSystem] failed to load texture '${texUrl}' (will retry):`, err);
-                // ResourceManager.loadTexture does not cache on failure, so the
-                // next update() tick will re-fetch + re-decode and self-heal.
+                console.error(`[SpriteSystem] failed to load texture '${texUrl}' (will retry):`, err);
             })
             .finally(() => { this.texLoading.delete(sheetPath); });
     }

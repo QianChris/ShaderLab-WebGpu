@@ -45,8 +45,15 @@ export interface FrameContext {
      *  `renderScripts` or referenced by an enabled pipeline's `aux`). `count`
      *  is the logical item count; the workgroup count is derived from the
      *  pipeline's declared workgroupSize (in computeTgs). Optional `entries`
-     *  build a fresh bind group against @group(0) for this dispatch. */
+     *  build a fresh bind group against @group(0) for this dispatch.
+     *  Dispatches are batched into one compute pass per frame and submitted
+     *  together by `flushCompute()` (called by the renderer before recording
+     *  render passes, and again at end of frame as a safety net). */
     dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void;
+    /** Submit any compute dispatches batched since the last flush. Called by
+     *  the renderer at the start of execute() so compute results are visible
+     *  to the render passes that follow in the same frame. */
+    flushCompute(): void;
 }
 
 /** Uniform interface every system — builtin or script-loaded — must satisfy. */
@@ -65,6 +72,11 @@ export interface SystemDef {
     buffers?: SystemBufferDecl[];
     needs?: string[];
     requires?: string[];
+    /** Auto-insert ordering: insert this system AFTER these systems (only when
+     *  the app uses the default common/systems.json, not a custom override). */
+    after?: string[];
+    /** Auto-insert ordering: insert this system BEFORE these systems. */
+    before?: string[];
 }
 
 /** A buffer declared in a system def's `ubos` or `buffers` array.
@@ -188,6 +200,40 @@ class SystemRegistry {
     /** All currently-loaded system defs (for BufferRegistry to scan). */
     allDefs(): Iterable<[string, SystemDef]> {
         return this.defs.entries();
+    }
+
+    /** Auto-insert systems that declared after/before deps but aren't in the
+     *  active list. Only called when the app uses the default common/systems.json
+     *  (no custom override). Systems without after/before declarations are NOT
+     *  auto-inserted — they must be explicitly listed in systems.json. */
+    autoInsert(activeList: SystemEntry[]): SystemEntry[] {
+        const listed = new Set(activeList.map(s => s.name));
+        const toInsert: SystemDef[] = [];
+        for (const [, entry] of this.injectedDefs) {
+            const def = entry.def;
+            if (listed.has(def.name)) continue;
+            if ((def.after?.length ?? 0) > 0 || (def.before?.length ?? 0) > 0) {
+                toInsert.push(def);
+            }
+        }
+        if (toInsert.length === 0) return activeList;
+
+        const result = [...activeList];
+        for (const def of toInsert) {
+            let afterIdx = -1;
+            for (const n of def.after ?? []) {
+                const idx = result.findIndex(s => s.name === n);
+                if (idx > afterIdx) afterIdx = idx;
+            }
+            let beforeIdx = result.length;
+            for (const n of def.before ?? []) {
+                const idx = result.findIndex(s => s.name === n);
+                if (idx >= 0 && idx < beforeIdx) beforeIdx = idx;
+            }
+            const insertAt = Math.max(0, Math.min(afterIdx + 1, beforeIdx));
+            result.splice(insertAt, 0, { name: def.name });
+        }
+        return result;
     }
 
     /** Pre-load system def JSON files + any script systems for the given

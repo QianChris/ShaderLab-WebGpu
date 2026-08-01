@@ -1,4 +1,4 @@
-import { normalMatrix as computeNormalMatrix } from '../math';
+import { normalMatrixInto } from '../math';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
 import type { Scene } from '../ecs/Scene';
 
@@ -12,14 +12,15 @@ export interface ValueContext {
     aspect: number;
     screenW: number;
     screenH: number;
-    /** Lazily-computed model matrix for the current entity. */
+    /** Lazily-computed model matrix for the current entity. Returns a reference
+     *  to a scratch buffer — consume immediately, do not retain across calls. */
     model(): Float32Array;
     /** Named value scripts (script:file.fn) resolved at compile time. */
     scripts: Map<string, (ctx: ValueContext) => number[] | number>;
 }
 
 /** A resolver for a single field within a namespace (e.g. builtin.time, transform.model). */
-export type AtomResolver = (ctx: ValueContext) => number | number[];
+export type AtomResolver = (ctx: ValueContext) => number | ArrayLike<number>;
 
 /** Resolver tables for each namespace prefix (builtin, transform, tag). */
 export const atomNamespaces: Record<string, Record<string, AtomResolver>> = {
@@ -27,6 +28,11 @@ export const atomNamespaces: Record<string, Record<string, AtomResolver>> = {
     transform: {},
     tag: {},
 };
+
+/** Scratch buffers for transform atoms — reused per resolve to avoid
+ *  allocation. Safe because resolved values are consumed immediately by
+ *  UniformLayout.write before the next resolve overwrites the scratch. */
+const _scratchNormal = new Float32Array(12);
 
 // ── Register known builtins ──
 atomNamespaces.builtin = {
@@ -40,8 +46,10 @@ atomNamespaces.builtin = {
 
 // ── Register known transform values ──
 atomNamespaces.transform = {
-    model:        (ctx) => Array.from(ctx.model()),
-    normalMatrix: (ctx) => Array.from(computeNormalMatrix(ctx.model())),
+    // Return the model scratch buffer directly (no Array.from copy).
+    model:        (ctx) => ctx.model(),
+    // Compute into a scratch buffer; safe because consumed immediately.
+    normalMatrix: (ctx) => normalMatrixInto(ctx.model(), _scratchNormal),
 };
 
 // ── Register known tag resolvers ──
@@ -62,7 +70,7 @@ atomNamespaces.tag = {
  *   const:1,2,3                numeric literal
  *   script:file.fn             escape-hatch script returning number|number[]
  */
-export function resolveValue(src: string, ctx: ValueContext): number | number[] {
+export function resolveValue(src: string, ctx: ValueContext): number | ArrayLike<number> {
     const colon = src.indexOf(':');
     const prefix = colon >= 0 ? src.slice(0, colon) : '';
     const rest = colon >= 0 ? src.slice(colon + 1) : src;
@@ -88,7 +96,7 @@ export function resolveValue(src: string, ctx: ValueContext): number | number[] 
 }
 
 /** Resolve a single (non-prefixed) atom: numeric literal, dotted path, builtin, or tag. */
-function resolveAtom(src: string, ctx: ValueContext): number | number[] {
+function resolveAtom(src: string, ctx: ValueContext): number | ArrayLike<number> {
     // Numeric literal first, so values like '0.5' never parse as Comp.field.
     const asNum = Number(src);
     if (!Number.isNaN(asNum)) return asNum;
@@ -129,8 +137,12 @@ function packValues(list: string, ctx: ValueContext): number[] {
         if (token === '') continue;
         if (/^-?\d*\.?\d+$/.test(token)) { out.push(Number(token)); continue; }
         const v = resolveAtom(token, ctx);
-        if (Array.isArray(v)) out.push(...v);
-        else out.push(v);
+        if (typeof v === 'number') {
+            out.push(v);
+        } else {
+            // ArrayLike<number> (number[] or Float32Array) — copy all elements
+            for (let i = 0; i < v.length; i++) out.push(v[i]);
+        }
     }
     return out;
 }
@@ -138,7 +150,7 @@ function packValues(list: string, ctx: ValueContext): number[] {
 /** Resolve a value-source expected to be a single integer handle (textures, etc). */
 export function resolveHandle(src: string, ctx: ValueContext): number {
     const v = resolveValue(src, ctx);
-    return Array.isArray(v) ? (v[0] ?? 0) : v;
+    return typeof v === 'number' ? v : (v[0] ?? 0);
 }
 
 /** Resolve a value-source expected to be a string (mesh names). */
@@ -150,4 +162,123 @@ export function resolveString(src: string, ctx: ValueContext): string {
     if (head === 'builtin' || head === 'transform' || head === 'tag') return src;
     const v = ctx.scene.getField(ctx.eid, head, field);
     return typeof v === 'string' ? v : String(v ?? '');
+}
+
+// ── Compile-time precompilation ──────────────────────────────────
+// The functions below pre-compile value-source strings into closures at
+// pipeline-construction time, so the per-entity hot path only invokes a
+// closure — no indexOf/split/schemaRegistry.get string parsing per frame.
+
+/** A precompiled value source: call with a ValueContext to get the value. */
+export type CompiledValue = (ctx: ValueContext) => number | ArrayLike<number>;
+
+/** Precompile a value-source string into a closure. */
+export function compileValue(src: string): CompiledValue {
+    const colon = src.indexOf(':');
+    const prefix = colon >= 0 ? src.slice(0, colon) : '';
+    const rest = colon >= 0 ? src.slice(colon + 1) : src;
+
+    switch (prefix) {
+        case 'pack':
+            return compilePack(rest);
+        case 'const': {
+            const nums = rest.split(',').map(s => Number(s.trim()));
+            return () => nums;
+        }
+        case 'script':
+            return (ctx) => {
+                const fn = ctx.scripts.get(rest);
+                if (!fn) {
+                    throw new Error(
+                        `Value script '${rest}' not found — is its file listed in render.json "renderScripts" ` +
+                        `and does it export that function?`,
+                    );
+                }
+                return fn(ctx);
+            };
+        default:
+            return compileAtom(src);
+    }
+}
+
+/** Precompile a single (non-prefixed) atom. */
+function compileAtom(src: string): CompiledValue {
+    const asNum = Number(src);
+    if (!Number.isNaN(asNum)) return () => asNum;
+
+    const dot = src.indexOf('.');
+    if (dot < 0) {
+        throw new Error(`Cannot compile value atom '${src}' (expected number, Comp.field, builtin.*, transform.* or tag.*)`);
+    }
+
+    const head = src.slice(0, dot);
+    const field = src.slice(dot + 1);
+
+    const ns = atomNamespaces[head];
+    if (ns) {
+        const fn = ns[field];
+        if (!fn) {
+            throw new Error(`Unknown value atom '${src}' (known ${head}.*: ${Object.keys(ns).join(', ')})`);
+        }
+        return fn;
+    }
+
+    if (!schemaRegistry.get(head)) {
+        throw new Error(`Value source '${src}' references unknown component '${head}'`);
+    }
+    const compName = head;
+    const fieldName = field;
+    return (ctx) => {
+        const v = ctx.scene.getField(ctx.eid, compName, fieldName);
+        if (Array.isArray(v)) return v.map(Number);
+        return Number(v ?? 0);
+    };
+}
+
+/** Precompile a pack: list into a closure that concatenates resolved atoms. */
+function compilePack(list: string): CompiledValue {
+    const parts: Array<{ num: number; fn: CompiledValue | null }> = [];
+    for (const raw of list.split(',')) {
+        const token = raw.trim();
+        if (token === '') continue;
+        if (/^-?\d*\.?\d+$/.test(token)) {
+            parts.push({ num: Number(token), fn: null });
+        } else {
+            parts.push({ num: 0, fn: compileAtom(token) });
+        }
+    }
+    return (ctx) => {
+        const out: number[] = [];
+        for (const p of parts) {
+            if (p.fn === null) { out.push(p.num); continue; }
+            const v = p.fn(ctx);
+            if (typeof v === 'number') {
+                out.push(v);
+            } else {
+                for (let i = 0; i < v.length; i++) out.push(v[i]);
+            }
+        }
+        return out;
+    };
+}
+
+/** A precompiled string source (mesh names). */
+export type CompiledString = (ctx: ValueContext) => string;
+
+/** Precompile a string-source into a closure. */
+export function compileString(src: string): CompiledString {
+    const dot = src.indexOf('.');
+    if (dot < 0) return () => src;
+    const head = src.slice(0, dot);
+    const field = src.slice(dot + 1);
+    if (head === 'builtin' || head === 'transform' || head === 'tag') return () => src;
+    if (!schemaRegistry.get(head)) {
+        throw new Error(`String source '${src}' references unknown component '${head}'`);
+    }
+    const compName = head;
+    const fieldName = field;
+    return (ctx) => {
+        const v = ctx.scene.getField(ctx.eid, compName, fieldName);
+        return typeof v === 'string' ? v : String(v ?? '');
+    };
 }

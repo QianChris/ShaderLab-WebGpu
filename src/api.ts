@@ -96,15 +96,23 @@ export type { ToolConfig, ToolContext, SceneTool } from './tools/SceneTool';
 /* ── Math ──────────────────────────────────────────────────────── */
 export {
     buildCameraMatrices,
+    buildCameraMatricesInto,
     mat4FromTRS,
+    mat4FromTRSInto,
     mat4OrthographicSym,
+    mat4OrthographicSymInto,
     mat4LookAt,
+    mat4LookAtInto,
     mat4Perspective,
+    mat4PerspectiveInto,
     mat4Mul,
+    mat4MulInto,
     mat4Inverse,
+    mat4InverseInto,
     mat4TransformVec4,
     quatRotateVec3,
     normalMatrix,
+    normalMatrixInto,
 } from './math';
 export type { TRS } from './math';
 

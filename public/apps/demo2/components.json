@@ -1,6 +1,7 @@
 [
   {
     "name": "GameStateComponent",
+    "description": "LOCAL COMPONENT: demo2-private game state (ball spawning, scoring). Not reusable; do not migrate to a plugin.",
     "fields": {
       "ballSpeed":   { "type": "f32", "default": 18.0 },
       "ballRadius":  { "type": "f32", "default": 0.35 },

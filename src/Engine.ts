@@ -8,11 +8,12 @@ import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
-import { PRESET_MESHES, PRESET_PBR_MESHES, meshGenerators, isPbrMeshData, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
+import { PRESET_MESHES, PRESET_PBR_MESHES, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
 import { loadVertexSlots, removeVertexSlotsByOwner, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
 import { GltfLoader } from './gltf/GltfLoader';
 import { pluginManager, pluginOwner } from './plugins/PluginManager';
+import { PluginHostHelper, type PluginLedger } from './PluginHost';
 import type { EnginePlugin, PluginContext, MeshCatalogEntry } from './plugins/Plugin';
 import type { RenderGraphData, IRenderer } from './render/types';
 
@@ -82,13 +83,9 @@ export const DEFAULT_ENGINE_CONFIG: EngineConfig = {
 };
 
 /** Tracks what a plugin registered through its ctx / declarations, so the
- *  open registries (tools, generators, atoms, phases) can be swept on unload. */
-interface PluginLedger {
-    tools: string[];
-    generators: string[];
-    atoms: Array<[string, string]>;
-    phases: string[];
-}
+ *  open registries (tools, generators, atoms, phases) can be swept on unload.
+ *  Re-exported from PluginHost for back-compat with any internal consumers. */
+export type { PluginLedger } from './PluginHost';
 
 export class Engine {
     device!: GPUDevice;
@@ -113,10 +110,12 @@ export class Engine {
     /** Plain-object view of attachments handed to FrameContext / hooks. */
     private attachmentsView: Record<string, unknown> = {};
     /** Per-plugin registration ledger (for owner sweeps of open registries). */
-    private pluginLedgers = new Map<string, PluginLedger>();
+    pluginLedgers = new Map<string, PluginLedger>();
     /** Replacement renderer installed via ctx.replaceRenderer (null = built-in). */
-    private customRenderer: IRenderer | null = null;
-    private customRendererOwner: string | null = null;
+    customRenderer: IRenderer | null = null;
+    customRendererOwner: string | null = null;
+    /** Extracted plugin declaration/sweep logic (reduces Engine God Class). */
+    private pluginHost!: PluginHostHelper;
 
     private dpr: number;
     private canvas: HTMLCanvasElement;
@@ -124,6 +123,14 @@ export class Engine {
     private lastTime = 0;
     /** True while loadApp is in flight — frame() skips system updates. */
     private appLoading = false;
+    /** Pooled FrameContext — built once in init(), only mutable fields
+     *  (time/dt/aspect/cw/ch) are updated per frame. Closures bind to `this`
+     *  and module singletons, so they stay valid for the engine's lifetime. */
+    private frameCtx!: FrameContext;
+    /** Batched compute pass: dispatches from ctx.dispatchCompute accumulate
+     *  here, submitted together by flushCompute(). Null when no pass is open. */
+    private pendingComputeEncoder: GPUCommandEncoder | null = null;
+    private pendingComputePass: GPUComputePassEncoder | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
@@ -190,11 +197,12 @@ export class Engine {
         // goes through the registries populated below. All capability systems
         // (input/script/camera/light/animation/render/physics/…) come from here.
         PipelineLoader.pluginsRoot = this.engineConfig.pluginsRoot ?? '/plugins';
+        this.pluginHost = new PluginHostHelper(this);
         pluginManager.configure({
             pluginsRoot: this.engineConfig.pluginsRoot ?? '/plugins',
             makeCtx: (id, baseUrl) => this.makePluginContext(id, baseUrl),
-            applyDeclarations: (id, plugin) => this.applyPluginDeclarations(id, plugin),
-            sweepOwner: (owner) => this.sweepPluginOwner(owner),
+            applyDeclarations: (id, plugin) => this.pluginHost.applyDeclarations(id, plugin, pluginOwner(id)),
+            sweepOwner: (owner) => this.pluginHost.sweepOwner(owner),
             beginOwner: (owner) => {
                 const prev = resourceManager.currentOwnerId;
                 resourceManager.enterApp(owner);
@@ -211,13 +219,17 @@ export class Engine {
         // (camera / light / timeInput / pointShadowFaces UBOs from core's defs).
         bufferRegistry.allocateFor(this.commonSystems, 'common', this.device);
 
+        // Build the pooled FrameContext once — closures bind to `this` and
+        // module singletons, so only mutable fields update per frame.
+        this.frameCtx = this.buildFrameContext();
+
         this.assertSystemsResolve();
     }
 
     /** Build the per-plugin context: identity (baseUrl) + owner-tracked registration surface. */
     private makePluginContext(id: string, baseUrl: string): PluginContext {
         const owner = pluginOwner(id);
-        const ledger = this.ledgerFor(owner);
+        const ledger = this.pluginHost.ledgerFor(owner);
         return {
             device: this.device,
             scene: this.scene,
@@ -228,7 +240,7 @@ export class Engine {
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
             registerAttachment: (name, obj) => this.setAttachment(name, obj, owner),
-            registerRenderHook: (name, fn) => this.registerRenderHook(name, fn, owner),
+            registerRenderHook: (name, fn) => this.pluginHost.registerRenderHook(name, fn, owner),
             registerPhaseBehavior: (name, behavior) => this.renderGraph.registerPhaseBehavior(name, behavior, owner),
             replaceRenderer: (r) => {
                 // Renderer seam: swap the 'render' system dispatch target. The
@@ -256,132 +268,11 @@ export class Engine {
         };
     }
 
-    private ledgerFor(owner: string): PluginLedger {
-        let ledger = this.pluginLedgers.get(owner);
-        if (!ledger) {
-            ledger = { tools: [], generators: [], atoms: [], phases: [] };
-            this.pluginLedgers.set(owner, ledger);
-        }
-        return ledger;
-    }
-
-    /** One name, all three hook namespaces (mirrors RenderScriptLoader.loadAll). */
-    private registerRenderHook(name: string, fn: unknown, owner: string): void {
-        this.renderGraph.registerValueScript(name, fn as never, owner);
-        this.renderGraph.registerGeometryHook(name, fn as never, owner);
-        this.renderGraph.registerComputeHook(name, fn as never, owner);
-    }
-
-    /** Merge a plugin's declaration fields into the engine registries. */
-    private applyPluginDeclarations(id: string, plugin: EnginePlugin): void {
-        const owner = pluginOwner(id);
-        const ledger = this.ledgerFor(owner);
-        if (plugin.components) schemaRegistry.registerDefs(plugin.components, owner);
-        if (plugin.uniformLayouts) uniformLayouts.load(plugin.uniformLayouts, owner);
-        if (plugin.vertexSlots) loadVertexSlots(plugin.vertexSlots, owner);
-        if (plugin.vertexInputs) PipelineLoader.mergeVertexInputs(plugin.vertexInputs, owner);
-        if (plugin.bindLayouts) resourceManager.loadBindLayouts(plugin.bindLayouts);
-        if (plugin.samplers) resourceManager.loadSamplers(plugin.samplers);
-        if (plugin.blendPresets) PipelineLoader.mergeBlendPresets(plugin.blendPresets, owner);
-        if (plugin.fallbackTextures) resourceManager.loadFallbackTextures(plugin.fallbackTextures);
-        if (plugin.vboPresets) resourceManager.loadVboPresets(plugin.vboPresets);
-        if (plugin.renderTargets) {
-            resourceManager.loadRenderTargets(plugin.renderTargets);
-            this.renderGraph.mergeRenderTargets(plugin.renderTargets);
-        }
-        if (plugin.phases) {
-            this.renderGraph.addPhases(plugin.phases);
-            for (const p of plugin.phases) ledger.phases.push(p.name);
-        }
-        if (plugin.meshes) this.registerMeshCatalog(plugin.meshes);
-        if (plugin.systemDefs) {
-            for (const def of plugin.systemDefs) systemRegistry.addDef(def, owner);
-        }
-        if (plugin.pipelines) {
-            for (const [key, config] of Object.entries(plugin.pipelines)) {
-                PipelineLoader.registerVirtualConfig(key.includes(':') ? key : `${id}:${key}`, config);
-            }
-        }
-        if (plugin.shaders) {
-            for (const [key, src] of Object.entries(plugin.shaders)) {
-                PipelineLoader.registerVirtualShader(key.includes(':') ? key : `${id}:${key}`, src);
-            }
-        }
-        if (plugin.renderHooks) {
-            for (const [name, fn] of Object.entries(plugin.renderHooks)) this.registerRenderHook(name, fn, owner);
-        }
-        if (plugin.meshGenerators) {
-            for (const [name, fn] of Object.entries(plugin.meshGenerators)) {
-                registerMeshGenerator(name, fn);
-                ledger.generators.push(name);
-            }
-        }
-        if (plugin.toolTypes) {
-            for (const [name, factory] of Object.entries(plugin.toolTypes)) {
-                registerToolType(name, factory);
-                ledger.tools.push(name);
-            }
-        }
-        if (plugin.valueAtoms) {
-            for (const [ns, atoms] of Object.entries(plugin.valueAtoms)) {
-                atomNamespaces[ns] = { ...(atomNamespaces[ns] ?? {}), ...atoms };
-                for (const name of Object.keys(atoms)) ledger.atoms.push([ns, name]);
-            }
-        }
-    }
-
-    /** Release everything a plugin registered (called on plugin unload). */
-    private sweepPluginOwner(owner: string): void {
-        resourceManager.exitApp(owner);
-        bufferRegistry.exitApp(owner);
-        systemRegistry.removeDefsByOwner(owner);
-        systemRegistry.removeSystemsByOwner(owner);
-        schemaRegistry.removeOwner(owner);
-        uniformLayouts.removeOwner(owner);
-        removeVertexSlotsByOwner(owner);
-        PipelineLoader.removeVirtualsByPrefix(owner.replace(/^plugin:/, '') + ':');
-        PipelineLoader.removeInputsByOwner(owner);
-        PipelineLoader.removeBlendPresetsByOwner(owner);
-        this.renderGraph.removeHooksByOwner(owner);
-        this.renderGraph.removePhaseBehaviorsByOwner(owner);
-        if (this.customRendererOwner === owner) {
-            // The replacement renderer is gone — restore the built-in graph.
-            this.customRenderer = null;
-            this.customRendererOwner = null;
-            systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
-        }
-        for (const [name, entry] of this.attachments) {
-            if (entry.owner === owner) this.deleteAttachment(name);
-        }
-        const ledger = this.pluginLedgers.get(owner);
-        if (ledger) {
-            for (const t of ledger.tools) unregisterToolType(t);
-            for (const g of ledger.generators) unregisterMeshGenerator(g);
-            for (const [ns, name] of ledger.atoms) {
-                if (atomNamespaces[ns]) delete atomNamespaces[ns][name];
-            }
-            if (ledger.phases.length > 0) this.renderGraph.removePhases(ledger.phases);
-            this.pluginLedgers.delete(owner);
-        }
-    }
-
-    /** Build meshes from a catalog (meshes.json or a plugin `meshes` field). */
-    private registerMeshCatalog(entries: MeshCatalogEntry[]): void {
-        for (const entry of entries) {
-            const gen = meshGenerators[entry.generator];
-            if (!gen) {
-                throw new Error(
-                    `Mesh catalog entry '${entry.name}' references unknown generator '${entry.generator}' ` +
-                    `(available: ${Object.keys(meshGenerators).join(', ')})`,
-                );
-            }
-            const data = gen(entry.params ?? {});
-            if (isPbrMeshData(data)) {
-                resourceManager.registerPbrMesh(entry.name, data);
-            } else {
-                resourceManager.registerMesh(entry.name, data);
-            }
-        }
+    /** Restore the built-in renderer after a replacement renderer's owner is swept. */
+    restoreBuiltinRenderer(): void {
+        this.customRenderer = null;
+        this.customRendererOwner = null;
+        systemRegistry.registerBuiltin('render', this.renderGraph, 'engine');
     }
 
     /** The active renderer: a plugin replacement when installed, else the built-in graph. */
@@ -478,13 +369,14 @@ export class Engine {
         await pluginManager.loadMany(manifest.plugins ?? [], 'app');
 
         // An app may override the common system order by shipping its own
-        // systems.json; absent → keep the common baseline (commonSystems).
+        // systems.json; absent → use the common baseline + auto-insert any
+        // registered systems that declared after/before dependencies.
         const systemsUrl = this.resolveAsset(base, manifest.systems ?? 'systems.json');
         const sysResp = await fetch(systemsUrl);
         if (this.isJson(sysResp)) {
             this.activeSystems = await sysResp.json() as SystemEntry[];
         } else {
-            this.activeSystems = this.commonSystems;
+            this.activeSystems = systemRegistry.autoInsert(this.commonSystems);
         }
 
         // Pre-load each system's def JSON + any script systems referenced by
@@ -576,6 +468,11 @@ export class Engine {
         this.currentApp = null;
     }
 
+    /** Resource counts for diagnostics / stress testing (delegates to ResourceManager). */
+    getResourceStats(): Record<string, number> {
+        return resourceManager.getStats() as unknown as Record<string, number>;
+    }
+
     /** Resolve an app asset path: absolute (leading /) or relative to the app dir. */
     private resolveAsset(base: string, rel: string): string {
         return rel.startsWith('/') ? rel : `${base}/${rel}`;
@@ -597,6 +494,32 @@ export class Engine {
         this.canvas.height = this.canvas.clientHeight * this.dpr;
     }
 
+    /** Build the reusable FrameContext: stable references + closures that
+     *  bind to `this` and module singletons. Only time/dt/aspect/cw/ch update
+     *  per frame (assigned in frame()). */
+    private buildFrameContext(): FrameContext {
+        return {
+            scene: this.scene,
+            time: 0, dt: 0,
+            aspect: this.aspect(),
+            cw: this.canvas.width,
+            ch: this.canvas.height,
+            canvas: this.canvas,
+            device: this.device,
+            context: this.context,
+            format: this.format,
+            eventBus: this.eventBus,
+            attachments: this.attachmentsView,
+            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
+            getBuffer: (name: string) => bufferRegistry.get(name),
+            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
+            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
+                this.dispatchCompute(pipelineName, count, entries);
+            },
+            flushCompute: () => { this.flushCompute(); },
+        };
+    }
+
     private frame = (): void => {
         const now = performance.now();
         if (this.startTime === 0) { this.startTime = now; this.lastTime = now; }
@@ -610,31 +533,22 @@ export class Engine {
         const dt = (now - this.lastTime) / 1000;
         this.lastTime = now;
 
-        const ctx: FrameContext = {
-            scene: this.scene,
-            time, dt,
-            aspect: this.aspect(),
-            cw: this.canvas.width,
-            ch: this.canvas.height,
-            canvas: this.canvas,
-            device: this.device,
-            context: this.context,
-            format: this.format,
-            eventBus: this.eventBus,
-            attachments: this.attachmentsView,
-            getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
-            // Script-system GPU access helpers (delegated to BufferRegistry + RenderGraph).
-            getBuffer: (name: string) => bufferRegistry.get(name),
-            writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
-            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
-                this.dispatchCompute(pipelineName, count, entries);
-            },
-        };
+        // Reuse the pooled FrameContext — only mutable fields update per frame.
+        const ctx = this.frameCtx;
+        ctx.time = time;
+        ctx.dt = dt;
+        ctx.aspect = this.aspect();
+        ctx.cw = this.canvas.width;
+        ctx.ch = this.canvas.height;
 
         for (const sys of this.activeSystems) {
             const impl = systemRegistry.resolve(sys);
             impl?.update(ctx);
         }
+        // Safety-net flush for any compute dispatched by the render system or
+        // after it. The renderer also calls ctx.flushCompute() at the start of
+        // execute() so same-frame compute results are visible to render passes.
+        this.flushCompute();
         requestAnimationFrame(this.frame);
     };
 
@@ -643,26 +557,45 @@ export class Engine {
     }
 
     /** Dispatch a preloaded compute pipeline by name (script-system escape hatch).
-     *  Opens a per-call command encoder + submit — functional but not optimal;
-     *  batching multiple dispatches per frame is a future optimization. */
+     *  Dispatches are batched into one compute pass per frame and submitted
+     *  together by flushCompute() (called by the renderer before recording
+     *  render passes, and at end of frame as a safety net). */
     private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void {
         const pipeline = this.renderGraph.getComputePipeline(pipelineName);
         if (!pipeline) throw new Error(`compute pipeline '${pipelineName}' not loaded`);
         const meta = PipelineLoader.getComputeMeta(pipelineName);
         const tgs = meta?.workgroupSize ?? this.engineConfig.computeTgs;
-        const encoder = this.device.createCommandEncoder();
-        const pass = encoder.beginComputePass();
-        pass.setPipeline(pipeline);
+        // Lazily open one compute pass spanning all dispatches in this frame.
+        if (!this.pendingComputePass) {
+            if (!this.pendingComputeEncoder) {
+                this.pendingComputeEncoder = this.device.createCommandEncoder();
+            }
+            this.pendingComputePass = this.pendingComputeEncoder.beginComputePass();
+        }
+        this.pendingComputePass.setPipeline(pipeline);
         if (entries && entries.length > 0) {
             const bg = this.device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),
                 entries,
             });
-            pass.setBindGroup(0, bg);
+            this.pendingComputePass.setBindGroup(0, bg);
         }
-        pass.dispatchWorkgroups(Math.ceil(count / tgs));
-        pass.end();
-        this.device.queue.submit([encoder.finish()]);
+        this.pendingComputePass.dispatchWorkgroups(Math.ceil(count / tgs));
+    }
+
+    /** End the batched compute pass (if open) and submit it. Called by the
+     *  renderer at the start of execute() so compute results are visible to
+     *  render passes in the same frame, and again at end of frame as a
+     *  safety net (no-op when nothing was dispatched). */
+    private flushCompute(): void {
+        if (this.pendingComputePass) {
+            this.pendingComputePass.end();
+            this.pendingComputePass = null;
+        }
+        if (this.pendingComputeEncoder) {
+            this.device.queue.submit([this.pendingComputeEncoder.finish()]);
+            this.pendingComputeEncoder = null;
+        }
     }
 
     exportScene(): object {

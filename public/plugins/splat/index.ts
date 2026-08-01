@@ -26,7 +26,7 @@ export default class SplatPlugin extends EnginePlugin {
         },
     ];
 
-    /** script:splat.draw — instanced splat quad geometry hook. */
+    /** script:splat.draw - instanced splat quad geometry hook. */
     renderHooks = {
         'splat.draw': splatHooks.draw,
     };
@@ -38,7 +38,8 @@ export default class SplatPlugin extends EnginePlugin {
             components: ['GsComponent', 'Transform'],
             ubos: [],
             buffers: [],
-            needs: ['camera'],
+            needs: [],
+            before: ['camera'],
         },
     ];
 

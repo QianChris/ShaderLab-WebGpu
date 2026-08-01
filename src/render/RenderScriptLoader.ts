@@ -25,7 +25,10 @@ export class RenderScriptLoader {
 
     /** Fetch and import a render script file (e.g. "render/pbr.js"). */
     async load(file: string): Promise<Record<string, AnyFn>> {
-        const cached = this.loaded.get(file);
+        // In dev, skip the cache so script edits take effect without a page
+        // reload (the ?t= cache-bust fetches fresh content, but the loaded
+        // Map would return stale exports otherwise).
+        const cached = import.meta.env.DEV ? undefined : this.loaded.get(file);
         if (cached) return cached;
 
         const url = `${this.baseDir}/${this.scriptsSubdir}/${file}?t=${Date.now()}`;

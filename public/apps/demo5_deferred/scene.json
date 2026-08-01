@@ -24,9 +24,13 @@
       "far": 100,
       "active": 1
     },
-    "ScriptComponent": {
-      "script": "scripts/orbit.js",
-      "enabled": 1
+    "OrbitCameraComponent": {
+      "rotSpeed": 3.0,
+      "panSpeed": 1.5,
+      "zoomSpeed": 0.15,
+      "minDistance": 1.0,
+      "maxDistance": 50.0,
+      "viewport": 0
     }
   },
   "Environment": {

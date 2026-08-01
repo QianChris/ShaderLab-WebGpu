@@ -135,6 +135,13 @@ class PluginManager {
             await instance.init?.(ctx);
             this.host.applyDeclarations(id, instance);
             await instance.setup?.(ctx);
+        } catch (err) {
+            // Two-phase rollback: if init/applyDeclarations/setup threw, sweep
+            // everything this plugin registered so far (schemas, uniforms,
+            // pipelines, hooks, tools, atoms, attachments, …) to prevent
+            // half-initialized state from leaking to dependent plugins.
+            this.host.sweepOwner(pluginOwner(id));
+            throw new Error(`Plugin '${id}' failed to load: ${err}`);
         } finally {
             this.host.endOwner(prevOwner);
         }

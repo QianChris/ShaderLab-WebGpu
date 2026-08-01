@@ -6,8 +6,16 @@ interface PhysicsSystemLike {
     attachColliderToBody(eid: number, desc: import('@dimforge/rapier3d-compat').ColliderDesc): boolean;
 }
 
-interface SplatManagerLike {
+/** Structural contract for the gaussianSplat system fields the splat-physics
+ *  plugin consumes. Iterate instances (one per GsComponent entity) to read
+ *  each entity's eid + splat center positions. */
+interface SplatInstanceView {
+    eid: number;
+    count: number;
     getCenters(): Float32Array | null;
+}
+interface SplatManagerLike {
+    forEachInstance(cb: (inst: SplatInstanceView) => void): void;
 }
 
 interface SplatPhysicsState {
@@ -17,37 +25,42 @@ interface SplatPhysicsState {
 }
 
 class SplatPhysicsSystem implements System {
-    private state: SplatPhysicsState | null = null;
+    private states: SplatPhysicsState[] = [];
 
-    setState(state: SplatPhysicsState): void {
-        this.state = state;
+    setStates(states: SplatPhysicsState[]): void {
+        this.states = states;
     }
 
     update(ctx: FrameContext): void {
-        if (!this.state || this.state.attached) return;
+        if (this.states.length === 0) return;
         const physics = ctx.attachments?.physics as PhysicsSystemLike | undefined;
-        if (!physics || !physics.hasBodyRecord(this.state.gsEid)) return;
+        if (!physics) return;
 
-        const result = this.state.hullDescs;
-        if (!result || result.colliderDescs.length === 0) {
-            this.state.attached = true;
-            return;
-        }
+        for (const state of this.states) {
+            if (state.attached) continue;
+            if (!physics.hasBodyRecord(state.gsEid)) continue;
 
-        let attached = 0;
-        for (const desc of result.colliderDescs) {
-            desc.setDensity(8);
-            desc.setFriction(0.9);
-            desc.setRestitution(0.05);
-            desc.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
-            if (physics.attachColliderToBody(this.state.gsEid, desc)) {
-                attached++;
+            const result = state.hullDescs;
+            if (!result || result.colliderDescs.length === 0) {
+                state.attached = true;
+                continue;
             }
-        }
 
-        this.state.attached = true;
-        this.state.hullDescs = null;
-        console.log(`[splat-physics] attached ${attached} convex hulls to GsEntity`);
+            let attached = 0;
+            for (const desc of result.colliderDescs) {
+                desc.setDensity(8);
+                desc.setFriction(0.9);
+                desc.setRestitution(0.05);
+                desc.setActiveEvents(RAPIER.ActiveEvents.COLLISION_EVENTS);
+                if (physics.attachColliderToBody(state.gsEid, desc)) {
+                    attached++;
+                }
+            }
+
+            state.attached = true;
+            state.hullDescs = null;
+            console.log(`[splat-physics] attached ${attached} convex hulls to GsEntity ${state.gsEid}`);
+        }
     }
 }
 
@@ -67,51 +80,56 @@ export default class SplatPhysicsPlugin extends EnginePlugin {
             return;
         }
 
-        const centers = splatSys.getCenters();
-        if (!centers || centers.length === 0) {
-            console.warn('[splat-physics] no splat centers available');
-            return;
-        }
-
-        let gsEid: number | null = null;
-        for (const [, eid] of ctx.scene.entityKeyMap) {
-            if (ctx.scene.hasComponent(eid, 'GsComponent')) {
-                gsEid = eid;
-                break;
+        const states: SplatPhysicsState[] = [];
+        splatSys.forEachInstance(inst => {
+            const centers = inst.getCenters();
+            if (!centers || centers.length === 0) {
+                console.warn(`[splat-physics] no splat centers for GsEntity ${inst.eid}`);
+                return;
             }
-        }
-        if (gsEid === null) {
-            console.warn('[splat-physics] no GsComponent entity found');
-            return;
-        }
 
-        console.log(`[splat-physics] generating convex hulls from ${Math.floor(centers.length / 4)} splats...`);
-        const start = performance.now();
-        const result = generateSplatCollider(centers);
-        const elapsed = (performance.now() - start).toFixed(0);
-        console.log(`[splat-physics] generated ${result.hullCount} convex hulls in ${elapsed}ms`);
+            // PhysicsSystem reads Transform.position + rotation (not scale) into
+            // the body pose, so collider vertices must be pre-scaled to match the
+            // entity's Transform.scale. Otherwise a scaled-down bicycle would
+            // collide with full-size (unscaled) hulls — visually disjoint.
+            const scale = ctx.scene.getField(inst.eid, 'Transform', 'scale') as number[] | undefined;
+            const sx = scale?.[0] ?? 1, sy = scale?.[1] ?? 1, sz = scale?.[2] ?? 1;
+            const scaled = new Float32Array(centers.length);
+            for (let i = 0; i < centers.length; i += 4) {
+                scaled[i]     = centers[i]     * sx;
+                scaled[i + 1] = centers[i + 1] * sy;
+                scaled[i + 2] = centers[i + 2] * sz;
+            }
 
-        ctx.scene.toggleComponent(gsEid, 'RigidBodyComponent', true);
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'bodyType', 'dynamic');
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'ccd', 1);
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'linearDamping', 0.05);
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'angularDamping', 0.3);
-        ctx.scene.setField(gsEid, 'RigidBodyComponent', 'gravityScale', 1);
+            console.log(`[splat-physics] GsEntity ${inst.eid}: generating convex hulls from ${Math.floor(centers.length / 4)} splats (scale ${sx},${sy},${sz})...`);
+            const start = performance.now();
+            const result = generateSplatCollider(scaled);
+            const elapsed = (performance.now() - start).toFixed(0);
+            console.log(`[splat-physics] GsEntity ${inst.eid}: generated ${result.hullCount} convex hulls in ${elapsed}ms`);
 
-        ctx.scene.toggleComponent(gsEid, 'ColliderComponent', true);
-        ctx.scene.setField(gsEid, 'ColliderComponent', 'shape', 'cuboid');
-        ctx.scene.setField(gsEid, 'ColliderComponent', 'halfExtents', [0.01, 0.01, 0.01]);
-        ctx.scene.setField(gsEid, 'ColliderComponent', 'isSensor', 1);
-        ctx.scene.setField(gsEid, 'ColliderComponent', 'density', 0);
+            ctx.scene.toggleComponent(inst.eid, 'RigidBodyComponent', true);
+            ctx.scene.setField(inst.eid, 'RigidBodyComponent', 'bodyType', 'dynamic');
+            ctx.scene.setField(inst.eid, 'RigidBodyComponent', 'ccd', 1);
+            ctx.scene.setField(inst.eid, 'RigidBodyComponent', 'linearDamping', 0.05);
+            ctx.scene.setField(inst.eid, 'RigidBodyComponent', 'angularDamping', 0.3);
+            ctx.scene.setField(inst.eid, 'RigidBodyComponent', 'gravityScale', 1);
 
-        this.system.setState({
-            gsEid,
-            hullDescs: result,
-            attached: false,
+            ctx.scene.toggleComponent(inst.eid, 'ColliderComponent', true);
+            ctx.scene.setField(inst.eid, 'ColliderComponent', 'shape', 'cuboid');
+            ctx.scene.setField(inst.eid, 'ColliderComponent', 'halfExtents', [0.01, 0.01, 0.01]);
+            ctx.scene.setField(inst.eid, 'ColliderComponent', 'isSensor', 1);
+            ctx.scene.setField(inst.eid, 'ColliderComponent', 'density', 0);
+
+            states.push({ gsEid: inst.eid, hullDescs: result, attached: false });
         });
+
+        if (states.length === 0) {
+            console.warn('[splat-physics] no splat instances processed');
+        }
+        this.system.setStates(states);
     }
 
     appUnloading(): void {
-        this.system.setState({ gsEid: -1, hullDescs: null, attached: true });
+        this.system.setStates([]);
     }
 }

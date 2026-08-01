@@ -179,6 +179,9 @@ export interface DriverFrame {
     /** Opaque plugin-published objects (particles/physics/splats/…). */
     attachments: Record<string, unknown>;
     computePipelines: Map<string, GPUComputePipeline>;
+    /** Active camera world position for render-sort (distance-based entity
+     *  ordering). Null when no camera is active (sort is skipped). */
+    cameraPos: Float32Array | null;
 }
 
 /**
