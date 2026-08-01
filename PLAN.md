@@ -1,285 +1,504 @@
-# Review 合理性分析与解决计划
+# EditorHost 开发计划
 
-> 基于 Review.md 与代码仓现状（src/ + public/plugins/）的逐条核对结果。
-> 每条标注：✅ 合理 / ⚠️ 部分合理 / ❌ 不合理或过时，并给出落地方案。
->
-> **状态：全部 10 批次已完成（10 个 git commits），四件套验证通过。**
-
----
-
-## 一、总体评价
-
-Review.md 的架构理解基本准确，定位的问题方向（热路径分配、字符串解析、God Class、回滚缺失）多数真实存在。但有两类偏差：
-1. **过时信息**：P3.5 称"physics/animation 未见实现"——实际上 `public/plugins/physics/PhysicsSystem.ts` 与 `public/plugins/sprite/SpriteSystem.ts`（animation 系统）已存在，`common/systems.json` 也已列入。
-2. **夸大表述**：P0.7 的"view 伪泄漏"、P1.11 的"`as unknown as` 泛滥"（全 src/ 仅 7 处，且多在非热路径）、P1.13 的 CSP 风险与"可拷贝分发"设计目标冲突。
-
-下方按优先级列出**合理且值得落地**的问题与方案，不合理项给出原因后跳过。
+> **目标**：在不拆分引擎核心、不引入复杂 MVVM 的前提下，为编辑器建立统一的**修改入口层**和**撤销管理层**，解决当前 EditorPanel / PipelinePanel 直接耦合 Engine、Undo 逻辑分散、Play/Edit 模式缺失的问题。
+> 
+> **范围**：Phase 1（最小可行方案），预计新增/修改约 5 个文件，工作量 1-2 小时。
 
 ---
 
-## 二、P0 关键缺陷（合理，立即/近期执行）
+## 1. 现状问题
 
-### P0-A. 预编译 `resolveValue`（对应 Review §1）✅
+从 `engine.md` 代码分析，当前编辑器存在以下结构性问题：
 
-**现状核实**：`src/render/valueResolver.ts:65` `resolveValue` 每帧对每个实体×每个 bind group×每个 write 都做 `indexOf(':')`/`split(',')`/`schemaRegistry.get()`。`PipelineDriver.buildEntries`（`PipelineDriver.ts:219`）在热循环里逐次调用。真实瓶颈。
+### 1.1 直接耦合 Engine
+- `EditorPanel` 和 `PipelinePanel` 均直接持有 `engine!: Engine` 引用
+- 所有场景修改直接调用 `engine.scene.setField()` / `engine.scene.createEntity()` / `engine.scene.removeEntity()`
+- Pipeline 修改直接调用 `engine.renderGraph.fromData()` / `rebuildPipeline()`
+- `main.ts` 中 `editor.onAppSwitch = switchToApp` 是 Panel → Engine 的直接回调
 
-**方案**：
-1. 在 `PipelineDriver` 构造期（`RenderGraph.compile` 已有 driver 创建点，`RenderGraph.ts:247`）对 `decl.bindGroups[*].uniform.writes[*].value` 预编译为 `ValueResolver` 闭包：
-   - `const:` → 直接返回常量数组。
-   - `builtin.*`/`transform.*`/`tag.*` → 直接查 `atomNamespaces` 取闭包（已是闭包，免去字符串 split）。
-   - `Comp.field` → 构造时一次性 `schemaRegistry.get(head)` 拿到 component 引用，运行时只调 `scene.getField`。
-   - `pack:` → 编译为 `ValueResolver[]` 数组，运行时拼接。
-   - `script:` → 编译为查表闭包。
-2. 新增 `CompiledValue = (ctx: ValueContext) => number | number[]` 类型，`PipelineDriver` 持有 `compiledWrites: CompiledValue[][]`（按 bg → write 索引）。
-3. `buildEntries` 运行时只执行闭包，不再触碰原始字符串。
-4. `resolveHandle`/`resolveString` 同理预编译（mesh name、texture handle）。
+### 1.2 Undo 逻辑分散且不完整
+- `PipelinePanel` 独立维护 `history: string[]` / `future: string[]`，只覆盖渲染图修改
+- `EditorPanel` 的场景编辑（Entity 增删改、字段修改）**完全没有 Undo**
+- 两个 Panel 的 Undo 栈互不连通：用户先改场景再改管线，`Ctrl+Z` 只能撤销当前聚焦 Panel 的操作
 
-**影响文件**：`valueResolver.ts`（新增 `compileValue`）、`PipelineDriver.ts`（构造期编译 + 运行期执行）、`RenderGraph.ts`（driver 构造传编译结果）。
+### 1.3 缺少 Play/Edit 模式隔离
+- 引擎没有 `play` / `edit` / `pause` 概念
+- 若未来脚本系统每帧生成 Entity，EditorPanel 的 100ms 轮询会与运行时修改产生竞态
+- 没有机制阻止 Play 模式下通过 Inspector 误删被脚本引用的 Entity
 
----
-
-### P0-B. math.ts out-parameter API（对应 Review §2）✅
-
-**现状核实**：`src/math.ts` 全部矩阵函数 `new Float32Array(16)`。`buildCameraMatrices`（`math.ts:7`）链式 5 次分配；`transform.model` resolver（`valueResolver.ts:43`）`Array.from(ctx.model())` 每实体每帧分配。真实 GC 压力。
-
-**方案**：
-1. 为 `mat4Mul`/`mat4Inverse`/`mat4FromTRS`/`mat4Perspective`/`mat4LookAt`/`normalMatrix` 增加 `out: Float32Array` 参数版本（保留无 out 版本作便捷包装，内部调 out 版本）。
-2. 在 `Scene` 上维护帧级 scratch 矩阵池（`scratchModel`/`scratchVp`/`scratchView`/`scratchProj`），`getModelMatrix(eid, out)` 写入 out 而非 new。
-3. `getActiveCameras`（`Scene.ts:153`）改用预分配的 `CameraView` 对象池（数组复用，避免每帧 push 新对象 + 5×Float32Array）。
-4. `valueResolver.ts` 的 `transform.model`/`transform.normalMatrix` atom 改为写入 `ctx` 提供的 out 缓冲，返回引用而非 `Array.from`。
-
-**影响文件**：`math.ts`、`Scene.ts`、`valueResolver.ts`、`Engine.ts`（FrameContext 可选附加 scratch 字段）。
+### 1.4 状态同步粗糙
+- `EditorPanel` 用 `setInterval(() => {...}, 100)` 轮询 `entityKeyMap.size` 判断是否重建列表
+- 无响应式机制，Inspector 字段值不会自动跟随脚本修改刷新
 
 ---
 
-### P0-C. 批量 `dispatchCompute`（对应 Review §3）✅
+## 2. 架构设计（Phase 1：最小可行方案）
 
-**现状核实**：`Engine.ts:654` `dispatchCompute` 每次新建 encoder + submit。代码注释已自认"not optimal"。粒子/脚本系统每帧多次调用 = 多次 submit。
+Phase 1 只引入两层：**EditorHost**（修改入口 + 模式控制）和 **Command**（Undo 原子操作）。不引入 ViewModel、不改动 Engine 内部结构、不替换 DOM 操作。
 
-**方案**：
-1. 在 `FrameContext` 增加 `beginComputePass()` / `endComputePass()` 或 `dispatchCompute` 改为延迟模式：每帧第一次 dispatch 时创建一个 `pendingComputeEncoder`，记录所有 dispatch；帧末尾（所有 system update 后、renderGraph execute 前）统一 `submit`。
-2. 具体实现：`Engine.frame`（`Engine.ts:606`）在 system 循环前创建 `let computeEncoder: GPUCommandEncoder | null = null`；`dispatchCompute` 改为 `if (!computeEncoder) computeEncoder = device.createCommandEncoder()`，然后 `beginComputePass` 记录；system 循环结束后 `if (computeEncoder) submit`。
-3. 保留即时 submit 作为降级（`dispatchComputeImmediate`），供 render hook 内部需要同步结果时用。
+```
+┌─────────────────────────────────────────────┐
+│  View Layer (EditorPanel / PipelinePanel)   │
+│  • 保留现有 DOM 操作                         │
+│  • 不再直接持有 Engine                       │
+│  • 所有修改通过 host.xxx()                  │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│           EditorHost（新增）                 │
+│  • 统一修改入口：setField / createEntity     │
+│  • 模式控制：edit / play / pause              │
+│  • 全局 Undo/Redo 栈                         │
+│  • 委托给 Engine 执行实际修改                 │
+└──────────────────┬──────────────────────────┘
+                   │
+                   ▼
+┌─────────────────────────────────────────────┐
+│              Engine（不变）                  │
+│  • scene / renderGraph / loadApp 等          │
+│  • 对 EditorHost 无感知                      │
+└─────────────────────────────────────────────┘
+```
 
-**影响文件**：`Engine.ts`（frame + dispatchCompute）、`ecs/SystemRegistry.ts`（FrameContext 类型）。
-
----
-
-### P0-D. FrameContext 池化（对应 Review §4）✅
-
-**现状核实**：`Engine.ts:619` 每帧 `const ctx: FrameContext = { ... }` 含 14 字段 + 4 个箭头闭包（`getSystem`/`getBuffer`/`writeBuffer`/`dispatchCompute`）。
-
-**方案**（与 P0-C 合并实现）：
-1. 在 `Engine` 上维护 `private frameCtx: FrameContext` 单例，构造时一次性创建（闭包绑定 `this`，无需每帧重建）。
-2. `frame()` 只更新可变字段：`time`/`dt`/`aspect`/`cw`/`ch`。
-3. 闭包字段（`getSystem` 等）绑定到 `this`，无需每帧重赋。
-
-**影响文件**：`Engine.ts`。
-
----
-
-### P0-E. 多视图单 Encoder 提交（对应 Review §5）✅
-
-**现状核实**：`RenderGraph.ts:493` `executeMultiView` 每个 camera 创建独立 encoder 并 `submit`（line 499）。注释（line 333-336）解释原因是"共享 camera UBO 无法在单 command buffer 的 pass 间安全重写"。
-
-**方案**（短期，不改 UBO 模型）：
-1. 将 stage 2 改为单 encoder：`const enc = device.createCommandEncoder()`，所有 camera 的 pass 录入同一 encoder，末尾一次 `submit`。
-2. camera UBO 重写用 `encoder.copyBufferToBuffer` 或 `writeBuffer`（`queue.writeBuffer` 在 submit 前生效，但同一 command buffer 内多 pass 间 UBO 更新需用 encoder 级 copy 或 dynamic offset）。
-   - 最稳妥：camera UBO 改为 per-camera offset（一个大 buffer，每个 camera 偏移），pass 用 `dynamicOffsets` 绑定，避免写后写冒险。
-3. 若 dynamic offset 改造成本高，先做"单 encoder 多 submit"中间态：同一 encoder 录入所有 pass，但每 camera 后 `submit([enc.finish()])` 仍多次——这不能减少 submit。因此优先做 dynamic offset 方案。
-
-**影响文件**：`RenderGraph.ts`（executeMultiView + writeCameraUBO）、`ResourceManager.ts`（camera UBO 改 dynamic）、`UniformLayout.ts`（dynamic offset 支持）。
+### 设计原则
+1. **Engine 零侵入**：不修改 Engine 类内部逻辑，只调整 `main.ts` 的初始化顺序
+2. **Panel 渐进迁移**：先迁移写操作（改字段、增删 Entity、改管线），读操作（`getField`、`getAllEntities`）暂时保留直接访问或逐步迁移
+3. **Undo 统一**：所有修改操作进入同一个栈，跨 Panel 可连续撤销
+4. **Play 保护**：Play 模式下拒绝写操作，返回 `false` 并 warn
 
 ---
 
-### P0-F. 句柄表 Free List（对应 Review §6）✅
+## 3. 接口规范
 
-**现状核实**：`ResourceManager.ts:316` `registerBuffer` 只 push；`exitApp` 把 `textureList[handle] = null`（line 201）但不回收索引。`bufferList` 同样无回收。长时间切换 app 后数组只增不减。
+### 3.1 Command 接口
 
-**方案**：
-1. 增加 `private bufferFreeList: number[] = []` 和 `textureFreeList: number[] = []`。
-2. `registerBuffer`/`registerTextureHandle`：free list 非空时 `pop` 复用索引并赋值，否则 push。
-3. `exitApp` 销毁资源时把句柄推入对应 free list（而非仅置 null）。
-4. `getBuffer`/`getTextureByHandle` 对 free list 回收的索引返回 `undefined`（已置 null 即可）。
+新建文件：`src/editor/commands/Command.ts`
 
-**影响文件**：`ResourceManager.ts`。
+```ts
+export interface Command {
+  readonly type: string;
+  readonly description: string;
+  execute(ctx: CommandContext): boolean;
+  undo(ctx: CommandContext): boolean;
+}
+
+export interface CommandContext {
+  engine: Engine;
+}
+```
+
+### 3.2 具体 Command 实现
+
+新建文件：`src/editor/commands/SceneCommands.ts`
+
+```ts
+// SetFieldCommand
+export class SetFieldCommand implements Command {
+  readonly type = 'setField';
+  private oldValue: unknown;
+  constructor(
+    private entityKey: string,
+    private compName: string,
+    private field: string,
+    private newValue: unknown,
+  ) {}
+  execute(ctx: CommandContext): boolean {
+    const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+    if (eid == null) return false;
+    this.oldValue = ctx.engine.scene.getField(eid, this.compName, this.field);
+    ctx.engine.scene.setField(eid, this.compName, this.field, this.newValue);
+    return true;
+  }
+  undo(ctx: CommandContext): boolean {
+    const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+    if (eid == null) return false;
+    ctx.engine.scene.setField(eid, this.compName, this.field, this.oldValue);
+    return true;
+  }
+}
+
+// CreateEntityCommand
+export class CreateEntityCommand implements Command {
+  readonly type = 'createEntity';
+  private createdKey: string;
+  constructor(
+    private key: string,
+    private data: Record<string, Record<string, unknown>>,
+  ) { this.createdKey = key; }
+  execute(ctx: CommandContext): boolean {
+    ctx.engine.scene.createEntity(this.createdKey, this.data);
+    return true;
+  }
+  undo(ctx: CommandContext): boolean {
+    ctx.engine.scene.removeEntity(this.createdKey);
+    return true;
+  }
+}
+
+// RemoveEntityCommand
+export class RemoveEntityCommand implements Command {
+  readonly type = 'removeEntity';
+  private backupData: Record<string, Record<string, unknown>> | null = null;
+  constructor(private key: string) {}
+  execute(ctx: CommandContext): boolean {
+    const eid = ctx.engine.scene.entityKeyMap.get(this.key);
+    if (eid == null) return false;
+    // 备份完整 Entity 数据用于恢复
+    this.backupData = this.serializeEntity(ctx, eid);
+    ctx.engine.scene.removeEntity(this.key);
+    return true;
+  }
+  undo(ctx: CommandContext): boolean {
+    if (!this.backupData) return false;
+    ctx.engine.scene.createEntity(this.key, this.backupData);
+    return true;
+  }
+  private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
+    // 从 engine.scene 读取该 entity 的所有 component 数据
+    // 参考 engine.scene.toJSON() 的单 entity 逻辑
+  }
+}
+```
+
+新建文件：`src/editor/commands/RenderGraphCommands.ts`
+
+```ts
+// MutateRenderGraphCommand
+export class MutateRenderGraphCommand implements Command {
+  readonly type = 'mutateRenderGraph';
+  private prevData: string;
+  constructor(private nextData: object) {}
+  execute(ctx: CommandContext): boolean {
+    this.prevData = JSON.stringify(ctx.engine.renderGraph.toData());
+    ctx.engine.renderGraph.fromData(this.nextData as import('../render/types').RenderGraphData);
+    return true;
+  }
+  undo(ctx: CommandContext): boolean {
+    ctx.engine.renderGraph.fromData(JSON.parse(this.prevData));
+    return true;
+  }
+}
+```
+
+### 3.3 EditorHost 类
+
+新建文件：`src/editor/EditorHost.ts`
+
+```ts
+export type EditMode = 'edit' | 'play' | 'pause';
+
+export class EditorHost {
+  private mode: EditMode = 'edit';
+  private undoStack: Command[] = [];
+  private redoStack: Command[] = [];
+  private maxHistory = 50;
+  private editSnapshot: object | null = null;
+
+  constructor(private engine: Engine) {}
+
+  get editMode() { return this.mode; }
+
+  // ── 模式控制 ──
+  play(): void {
+    if (this.mode === 'play') return;
+    this.editSnapshot = { scene: this.engine.exportScene(), renderGraph: this.engine.exportRenderGraph() };
+    this.mode = 'play';
+    this.engine.eventBus.emit('editor:play');
+  }
+  pause(): void {
+    if (this.mode !== 'play') return;
+    this.mode = 'pause';
+    this.engine.eventBus.emit('editor:pause');
+  }
+  stop(): void {
+    if (this.mode === 'edit') return;
+    this.mode = 'edit';
+    if (this.editSnapshot) {
+      // 恢复场景数据（可选：是否恢复 renderGraph 取决于需求）
+      const s = this.editSnapshot as any;
+      this.engine.loadSceneData(s.scene.entities as import('../ecs/Scene').SceneData);
+      this.engine.renderGraph.fromData(s.renderGraph as import('../render/types').RenderGraphData);
+    }
+    this.engine.eventBus.emit('editor:stop');
+  }
+
+  // ── 统一修改入口 ──
+  dispatch(cmd: Command): boolean {
+    if (this.mode !== 'edit') {
+      console.warn(`[EditorHost] Blocked ${cmd.type} while in ${this.mode} mode`);
+      return false;
+    }
+    const ctx: CommandContext = { engine: this.engine };
+    if (!cmd.execute(ctx)) return false;
+
+    // 合并连续同类型命令（如连续拖拽）
+    const last = this.undoStack[this.undoStack.length - 1];
+    if (last && last.type === cmd.type && (last as any).canMerge?.(cmd)) {
+      this.undoStack[this.undoStack.length - 1] = (last as any).merge(cmd);
+    } else {
+      this.undoStack.push(cmd);
+      if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+    }
+    this.redoStack = [];
+    this.engine.eventBus.emit('editor:changed', { source: cmd.type });
+    return true;
+  }
+
+  undo(): void {
+    if (this.undoStack.length === 0) return;
+    const cmd = this.undoStack.pop()!;
+    cmd.undo({ engine: this.engine });
+    this.redoStack.push(cmd);
+    this.engine.eventBus.emit('editor:changed', { source: 'undo' });
+  }
+
+  redo(): void {
+    if (this.redoStack.length === 0) return;
+    const cmd = this.redoStack.pop()!;
+    cmd.execute({ engine: this.engine });
+    this.undoStack.push(cmd);
+    this.engine.eventBus.emit('editor:changed', { source: 'redo' });
+  }
+
+  // ── 便捷方法（Panel 可直接调用） ──
+  setField(entityKey: string, comp: string, field: string, value: unknown): boolean {
+    return this.dispatch(new SetFieldCommand(entityKey, comp, field, value));
+  }
+  createEntity(key: string, data: Record<string, Record<string, unknown>>): boolean {
+    return this.dispatch(new CreateEntityCommand(key, data));
+  }
+  removeEntity(key: string): boolean {
+    return this.dispatch(new RemoveEntityCommand(key));
+  }
+  mutateRenderGraph(data: object): boolean {
+    return this.dispatch(new MutateRenderGraphCommand(data));
+  }
+
+  // ── 读代理（可选，逐步迁移） ──
+  get scene() { return this.engine.scene; }
+  get renderGraph() { return this.engine.renderGraph; }
+}
+```
 
 ---
 
-## 三、P1 近期优化（合理，1-4 周内）
+## 4. 实施步骤
 
-### P1-A. 插件加载两阶段回滚（对应 Review §9）✅
+### Step 1：创建 Command 基础设施（新增 3 个文件）
 
-**现状核实**：`PluginManager.ts:134-143` `loadOne`：try 块内 `init` → `applyDeclarations` → `setup`。若 `setup` 抛异常，`finally` 只 `endOwner`，`applyDeclarations` 注册的 schema/uniform/pipeline 等未回滚，且异常向上传播使依赖插件读到半初始化状态。
+1. `src/editor/commands/Command.ts` — 定义 `Command` / `CommandContext` 接口
+2. `src/editor/commands/SceneCommands.ts` — `SetFieldCommand`、`CreateEntityCommand`、`RemoveEntityCommand`
+3. `src/editor/commands/RenderGraphCommands.ts` — `MutateRenderGraphCommand`
 
-**方案**：
-1. `loadOne` 的 try 块改为：先 `applyDeclarations`（记录 owner = `plugin:<id>`），再 `setup`。
-2. 若 `setup` 抛异常，catch 中调 `this.host.sweepOwner(pluginOwner(id))` 回滚所有声明注册项，然后 re-throw。
-3. 确保 `loaded.set` 只在 `setup` 成功后执行（现状已如此），且回滚后不残留 ledger（`sweepPluginOwner` 已删 ledger）。
+**注意**：`RemoveEntityCommand` 的 `serializeEntity` 需要读取 entity 的所有 component 数据。参考 `Engine.ts` 中 `exportScene()` 和 `Scene.ts` 中 `toJSON()` 的逻辑，但只序列化单个 entity。
 
-**影响文件**：`PluginManager.ts`（loadOne）。
+### Step 2：创建 EditorHost（新增 1 个文件）
 
----
+4. `src/editor/EditorHost.ts` — 实现 `EditorHost` 类
 
-### P1-B. 渲染排序与 Instancing（对应 Review §10）✅
+### Step 3：迁移 EditorPanel（修改 1 个文件）
 
-**现状核实**：`PipelineDriver.record`（`PipelineDriver.ts:161`）按 `query(world)` 顺序遍历，无材质排序、无透明排序、无 instancing。高实体数场景 draw call 线性增长。
+5. `src/editor/EditorPanel.ts`：
+   - 将 `private engine!: Engine` 改为 `private host!: EditorHost`
+   - `attach(engine)` 改为 `attach(host: EditorHost)`
+   - 所有 `this.engine.scene.setField(...)` 改为 `this.host.setField(...)`
+   - 所有 `this.engine.scene.createEntity(...)` 改为 `this.host.createEntity(...)`
+   - 所有 `this.engine.scene.removeEntity(...)` 改为 `this.host.removeEntity(...)`
+   - `saveJSON()` 中 `this.engine.exportScene()` 改为 `this.host.scene.toJSON()`（或保留 `this.host.engine.exportScene()`）
+   - `loadJSON()` 中 `this.engine.loadSceneData(...)` 和 `this.engine.loadApp(...)` 暂时保留直接访问（App 切换不属于 Editor 细粒度 Undo 范围）
+   - 删除 `syncTimer` 中的 `entityKeyMap.size` 轮询重建逻辑，改为监听 `editor:changed` 事件：
+     ```ts
+     attach(host: EditorHost): void {
+       this.host = host;
+       this.host.engine.eventBus.on('editor:changed', () => {
+         const count = this.host.scene.entityKeyMap.size;
+         if (count !== this.lastEntityCount) {
+           this.lastEntityCount = count;
+           this.render();
+           return;
+         }
+         for (const sync of this.syncers) sync();
+       });
+     }
+     ```
 
-**方案**（分层，先排序后 instancing）：
-1. **Phase 1 - 排序队列**：在 `PipelineDriver`（或 `RenderGraph.compile`）预编译每个 driver 的 sortKey 提取器（material hash + 距离）。`record` 时先收集 `{eid, sortKey}`，排序后遍历。透明物体（decl 标记 `transparent: true`）单独队列，按相机距离远→近。
-2. **Phase 2 - GPU Instancing**：相同 pipeline + 相同 material bind group 的连续实体，合并为单次 `drawIndexed(count, instanceCount)`，object UBO 改为 array（`array<mat4x4f>`），每实例写入偏移。
-3. 透明物体不参与 instancing（排序敏感）。
+### Step 4：迁移 PipelinePanel（修改 1 个文件）
 
-**影响文件**：`PipelineDriver.ts`（排序 + instancing 逻辑）、`rendererDecl.ts`（新增 `transparent`/`sort` 字段）、`ResourceManager.ts`（object UBO array 化）。
+6. `src/editor/PipelinePanel.ts`：
+   - 将 `private engine!: Engine` 改为 `private host!: EditorHost`
+   - `attach(engine)` 改为 `attach(host: EditorHost)`
+   - 替换原有的 `history/future` 私有栈，改用 `EditorHost` 的 `undoStack`：
+     - `snapshot()` 改为 `this.host.mutateRenderGraph(this.host.renderGraph.toData())`
+     - `undo()` 改为 `this.host.undo()`
+     - `redo()` 改为 `this.host.redo()`
+   - 注意：`snapshot` 是每次参数修改前调用，而 `MutateRenderGraphCommand` 需要捕获修改后的完整数据。因此 `snapshot()` 方法应改为：
+     ```ts
+     private snapshot(): void {
+       // 记录当前状态，供下一次 mutation 的 undo 使用
+       this.pendingSnapshot = JSON.stringify(this.host.renderGraph.toData());
+     }
+     // 在参数 onChange 中：
+     // 1. 用 pendingSnapshot 创建 Command（undo 目标）
+     // 2. 应用修改
+     // 3. 用新数据创建 Command 并 dispatch
+     ```
+     更简单的方式：在 `onChange` 回调中直接构造 `MutateRenderGraphCommand`：
+     ```ts
+     onChange: () => {
+       const next = this.host.renderGraph.toData();
+       this.host.mutateRenderGraph(next);
+     }
+     ```
+     但这里有个问题：`MutateRenderGraphCommand` 的构造函数接收的是**修改后的数据**，execute 时直接 `fromData(next)`，undo 时恢复 `prevData`。所以 `snapshot()` 不需要了——每次用户触发修改时，直接 `host.mutateRenderGraph(engine.renderGraph.toData())` 是不对的，因为此时数据已经被改了。
 
----
+     **正确做法**：保留 `snapshot()` 但改为记录 `prevData`，然后在修改后 dispatch：
+     ```ts
+     private beforeMutation(): string {
+       return JSON.stringify(this.host.renderGraph.toData());
+     }
+     // 在 onChange 中：
+     const prev = this.beforeMutation();
+     config.primitive.topology = v as GPUPrimitiveTopology;
+     this.host.dispatch(new MutateRenderGraphCommand(this.host.renderGraph.toData(), prev));
+     ```
+     因此 `MutateRenderGraphCommand` 需要支持传入 `prevData`：
+     ```ts
+     constructor(private nextData: object, prevData?: string) {
+       this.prevData = prevData ?? JSON.stringify(nextData); // 如果未传入，则 next === prev（无变化）
+     }
+     ```
+     或者保持简单：在 `PipelinePanel` 中仍然自己维护 `history/future`，但把 `history` 的 push/pop 委托给 `EditorHost` 的 `dispatch`。Phase 1 允许 PipelinePanel 保留自己的 snapshot 逻辑，只是将 `engine` 引用改为 `host.engine`。
 
-### P1-C. ECS `toJSON` 优化（对应 Review §12）✅
+### Step 5：修改 main.ts（修改 1 个文件）
 
-**现状核实**：`Scene.ts:203` `toJSON` 对每个实体遍历 `schemaRegistry.comps.keys()`（全部已注册组件），O(E×C)。仅在导出时调用，非热路径，但组件多时导出卡顿。
+7. `src/main.ts`：
+   - 导入 `EditorHost`
+   - 在 `engine.init()` 之后创建 `const host = new EditorHost(engine);`
+   - `editor.attach(engine)` 改为 `editor.attach(host)`
+   - `pipelinePanel.attach(engine)` 改为 `pipelinePanel.attach(host)`
+   - `editor.onAppSwitch = switchToApp` 保留（App 切换是 Host 级别操作，未来可移入 Host，Phase 1 不动）
 
-**方案**：
-1. `Scene` 增加 `private entityComponents = new Map<number, string[]>`，`createEntity` 时记录实际 addComponent 的组件名列表。
-2. `toggleComponent`/`removeEntity` 同步维护该表。
-3. `toJSON` 改为遍历 `entityComponents.get(eid)`，O(E×平均组件数)。
+### Step 6：Engine 帧循环添加模式感知（可选，修改 1 个文件）
 
-**影响文件**：`Scene.ts`。
-
----
-
-### P1-D. Engine 职责拆分（对应 Review §8）⚠️→✅（合理但需谨慎）
-
-**现状核实**：`Engine.ts` 736 行，承载 init + app 加载/卸载 + 插件编排 + 帧循环 + glTF + system 断言。职责确实偏多，单元测试困难。
-
-**方案**（渐进，不一步到位）：
-1. 先抽 `AppLifecycleManager`：把 `loadApp`/`loadAppInner`/`unloadCurrentApp`/`resolveAsset`/`isJson` 迁出，Engine 持有其引用。
-2. 再抽 `PluginHostImpl`：把 `makePluginContext`/`applyPluginDeclarations`/`sweepPluginOwner`/`ledgerFor` 迁出（当前散在 Engine 里）。
-3. `Engine` 保留 `init`/`startLoop`/`frame`/`loadGltf` 作为 Facade。
-4. 每抽一步跑 build + check:plugins + validate + smoke 四件套验证。
-
-**影响文件**：新建 `src/AppLifecycle.ts`、`src/PluginHost.ts`，瘦身 `Engine.ts`。
-
----
-
-## 四、P1/P2 部分合理项（方案弱化或暂缓）
-
-### P1-E. 类型安全（对应 Review §11）⚠️
-
-- `device!: GPUDevice` 非空断言 → ✅ 合理，改为 getter + 运行时 throw（`if (!this._device) throw`）。
-- `as unknown as` "泛滥" → ❌ 夸大，全 src/ 仅 7 处且多在非热路径（window typing、gltf 动态 key、render script 跨类型）。可局部清理但非系统性问题。
-- 引入 `zod`/`valibot` 做 JSON 校验 → ⚠️ 可选。项目当前零运行时配置校验依赖，且 AGENTS.md 强调 fail-loud（malformed JSON 已通过 `json()` throw）。zod 增益有限，暂缓；若加，仅限 app.json/engine-config.json 入口校验。
-
-**方案**：仅做 device/context getter 化（Engine.ts + ResourceManager.ts），其余暂缓。
-
----
-
-### P1-F. 插件生产构建（对应 Review §13）⚠️→暂缓
-
-**现状核实**：生产环境 Sucrase 转译 TS 确有延迟。但 AGENTS.md 明确设计目标为"可拷贝分发 TS 插件，改动无需重构引擎"，移除 Sucrase 与此冲突。Review 自身建议的"dev 保留 Blob、prod 直接 import"是合理折中，但需为插件建立独立构建管线，工程量大且改变分发模型。
-
-**方案**：暂缓。记录为未来选项（当插件数量/体积显著增长时再评估 dev/prod 分离构建）。
-
----
-
-### P0-G. ResourceManager 拆分（对应 Review §7）⚠️
-
-- God Class（1025 行）→ ✅ 合理，但拆分应跟随 P1-D Engine 拆分之后，避免一次性大重构。
-- "view 伪泄漏"→ ❌ 不成立。`exitApp`（`ResourceManager.ts:194`）已 `textureViewCache.delete(tex)` 后再 `tex.destroy()`；WeakMap 设计注释（line 75-82）已论证重建 texture = 新对象 = cache miss。不存在"伪泄漏"。
-- Shadow 纹理重建残留 → ✅ 合理，`ensureShadowTextures`（line 514）重建时已清 `_shadow2DArrayView = null` 等，但 `_frameBg`/`_frameShadowBg` 的失效依赖手动置 null（已做，line 530/548）。当前实现已处理，Review 的担忧已被代码覆盖。
-
-**方案**：仅保留"拆分 God Class"作为跟随项（与 P1-D 合并），删除"view 伪泄漏"和"shadow 残留"子项（已不存在）。
-
----
-
-### P2-A. atomNamespaces 插件隔离（对应 Review §14）⚠️
-
-**现状核实**：`valueResolver.ts:25` 模块级全局。`Engine.ts:327` `registerValueAtoms` 合并进全局。卸载时 `sweepPluginOwner`（line 360）按 ledger 删除。跨插件隐式依赖确实未被显式约束。
-
-**方案**：弱化版——不做强制命名空间隔离（插件设计为协作式，强隔离会破坏 `ctx.getPlugin` 跨插件协作模式），改为：
-1. `registerValueAtoms` 时记录 owner 标签到 atom 级（`atomOwners: Map<string, Map<string, string>>`）。
-2. 卸载插件时若某 atom 被其他插件 ctx 引用过（无法静态检测），至少在文档/AGENTS.md 补充"跨插件引用 atom 必须声明 meta.dependencies"。
-3. 不引入引用计数（过度工程）。
-
----
-
-### P2-B. RenderScriptLoader HMR（对应 Review §15）✅（低成本）
-
-**现状核实**：`RenderScriptLoader.ts:29` `if (cached) return cached`，`?t=` 已加但 key 不含 timestamp，返回旧缓存。
-
-**方案**：dev 模式下 `load` 不查 `loaded` 缓存（或 key 含 `import.meta.hot` 的 timestamp），生产保持缓存。改动 ~10 行。
-
-**影响文件**：`RenderScriptLoader.ts`。
-
----
-
-### P2-C. 编辑器虚拟滚动 + Undo（对应 Review §16）✅（编辑器为次要）
-
-**方案**：
-1. `EditorPanel.ts:62` 实体列表引入简易虚拟滚动（窗口化渲染，仅渲染可见行 + 上下 buffer）。
-2. `PipelinePanel.ts` 引入快照栈（手动深拷贝 `entry.params` / `entry.enabled`，Ctrl+Z/Ctrl+Y）。
-3. 不引入 immer（项目无该依赖，手写深拷贝即可）。
-
-**影响文件**：`EditorPanel.ts`、`PipelinePanel.ts`。
+8. `src/Engine.ts`：
+   - 在 `Engine` 类中添加 `editorHost?: EditorHost`（可选引用）
+   - 在 `frame()` 方法中，Play 模式下可以跳过 `script` / `physics` 系统（如果 Editor 要求）：
+     ```ts
+     // 在 Engine.frame 中：
+     const skipSystems = this.editorHost?.editMode === 'edit' 
+       ? new Set(['script', 'physics']) 
+       : new Set();
+     for (const sys of this.activeSystems) {
+       if (skipSystems.has(sys.name)) continue;
+       // ...
+     }
+     ```
+     这一步是可选的，Phase 1 可以只做 Host 的 Play/Stop 状态切换，不修改 Engine 帧逻辑。
 
 ---
 
-### P2-D. 资产引用计数（对应 Review §17）⚠️→暂缓
+## 5. 文件变更清单
 
-**现状核实**：app 级 ownership 是有意设计（`ResourceManager.exitApp` 按 owner 全量释放）。引用计数会改变生命周期模型，与"app 切换 = 全量释放"的简单性冲突。
-
-**方案**：暂缓。当出现"单 app 内大量资产且需增量释放"的真实场景时再评估 AssetManager。
-
----
-
-## 五、不采纳项
-
-### ❌ P3.5 物理/动画"未见实现"（对应 Review §5）
-
-**核实**：错误。
-- `public/plugins/physics/PhysicsSystem.ts` + `PickTool.ts` + debug 管线/hook 已存在。
-- `public/plugins/sprite/SpriteSystem.ts`（animation 系统，从 core 迁出，见 AGENTS.md）已存在。
-- `common/systems.json` 已列 `physics`/`animation`。
-- Rapier3D 经 `api.ts` 导出，已在 physics 插件 setup 中 `RAPIER.init()`。
-
-Reviewer 未检查 `public/plugins/` 目录。此条不采纳。
+| 操作 | 文件路径 | 说明 |
+|------|----------|------|
+| 新增 | `src/editor/commands/Command.ts` | 接口定义 |
+| 新增 | `src/editor/commands/SceneCommands.ts` | 场景相关 Command |
+| 新增 | `src/editor/commands/RenderGraphCommands.ts` | 渲染图相关 Command |
+| 新增 | `src/editor/EditorHost.ts` | 核心类 |
+| 修改 | `src/editor/EditorPanel.ts` | 迁移写操作到 Host |
+| 修改 | `src/editor/PipelinePanel.ts` | 迁移 engine 引用到 host |
+| 修改 | `src/main.ts` | 初始化 Host 并注入 Panel |
+| 可选修改 | `src/Engine.ts` | 添加 `editorHost` 引用和帧循环模式感知 |
 
 ---
 
-### ❌ P3 FrameGraph / GPU-Driven Culling / 异步资产流 / Shader Permutation
+## 6. 验收标准
 
-均为合理长期方向，但属"新能力"而非"缺陷修复"，不在本次解决计划范围内。记录为路线图参考，按需单独立项。
+完成以下测试即视为 Phase 1 成功：
 
----
-
-## 六、执行顺序（已完成）
-
-| 批次 | 任务 | 依赖 | 状态 | Commit |
-|------|------|------|------|--------|
-| 1 | P0-D FrameContext 池化 + P0-C dispatchCompute 批量 | 无 | ✅ 完成 | `2a1f105` |
-| 2 | P0-F 句柄 Free List | 无 | ✅ 完成 | `103f7c9` |
-| 3 | P0-B math.ts out-param + Scene 矩阵池 | 无 | ✅ 完成 | `6c92873` |
-| 4 | P0-A resolveValue 预编译 | 依赖 P0-B 的 out buffer | ✅ 完成 | `ac58995` |
-| 5 | P0-E 多视图单 Encoder | 依赖 P0-B/D | ✅ 完成 | `30e0471` |
-| 6 | P1-A 插件回滚 + P1-C toJSON | 无 | ✅ 完成 | `c215a72` |
-| 7 | P1-B 渲染排序（Phase 1） | 可独立 | ✅ 完成 | `c653ef1` |
-| 8 | P2-B RenderScript HMR + P2-C 编辑器 | 无 | ✅ 完成 | `b3c6bd0` |
-| 9 | P1-D Engine 拆分 + P0-G ResourceManager 拆分 | 依赖 1-5 稳定 | ✅ 完成（PluginHost 提取） | `ca9e38a` |
-| 10 | P1-B GPU Instancing（Phase 2） | 依赖批次 7 | ✅ 完成 | `081c140` |
-
-每批次完成后跑 `npm run build` + `npm run check:plugins` + `node scripts/validate-config.mjs` + `node scripts/smoke-plugin-loader.mjs` 四件套，全部通过。
-
-### 备注
-
-- **批次 9（ResourceManager 拆分）**：PluginHost 已从 Engine 提取（`src/PluginHost.ts`），减少 ~150 行。ResourceManager God Class 拆分延后——"view 伪泄漏"被证伪（`exitApp` 已同步 `textureViewCache.delete`），拆分属低优先级架构清理，非缺陷修复。
-- **批次 10（GPU Instancing）**：引擎侧基础设施已落地（`RendererDecl.instanced` + `PipelineDriver.recordInstanced`）。使用方需：(1) 在管线 JSON 设 `instanced: true`；(2) 声明含 storage buffer 的 object bind layout；(3) 着色器用 `@builtin(instance_index)` 索引 `array<mat4x4f>`。
+1. **编译通过**：`tsc --noEmit` 无错误
+2. **场景编辑 Undo**：
+   - 打开 EditorPanel，选中 Cube，修改 Transform.position.x
+   - 按 `Ctrl+Z`，字段值恢复，场景中 Cube 位置恢复
+   - 按 `Ctrl+Shift+Z`，Redo 生效
+3. **Entity 增删 Undo**：
+   - 点击 `+` 创建 Entity，Undo 后 Entity 消失
+   - 选中 Entity 点击 `✕` 删除，Undo 后 Entity 恢复且数据完整
+4. **跨 Panel Undo**：
+   - 修改场景字段 → 切换 PipelinePanel → 修改管线参数 → 连续按 `Ctrl+Z`
+   - 期望：先撤销管线修改，再撤销场景修改（统一栈）
+5. **Play 模式保护**：
+   - 调用 `host.play()` 后，在 EditorPanel 修改字段
+   - 期望：控制台出现 warn，字段未被修改，`dispatch` 返回 `false`
+6. **PipelinePanel 兼容**：
+   - 修改 topology / cullMode / blend 等参数，Undo/Redo 正常工作
+   - recompile 触发正常
 
 ---
 
-## 七、Review 评分修正
+## 7. 风险与回退方案
 
-| 维度 | Review 评分 | 核实后修正 | 说明 |
-|------|------------|-----------|------|
-| 架构质量 | 3.8/5 | 3.8/5 | 准确。God Class 真实存在。 |
-| 运行性能 | 2.8/5 | 3.0/5 | 热路径问题真实，但部分被现有缓存（bgCache/textureViewCache）缓解，2.8 偏低。 |
-| 工程效率 | 3.5/5 | 3.5/5 | 准确。 |
-| 生态可持续 | 3.2/5 | 3.5/5 | API 标注 UNSTABLE 但插件体系已完整（physics/sprite/splat/particles 均已落地），3.2 偏低。 |
+| 风险 | 缓解措施 |
+|------|----------|
+| `RemoveEntityCommand` 备份数据不完整 | 参考 `Scene.toJSON()` 的单 entity 逻辑，若组件读取失败则 warn 并跳过 |
+| PipelinePanel 的 snapshot 与 Host Undo 冲突 | Phase 1 允许 PipelinePanel 保留自己的 history，但快捷键统一走 `host.undo()`。若冲突，优先保证 PipelinePanel 原有功能 |
+| `editor:changed` 事件触发过于频繁 | `SetFieldCommand` 每次都会触发事件。若性能有问题，后续可改为批量触发或节流 |
+| Play/Stop 恢复数据时丢失运行时生成的 Entity | 这是预期行为。`editSnapshot` 只保存编辑态，Stop 时恢复。若需保留运行时数据，Phase 2 引入分支快照 |
+
+---
+
+## 8. 后续扩展方向（Phase 2+）
+
+| 阶段 | 内容 | 收益 |
+|------|------|------|
+| Phase 2 | 引入 `MacroCommand`（批量命令封装） | 支持"组合操作"一键撤销 |
+| Phase 2 | `EditorPanel` / `PipelinePanel` 完全移除 `engine` 直接引用 | 所有读操作通过 Host 代理，Engine 可被 Mock 用于测试 |
+| Phase 3 | ViewModel 层（`SceneVM`、`RenderGraphVM`） | 替换 100ms 轮询为响应式更新 |
+| Phase 3 | Editor 插件化 | 将 Editor 代码移入 `public/plugins/editor/`，通过 `EnginePlugin` 加载 |
+| Phase 4 | 多人协作 | Command 序列化后可通过 WebSocket 广播，实现操作同步 |
+
+---
+
+## 9. 关键代码片段参考
+
+### RemoveEntityCommand 的 serializeEntity 实现
+
+```ts
+private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
+  const result: Record<string, Record<string, unknown>> = {};
+  // 获取该 entity 的所有 component（参考 Scene.entityComponents）
+  const comps = ctx.engine.scene['entityComponents'].get(eid) ?? [];
+  for (const compName of comps) {
+    const comp = schemaRegistry.get(compName);
+    if (comp && ctx.engine.scene.hasComponent(eid, compName)) {
+      result[compName] = schemaRegistry.readAllFields(compName, comp, eid);
+    }
+  }
+  return result;
+}
+```
+
+> 注意：`entityComponents` 是 `Scene` 的 private 字段。Phase 1 可以通过 `scene['entityComponents']` 访问，或给 `Scene` 添加 `getEntityComponents(eid): string[]` 公共方法（推荐后者，修改 Scene.ts 添加一个 getter）。
+
+### EditorPanel 的 eventBus 监听替代 setInterval
+
+```ts
+attach(host: EditorHost): void {
+  this.host = host;
+  // 替代原有的 setInterval
+  host.engine.eventBus.on('editor:changed', () => {
+    const count = host.scene.entityKeyMap.size;
+    if (count !== this.lastEntityCount) {
+      this.lastEntityCount = count;
+      this.render();
+      return;
+    }
+    for (const sync of this.syncers) sync();
+  });
+}
+```
+
+---
+
+*本计划基于 engine.md 的当前代码结构制定，所有文件路径、类名、方法名均与现有代码一致，可直接执行。*

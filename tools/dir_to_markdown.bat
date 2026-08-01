@@ -1,0 +1,1 @@
+python tools/directory_to_markdown.py src -o engine.md -t .ts
