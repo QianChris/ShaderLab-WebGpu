@@ -803,6 +803,7 @@ export class Engine {
 
 ```ts
 import { Engine } from './Engine';
+import { EditorHost } from './editor/EditorHost';
 import { EditorPanel } from './editor/EditorPanel';
 import { PipelinePanel } from './editor/PipelinePanel';
 
@@ -840,11 +841,12 @@ async function main(): Promise<void> {
         window.addEventListener('resize', () => engine.resize());
 
         const editor = new EditorPanel(editorEl);
-        editor.attach(engine);
-        editor.render();
-
         const pipelinePanel = new PipelinePanel(pipelineEl);
-        pipelinePanel.attach(engine);
+
+        const host = new EditorHost(engine);
+        editor.attach(host);
+        editor.render();
+        pipelinePanel.attach(host);
         pipelinePanel.render();
 
         setupTabs();
@@ -872,6 +874,7 @@ async function main(): Promise<void> {
         editor.onAppSwitch = switchToApp;
         (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = switchToApp;
         (window as unknown as { engine: unknown }).engine = engine;
+        (window as unknown as { host: unknown }).host = host;
 
         console.log('[ShaderLab] initialized');
         console.log('[ShaderLab] scene:', JSON.stringify(engine.exportScene(), null, 2));
@@ -1618,6 +1621,11 @@ export class Scene {
 
     get componentNames(): string[] {
         return [...schemaRegistry.comps.keys()];
+    }
+
+    /** Return the component names registered on a specific entity. */
+    getEntityComponentNames(eid: number): string[] {
+        return this.entityComponents.get(eid) ?? [];
     }
 
     getEnvironmentAmbient(): [number, number, number, number] {
@@ -2402,19 +2410,119 @@ export function makeFloatField(initial: number, onChange: (v: number) => void): 
 
 ```
 
-## editor\EditorPanel.ts
+## editor\EditorHost.ts
 
 ```ts
 import type { Engine } from '../Engine';
+import type { Command, CommandContext } from './commands/Command';
+import { SetFieldCommand, CreateEntityCommand, RemoveEntityCommand } from './commands/SceneCommands';
+import { MutateRenderGraphCommand } from './commands/RenderGraphCommands';
+
+export type EditMode = 'edit' | 'play' | 'pause';
+
+export class EditorHost {
+    private mode: EditMode = 'edit';
+    private undoStack: Command[] = [];
+    private redoStack: Command[] = [];
+    private maxHistory = 50;
+    private editSnapshot: object | null = null;
+
+    constructor(private _engine: Engine) {}
+
+    get engine(): Engine { return this._engine; }
+    get editMode(): EditMode { return this.mode; }
+    get scene() { return this._engine.scene; }
+    get renderGraph() { return this._engine.renderGraph; }
+
+    play(): void {
+        if (this.mode === 'play') return;
+        this.editSnapshot = {
+            scene: this._engine.exportScene(),
+            renderGraph: this._engine.exportRenderGraph(),
+        };
+        this.mode = 'play';
+        this._engine.eventBus.emit('editor:play');
+    }
+
+    pause(): void {
+        if (this.mode !== 'play') return;
+        this.mode = 'pause';
+        this._engine.eventBus.emit('editor:pause');
+    }
+
+    stop(): void {
+        if (this.mode === 'edit') return;
+        this.mode = 'edit';
+        if (this.editSnapshot) {
+            const s = this.editSnapshot as { scene: unknown; renderGraph: unknown };
+            this._engine.loadSceneData(s.scene as Record<string, Record<string, Record<string, unknown>>>);
+            this._engine.renderGraph.fromData(s.renderGraph as import('../render/types').RenderGraphData);
+        }
+        this._engine.eventBus.emit('editor:stop');
+    }
+
+    dispatch(cmd: Command): boolean {
+        if (this.mode !== 'edit') {
+            console.warn(`[EditorHost] Blocked ${cmd.type} while in ${this.mode} mode`);
+            return false;
+        }
+        const ctx: CommandContext = { engine: this._engine };
+        if (!cmd.execute(ctx)) return false;
+
+        this.undoStack.push(cmd);
+        if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+        this.redoStack.length = 0;
+        this._engine.eventBus.emit('editor:changed', { source: cmd.type });
+        return true;
+    }
+
+    undo(): void {
+        if (this.undoStack.length === 0) return;
+        const cmd = this.undoStack.pop()!;
+        cmd.undo({ engine: this._engine });
+        this.redoStack.push(cmd);
+        this._engine.eventBus.emit('editor:changed', { source: 'undo' });
+    }
+
+    redo(): void {
+        if (this.redoStack.length === 0) return;
+        const cmd = this.redoStack.pop()!;
+        cmd.execute({ engine: this._engine });
+        this.undoStack.push(cmd);
+        this._engine.eventBus.emit('editor:changed', { source: 'redo' });
+    }
+
+    setField(entityKey: string, comp: string, field: string, value: unknown): boolean {
+        return this.dispatch(new SetFieldCommand(entityKey, comp, field, value));
+    }
+
+    createEntity(key: string, data: Record<string, Record<string, unknown>>): boolean {
+        return this.dispatch(new CreateEntityCommand(key, data));
+    }
+
+    removeEntity(key: string): boolean {
+        return this.dispatch(new RemoveEntityCommand(key));
+    }
+
+    mutateRenderGraph(data: object): boolean {
+        return this.dispatch(new MutateRenderGraphCommand(data));
+    }
+}
+
+```
+
+## editor\EditorPanel.ts
+
+```ts
+import type { EditorHost } from './EditorHost';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
 import { ce, makeFloatField, makeSelect } from './dom';
 
 export class EditorPanel {
     private panel: HTMLElement;
-    private engine!: Engine;
+    private host!: EditorHost;
     private selected = '';
     private syncers: (() => void)[] = [];
-    private syncTimer = 0;
     private lastEntityCount = -1;
     /** Scroll position of the entity list (preserved across re-renders). */
     private entityScrollTop = 0;
@@ -2430,27 +2538,23 @@ export class EditorPanel {
         this.panel = container;
     }
 
-    attach(engine: Engine): void {
-        this.engine = engine;
-        if (this.syncTimer === 0) {
-            this.syncTimer = window.setInterval(() => {
-                // Rebuild entity list when entities are added/removed by scripts
-                // (e.g. demo2's ball spawner) — syncers alone only update field values.
-                const count = this.engine.scene.entityKeyMap.size;
-                if (count !== this.lastEntityCount) {
-                    this.lastEntityCount = count;
-                    this.render();
-                    return;
-                }
-                for (const sync of this.syncers) sync();
-            }, 100);
-        }
+    attach(host: EditorHost): void {
+        this.host = host;
+        host.engine.eventBus.on('editor:changed', () => {
+            const count = host.scene.entityKeyMap.size;
+            if (count !== this.lastEntityCount) {
+                this.lastEntityCount = count;
+                this.render();
+                return;
+            }
+            for (const sync of this.syncers) sync();
+        });
     }
 
     render(): void {
         this.panel.innerHTML = '';
         this.syncers = [];
-        const scene = this.engine.scene;
+        const scene = this.host.scene;
         this.lastEntityCount = scene.entityKeyMap.size;
 
         // ── Header ──
@@ -2468,7 +2572,7 @@ export class EditorPanel {
         listHead.appendChild(ce('span', '', 'Entities'));
         const ab = ce('div', 'ed-ent-list-actions');
         ab.appendChild(this.btn('+', () => this.addEntity()));
-        ab.appendChild(this.btn('✕', () => { if (this.selected) { scene.removeEntity(this.selected); this.selected = ''; this.render(); } }));
+        ab.appendChild(this.btn('✕', () => { if (this.selected) { this.host.removeEntity(this.selected); this.selected = ''; this.render(); } }));
         listHead.appendChild(ab);
         list.appendChild(listHead);
 
@@ -2524,9 +2628,9 @@ export class EditorPanel {
             row.style.height = `${this.ROW_H}px`;
             row.style.width = '100%';
             row.style.boxSizing = 'border-box';
-            const eid = this.engine.scene.entityKeyMap.get(key);
+            const eid = this.host.scene.entityKeyMap.get(key);
             const name = eid != null
-                ? (this.engine.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
+                ? (this.host.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
                 : key;
             row.appendChild(ce('span', 'ed-ent-name', name));
             row.onclick = () => { this.selected = key; this.render(); };
@@ -2535,7 +2639,7 @@ export class EditorPanel {
     }
 
     private renderDetail(eid: number): HTMLElement {
-        const scene = this.engine.scene;
+        const scene = this.host.scene;
         const wrap = ce('div', 'ed-detail');
 
         const hdr = ce('div', 'ed-detail-head');
@@ -2573,7 +2677,7 @@ export class EditorPanel {
             if (hasComp) {
                 const grid = ce('div', 'ed-fields');
                 for (const [fieldName, fd] of Object.entries(def.fields)) {
-                    grid.appendChild(this.renderField(eid, compName, fieldName, fd));
+                    grid.appendChild(this.renderField(this.selected, eid, compName, fieldName, fd));
                 }
                 compDiv.appendChild(grid);
             }
@@ -2582,8 +2686,8 @@ export class EditorPanel {
         return wrap;
     }
 
-    private renderField(eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
-        const scene = this.engine.scene;
+    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
+        const scene = this.host.scene;
         const row = ce('div', 'ed-field-row');
         row.appendChild(ce('label', 'ed-field-label', field));
 
@@ -2591,20 +2695,20 @@ export class EditorPanel {
         const numInputs = ce('div', 'ed-field-inputs');
 
         if (fd.type === 'string' && fd.options) {
-            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => scene.setField(eid, compName, field, v));
+            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => this.host.setField(entityKey, compName, field, v));
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field) as string | undefined;
                 if (cur != null) sel.value = cur;
             });
             numInputs.appendChild(sel);
         } else if (fd.type === 'string') {
-            const inp = this.makeInput('text', val as string, v => scene.setField(eid, compName, field, v));
+            const inp = this.makeInput('text', val as string, v => this.host.setField(entityKey, compName, field, v));
             numInputs.appendChild(inp);
         } else if (fd.type === 'bool') {
             const chk = ce('input', 'ed-check') as HTMLInputElement;
             chk.type = 'checkbox';
             chk.checked = Number(val ?? fd.default) === 1;
-            chk.onchange = () => scene.setField(eid, compName, field, chk.checked ? 1 : 0);
+            chk.onchange = () => this.host.setField(entityKey, compName, field, chk.checked ? 1 : 0);
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field);
                 if (cur != null) chk.checked = Number(cur) === 1;
@@ -2614,7 +2718,7 @@ export class EditorPanel {
             const defVal = (fd.default as number[]) ?? [0];
             const v = val != null ? Number(val) : defVal[0] ?? 0;
             const el = makeFloatField(v, newVal => {
-                scene.setField(eid, compName, field, newVal);
+                this.host.setField(entityKey, compName, field, newVal);
             });
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field);
@@ -2629,7 +2733,7 @@ export class EditorPanel {
                     const a = [...(scene.getField(eid, compName, field) as number[] ?? (fd.default as number[]))];
                     for (let j = 0; j < count; j++) a[j] = a[j] ?? 0;
                     a[i] = newVal;
-                    scene.setField(eid, compName, field, a);
+                    this.host.setField(entityKey, compName, field, a);
                 });
                 this.syncers.push(() => {
                     const cur = scene.getField(eid, compName, field) as number[] | undefined;
@@ -2657,13 +2761,13 @@ export class EditorPanel {
     private addEntity(): void {
         const name = prompt('Entity name:', 'NewEntity');
         if (!name) return;
-        this.engine.scene.createEntity(name, {});
+        this.host.createEntity(name, {});
         this.selected = name;
         this.render();
     }
 
     private saveJSON(): void {
-        const json = { entities: this.engine.scene.toJSON() };
+        const json = { entities: this.host.scene.toJSON() };
         const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
@@ -2685,14 +2789,14 @@ export class EditorPanel {
                 if (this.onAppSwitch) {
                     await this.onAppSwitch(name);
                 } else {
-                    await this.engine.loadApp(name);
+                    await this.host.engine.loadApp(name);
                 }
             } else {
                 // Scene entity data → reload entities in place (no glTF / render graph).
-                for (const k of [...this.engine.scene.entityKeyMap.keys()]) {
-                    this.engine.scene.removeEntity(k);
+                for (const k of [...this.host.scene.entityKeyMap.keys()]) {
+                    this.host.scene.removeEntity(k);
                 }
-                this.engine.loadSceneData((json.entities ?? json) as import('../ecs/Scene').SceneData);
+                this.host.engine.loadSceneData((json.entities ?? json) as import('../ecs/Scene').SceneData);
             }
             this.selected = '';
             this.render();
@@ -2706,7 +2810,7 @@ export class EditorPanel {
 ## editor\PipelinePanel.ts
 
 ```ts
-import type { Engine } from '../Engine';
+import type { EditorHost } from './EditorHost';
 import { type PipelineEntry, type PipelineConfig } from '../render/types';
 import { PipelineLoader } from '../render/PipelineLoader';
 import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
@@ -2722,7 +2826,7 @@ const COMPARE_OPTIONS: string[] = [
 
 export class PipelinePanel {
     private panel: HTMLElement;
-    private engine!: Engine;
+    private host!: EditorHost;
     /** Undo/redo stacks: JSON snapshots of render graph data (phases + params). */
     private history: string[] = [];
     private future: string[] = [];
@@ -2738,8 +2842,8 @@ export class PipelinePanel {
         this.panel = container;
     }
 
-    attach(engine: Engine): void {
-        this.engine = engine;
+    attach(host: EditorHost): void {
+        this.host = host;
         this.panel.tabIndex = 0;
         this.panel.addEventListener('keydown', (e) => {
             if (e.ctrlKey && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
@@ -2754,7 +2858,7 @@ export class PipelinePanel {
 
     /** Snapshot the current render graph state before a mutation (for undo). */
     private snapshot(): void {
-        const data = JSON.stringify(this.engine.renderGraph.toData());
+        const data = JSON.stringify(this.host.renderGraph.toData());
         this.history.push(data);
         if (this.history.length > this.MAX_HISTORY) this.history.shift();
         this.future.length = 0;
@@ -2762,19 +2866,19 @@ export class PipelinePanel {
 
     private undo(): void {
         if (this.history.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
+        const current = JSON.stringify(this.host.renderGraph.toData());
         this.future.push(current);
         const prev = this.history.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(prev));
+        this.host.renderGraph.fromData(JSON.parse(prev));
         this.render();
     }
 
     private redo(): void {
         if (this.future.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
+        const current = JSON.stringify(this.host.renderGraph.toData());
         this.history.push(current);
         const next = this.future.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(next));
+        this.host.renderGraph.fromData(JSON.parse(next));
         this.render();
     }
 
@@ -2785,8 +2889,8 @@ export class PipelinePanel {
         head.appendChild(ce('span', 'ed-title', 'Render Pipeline'));
         this.panel.appendChild(head);
 
-        const phases = this.engine.renderGraph.phases;
-        const phaseNames = this.engine.renderGraph.getPhaseNames();
+        const phases = this.host.renderGraph.phases;
+        const phaseNames = this.host.renderGraph.getPhaseNames();
         for (const phase of phaseNames) {
             const section = ce('div', 'pp-phase');
             section.appendChild(ce('div', 'pp-phase-title', phase));
@@ -2843,7 +2947,7 @@ export class PipelinePanel {
     private renderConfig(entry: PipelineEntry, config: PipelineConfig): HTMLElement {
         const box = ce('div', 'pp-config');
         const recompile = (): void => {
-            this.engine.renderGraph.rebuildPipeline(this.engine.device, entry.pipeline);
+            this.host.renderGraph.rebuildPipeline(this.host.engine.device, entry.pipeline);
         };
 
         // ── Primitive ──
@@ -2890,6 +2994,141 @@ export class PipelinePanel {
         row.appendChild(ce('span', 'pp-config-label', label));
         row.appendChild(control);
         return row;
+    }
+}
+
+```
+
+## editor\commands\Command.ts
+
+```ts
+import type { Engine } from '../../Engine';
+
+export interface Command {
+    readonly type: string;
+    readonly description: string;
+    execute(ctx: CommandContext): boolean;
+    undo(ctx: CommandContext): boolean;
+}
+
+export interface CommandContext {
+    engine: Engine;
+}
+
+```
+
+## editor\commands\RenderGraphCommands.ts
+
+```ts
+import type { Command, CommandContext } from './Command';
+import type { RenderGraphData } from '../../render/types';
+
+export class MutateRenderGraphCommand implements Command {
+    readonly type = 'mutateRenderGraph';
+    readonly description = 'mutateRenderGraph';
+    private prevData: string;
+    constructor(private nextData: object, prevData?: string) {
+        this.prevData = prevData ?? JSON.stringify(nextData);
+    }
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.fromData(this.nextData as RenderGraphData);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.fromData(JSON.parse(this.prevData));
+        return true;
+    }
+}
+
+```
+
+## editor\commands\SceneCommands.ts
+
+```ts
+import { schemaRegistry } from '../../ecs/SchemaRegistry';
+import type { Command, CommandContext } from './Command';
+
+export class SetFieldCommand implements Command {
+    readonly type = 'setField';
+    get description(): string { return `setField ${this.compName}.${this.field} = ${this.newValue}`; }
+    private oldValue: unknown;
+    constructor(
+        private entityKey: string,
+        private compName: string,
+        private field: string,
+        private newValue: unknown,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        this.oldValue = ctx.engine.scene.getField(eid, this.compName, this.field);
+        ctx.engine.scene.setField(eid, this.compName, this.field, this.newValue);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        ctx.engine.scene.setField(eid, this.compName, this.field, this.oldValue);
+        return true;
+    }
+}
+
+export class CreateEntityCommand implements Command {
+    readonly type = 'createEntity';
+    get description(): string { return `createEntity ${this.key}`; }
+    private createdKey: string;
+    constructor(
+        private key: string,
+        private data: Record<string, Record<string, unknown>>,
+    ) {
+        this.createdKey = key;
+    }
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.scene.createEntity(this.createdKey, this.data);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.scene.removeEntity(this.createdKey);
+        return true;
+    }
+}
+
+export class RemoveEntityCommand implements Command {
+    readonly type = 'removeEntity';
+    get description(): string { return `removeEntity ${this.key}`; }
+    private backupData: Record<string, Record<string, unknown>> | null = null;
+    constructor(private key: string) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.key);
+        if (eid == null) return false;
+        this.backupData = this.serializeEntity(ctx, eid);
+        ctx.engine.scene.removeEntity(this.key);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        if (!this.backupData) return false;
+        ctx.engine.scene.createEntity(this.key, this.backupData);
+        return true;
+    }
+
+    private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
+        const result: Record<string, Record<string, unknown>> = {};
+        const comps = ctx.engine.scene.getEntityComponentNames(eid);
+        for (const compName of comps) {
+            const comp = schemaRegistry.get(compName);
+            if (comp && ctx.engine.scene.hasComponent(eid, compName)) {
+                result[compName] = schemaRegistry.readAllFields(compName, comp, eid);
+            }
+        }
+        return result;
     }
 }
 

@@ -1,504 +1,699 @@
-# EditorHost 开发计划
+# 架构重构执行计划（最终修正版）：Engine Core ↔ AppHost ↔ UI Layers
 
-> **目标**：在不拆分引擎核心、不引入复杂 MVVM 的前提下，为编辑器建立统一的**修改入口层**和**撤销管理层**，解决当前 EditorPanel / PipelinePanel 直接耦合 Engine、Undo 逻辑分散、Play/Edit 模式缺失的问题。
-> 
-> **范围**：Phase 1（最小可行方案），预计新增/修改约 5 个文件，工作量 1-2 小时。
+**目标**：将引擎核心与编辑器 UI 彻底解耦，引入 AppHost 作为统一宿主。编辑器交互逻辑（拾取/选中）作为编辑器专属模块，运行时入口完全不包含任何编辑器代码。本次重构仅夯实架构地基，不涉及脚本编辑器、节点编辑器等复杂工具。
 
----
-
-## 1. 现状问题
-
-从 `engine.md` 代码分析，当前编辑器存在以下结构性问题：
-
-### 1.1 直接耦合 Engine
-- `EditorPanel` 和 `PipelinePanel` 均直接持有 `engine!: Engine` 引用
-- 所有场景修改直接调用 `engine.scene.setField()` / `engine.scene.createEntity()` / `engine.scene.removeEntity()`
-- Pipeline 修改直接调用 `engine.renderGraph.fromData()` / `rebuildPipeline()`
-- `main.ts` 中 `editor.onAppSwitch = switchToApp` 是 Panel → Engine 的直接回调
-
-### 1.2 Undo 逻辑分散且不完整
-- `PipelinePanel` 独立维护 `history: string[]` / `future: string[]`，只覆盖渲染图修改
-- `EditorPanel` 的场景编辑（Entity 增删改、字段修改）**完全没有 Undo**
-- 两个 Panel 的 Undo 栈互不连通：用户先改场景再改管线，`Ctrl+Z` 只能撤销当前聚焦 Panel 的操作
-
-### 1.3 缺少 Play/Edit 模式隔离
-- 引擎没有 `play` / `edit` / `pause` 概念
-- 若未来脚本系统每帧生成 Entity，EditorPanel 的 100ms 轮询会与运行时修改产生竞态
-- 没有机制阻止 Play 模式下通过 Inspector 误删被脚本引用的 Entity
-
-### 1.4 状态同步粗糙
-- `EditorPanel` 用 `setInterval(() => {...}, 100)` 轮询 `entityKeyMap.size` 判断是否重建列表
-- 无响应式机制，Inspector 字段值不会自动跟随脚本修改刷新
+**执行原则**：
+- 严格遵循单向依赖：`UI Layer → AppHost → Engine Core`
+- 命令走 `host.dispatch()` 同步通道，事件走 `host.eventBus.emit()` 广播通道
+- UI 层允许只读导入 Core 单例，禁止直接执行写入操作
 
 ---
 
-## 2. 架构设计（Phase 1：最小可行方案）
+## 一、架构铁律（“宪法”）
 
-Phase 1 只引入两层：**EditorHost**（修改入口 + 模式控制）和 **Command**（Undo 原子操作）。不引入 ViewModel、不改动 Engine 内部结构、不替换 DOM 操作。
+### 1. 依赖方向（单向向下）
 
 ```
-┌─────────────────────────────────────────────┐
-│  View Layer (EditorPanel / PipelinePanel)   │
-│  • 保留现有 DOM 操作                         │
-│  • 不再直接持有 Engine                       │
-│  • 所有修改通过 host.xxx()                  │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│           EditorHost（新增）                 │
-│  • 统一修改入口：setField / createEntity     │
-│  • 模式控制：edit / play / pause              │
-│  • 全局 Undo/Redo 栈                         │
-│  • 委托给 Engine 执行实际修改                 │
-└──────────────────┬──────────────────────────┘
-                   │
-                   ▼
-┌─────────────────────────────────────────────┐
-│              Engine（不变）                  │
-│  • scene / renderGraph / loadApp 等          │
-│  • 对 EditorHost 无感知                      │
-└─────────────────────────────────────────────┘
+UI Layer → AppHost → Engine Core
 ```
 
-### 设计原则
-1. **Engine 零侵入**：不修改 Engine 类内部逻辑，只调整 `main.ts` 的初始化顺序
-2. **Panel 渐进迁移**：先迁移写操作（改字段、增删 Entity、改管线），读操作（`getField`、`getAllEntities`）暂时保留直接访问或逐步迁移
-3. **Undo 统一**：所有修改操作进入同一个栈，跨 Panel 可连续撤销
-4. **Play 保护**：Play 模式下拒绝写操作，返回 `false` 并 warn
+- `src/ui/` 可 import `src/host/` 和 `src/core/` 的**只读内容**
+- `src/host/` 可 import `src/core/`
+- `src/core/` **禁止** import 任何 `src/host/` 或 `src/ui/`
+
+### 2. 只读导入白名单
+
+UI 层可直接导入以下单例进行**只读查询**：
+
+| 单例 | 允许的操作 |
+|------|-----------|
+| `schemaRegistry` | `getDef()`, `get()`, `mandatory.has()`, `isRenderTag()` |
+| `systemRegistry` | `resolve()`（只读查询） |
+| `uniformLayouts` | `get()`, `has()`, `byteSize` |
+| `Scene` | 所有 getter（`getField`, `hasComponent`, `getActiveCameras` 等） |
+| `RenderGraph` | `getPhaseNames()`, `toData()`, `getComputePipeline()`（只读） |
+| `PipelineLoader` | `getConfig()`, `blendPresetNames`（只读） |
+
+**禁止**：UI 层直接调用 `register*`, `load*`, `setField`, `createEntity`, `fromData`, `writeBuffer` 等写入方法。
+
+### 3. 双通道通信
+
+| 通道 | API | 语义 | 返回值 | Undo |
+|------|-----|------|--------|------|
+| **命令通道** | `host.dispatch(new Command())` | 请求变更 | `boolean` | ✅ 入栈 |
+| **事件通道** | `host.eventBus.emit('evt', payload)` | 广播通知 | `void` | ❌ 不入栈 |
+
+**核心原则**：状态变更走 `dispatch`，状态变更的结果通知走 `eventBus.emit`。
+
+### 4. 双入口隔离
+
+| 入口 | 编辑器 UI | 编辑器输入 | Undo/Redo | App UI |
+|------|-----------|------------|-----------|--------|
+| `main.ts`（编辑器） | ✅ 加载 | ✅ 加载 | ✅ 可用 | ✅ 加载 |
+| `player.ts`（运行时） | ❌ 不加载 | ❌ 不加载 | ❌ 不存在 | ✅ 加载 |
 
 ---
 
-## 3. 接口规范
+## 二、重构后目录结构
 
-### 3.1 Command 接口
-
-新建文件：`src/editor/commands/Command.ts`
-
-```ts
-export interface Command {
-  readonly type: string;
-  readonly description: string;
-  execute(ctx: CommandContext): boolean;
-  undo(ctx: CommandContext): boolean;
-}
-
-export interface CommandContext {
-  engine: Engine;
-}
+```
+src/
+├── core/                          # Engine Core（移除所有 UI 依赖）
+│   ├── ecs/
+│   ├── render/
+│   ├── events/
+│   ├── math/
+│   ├── plugins/
+│   ├── tools/                     # 模块级工具注册表（供 Core 和插件使用）
+│   │   └── ToolRegistry.ts        # registerToolType / TOOL_REGISTRY（无 DOM 依赖）
+│   └── Engine.ts                  # 移除 toolSystem，增加只读 accessors
+│
+├── host/                          # 统一宿主层
+│   └── AppHost.ts
+│
+├── ui/                            # UI 层（平级、可插拔）
+│   ├── UILayer.ts
+│   └── layers/
+│       └── EditorUILayer.ts       # 整合编辑器面板、命令总线、输入管理器
+│
+├── editor/                        # 编辑器核心逻辑（非 UI，但非 Core）
+│   ├── EditorCommandBus.ts        # 原 EditorHost 重命名
+│   ├── EditorPanel.ts             # 场景/属性面板（修改依赖方向）
+│   ├── PipelinePanel.ts           # 管线面板（修改依赖方向）
+│   ├── input/
+│   │   ├── EditorInputManager.ts  # 封装 ToolSystem 生命周期
+│   │   ├── ToolSystem.ts          # 原 src/tools/ToolSystem.ts 移入
+│   │   └── SceneTool.ts           # 原 src/tools/SceneTool.ts 移入
+│   └── commands/
+│       ├── Command.ts
+│       ├── SceneCommands.ts
+│       └── RenderGraphCommands.ts
+│
+├── main.ts                        # 编辑器入口
+├── player.ts                      # 运行时入口
+└── types/
 ```
 
-### 3.2 具体 Command 实现
+---
 
-新建文件：`src/editor/commands/SceneCommands.ts`
+## 三、执行任务清单（分 7 个 Phase）
 
-```ts
-// SetFieldCommand
-export class SetFieldCommand implements Command {
-  readonly type = 'setField';
-  private oldValue: unknown;
-  constructor(
-    private entityKey: string,
-    private compName: string,
-    private field: string,
-    private newValue: unknown,
-  ) {}
-  execute(ctx: CommandContext): boolean {
-    const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
-    if (eid == null) return false;
-    this.oldValue = ctx.engine.scene.getField(eid, this.compName, this.field);
-    ctx.engine.scene.setField(eid, this.compName, this.field, this.newValue);
-    return true;
-  }
-  undo(ctx: CommandContext): boolean {
-    const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
-    if (eid == null) return false;
-    ctx.engine.scene.setField(eid, this.compName, this.field, this.oldValue);
-    return true;
-  }
-}
+### Phase 0：环境准备（10 分钟）
 
-// CreateEntityCommand
-export class CreateEntityCommand implements Command {
-  readonly type = 'createEntity';
-  private createdKey: string;
-  constructor(
-    private key: string,
-    private data: Record<string, Record<string, unknown>>,
-  ) { this.createdKey = key; }
-  execute(ctx: CommandContext): boolean {
-    ctx.engine.scene.createEntity(this.createdKey, this.data);
-    return true;
-  }
-  undo(ctx: CommandContext): boolean {
-    ctx.engine.scene.removeEntity(this.createdKey);
-    return true;
-  }
-}
+1. 安装 Vue 3（为后续新 UI 组件做准备，本次不迁移现有面板）：
+   ```bash
+   npm install vue@next @vitejs/plugin-vue
+   ```
 
-// RemoveEntityCommand
-export class RemoveEntityCommand implements Command {
-  readonly type = 'removeEntity';
-  private backupData: Record<string, Record<string, unknown>> | null = null;
-  constructor(private key: string) {}
-  execute(ctx: CommandContext): boolean {
-    const eid = ctx.engine.scene.entityKeyMap.get(this.key);
-    if (eid == null) return false;
-    // 备份完整 Entity 数据用于恢复
-    this.backupData = this.serializeEntity(ctx, eid);
-    ctx.engine.scene.removeEntity(this.key);
-    return true;
-  }
-  undo(ctx: CommandContext): boolean {
-    if (!this.backupData) return false;
-    ctx.engine.scene.createEntity(this.key, this.backupData);
-    return true;
-  }
-  private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
-    // 从 engine.scene 读取该 entity 的所有 component 数据
-    // 参考 engine.scene.toJSON() 的单 entity 逻辑
-  }
-}
-```
+2. 修改 `vite.config.ts`，注册 Vue 插件并配置**多入口打包**：
+   ```typescript
+   import { defineConfig } from 'vite';
+   import vue from '@vitejs/plugin-vue';
 
-新建文件：`src/editor/commands/RenderGraphCommands.ts`
+   export default defineConfig({
+     plugins: [vue()],
+     build: {
+       rollupOptions: {
+         input: {
+           main: 'index.html',
+           player: 'player.html',
+         },
+       },
+     },
+   });
+   ```
 
-```ts
-// MutateRenderGraphCommand
-export class MutateRenderGraphCommand implements Command {
-  readonly type = 'mutateRenderGraph';
-  private prevData: string;
-  constructor(private nextData: object) {}
-  execute(ctx: CommandContext): boolean {
-    this.prevData = JSON.stringify(ctx.engine.renderGraph.toData());
-    ctx.engine.renderGraph.fromData(this.nextData as import('../render/types').RenderGraphData);
-    return true;
-  }
-  undo(ctx: CommandContext): boolean {
-    ctx.engine.renderGraph.fromData(JSON.parse(this.prevData));
-    return true;
-  }
-}
-```
+3. 新建 `player.html`（复制 `index.html`，将 `<script type="module" src="/src/main.ts"></script>` 改为 `/src/player.ts`）。
 
-### 3.3 EditorHost 类
+4. 在项目根目录创建 `docs/ARCHITECTURE.md`，将上述“架构铁律”完整粘贴进去。
 
-新建文件：`src/editor/EditorHost.ts`
+---
 
-```ts
-export type EditMode = 'edit' | 'play' | 'pause';
+### Phase 1：Engine Core 清理 + AppHost 创建（30 分钟）
 
-export class EditorHost {
-  private mode: EditMode = 'edit';
-  private undoStack: Command[] = [];
-  private redoStack: Command[] = [];
-  private maxHistory = 50;
-  private editSnapshot: object | null = null;
+#### 1.1 Engine.ts 清理
 
-  constructor(private engine: Engine) {}
+- **删除**以下代码：
+  - `import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem'`
+  - `toolSystem!: ToolSystem` 属性
+  - 构造函数中的 `this.toolSystem = new ToolSystem(...)`
+  - `loadAppInner` 中的 tools 加载逻辑（`if (manifest.tools) { ... }`）
+  - `unloadCurrentApp` 中的 `this.toolSystem.dispose()`
 
-  get editMode() { return this.mode; }
+- **新增**以下公共只读属性（供 UI 层只读访问）：
+  ```typescript
+  export class Engine {
+    // ... 现有属性
 
-  // ── 模式控制 ──
-  play(): void {
-    if (this.mode === 'play') return;
-    this.editSnapshot = { scene: this.engine.exportScene(), renderGraph: this.engine.exportRenderGraph() };
-    this.mode = 'play';
-    this.engine.eventBus.emit('editor:play');
-  }
-  pause(): void {
-    if (this.mode !== 'play') return;
-    this.mode = 'pause';
-    this.engine.eventBus.emit('editor:pause');
-  }
-  stop(): void {
-    if (this.mode === 'edit') return;
-    this.mode = 'edit';
-    if (this.editSnapshot) {
-      // 恢复场景数据（可选：是否恢复 renderGraph 取决于需求）
-      const s = this.editSnapshot as any;
-      this.engine.loadSceneData(s.scene.entities as import('../ecs/Scene').SceneData);
-      this.engine.renderGraph.fromData(s.renderGraph as import('../render/types').RenderGraphData);
+    get schemaRegistry() { return schemaRegistry; }
+    get systemRegistry() { return systemRegistry; }
+    get uniformLayouts() { return uniformLayouts; }
+    get resourceManager() { return resourceManager; }
+    get canvas() { return this._canvas; }  // 将 private canvas 改为 _canvas，暴露 getter
+
+    /** 供外部计算宽高比（原为 private） */
+    aspect(): number {
+      return this._canvas.width / Math.max(1, this._canvas.height);
     }
-    this.engine.eventBus.emit('editor:stop');
+  }
+  ```
+
+- **修正** `makePluginContext` 中的 `registerToolType`：
+  ```typescript
+  // 改为从 core/tools/ToolRegistry 导入，确保 player.ts 下也存在
+  import { registerToolType } from '../tools/ToolRegistry';
+  
+  registerToolType: (name, factory) => {
+    registerToolType(name, factory);
+    ledger.tools.push(name);
+  },
+  ```
+
+#### 1.2 提取 ToolRegistry
+
+- 新建 `src/core/tools/ToolRegistry.ts`：
+  ```typescript
+  import type { ToolFactory } from '../../editor/input/SceneTool'; // 类型仅编译期
+
+  export const TOOL_REGISTRY: Record<string, ToolFactory> = {};
+
+  export function registerToolType(type: string, factory: ToolFactory): void {
+    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
+    TOOL_REGISTRY[type] = factory;
   }
 
-  // ── 统一修改入口 ──
-  dispatch(cmd: Command): boolean {
-    if (this.mode !== 'edit') {
-      console.warn(`[EditorHost] Blocked ${cmd.type} while in ${this.mode} mode`);
-      return false;
+  export function unregisterToolType(type: string): void {
+    delete TOOL_REGISTRY[type];
+  }
+  ```
+
+- 修改原 `src/tools/ToolSystem.ts`（后续将移入 `src/editor/input/`）：
+  - 移除模块级的 `TOOL_REGISTRY`、`registerToolType`、`unregisterToolType`
+  - 改为 `import { TOOL_REGISTRY, registerToolType } from '../../core/tools/ToolRegistry'`
+
+#### 1.3 创建 AppHost
+
+- 新建 `src/host/AppHost.ts`：
+  ```typescript
+  import { Engine } from '../core/Engine';
+  import { EventBus } from '../core/events/EventBus';
+  import type { Command, CommandContext } from '../editor/commands/Command';
+  import type { UILayer } from '../ui/UILayer';
+
+  export class AppHost {
+    public engine: Engine;
+    public eventBus: EventBus;
+    private uiLayers: UILayer[] = [];
+    private uiContainer: HTMLElement;
+    private editorLayer?: { dispatch(cmd: Command): boolean };
+
+    constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
+      this.engine = new Engine(canvas);
+      this.eventBus = this.engine.eventBus;
+      this.uiContainer = uiContainer;
     }
-    const ctx: CommandContext = { engine: this.engine };
-    if (!cmd.execute(ctx)) return false;
 
-    // 合并连续同类型命令（如连续拖拽）
-    const last = this.undoStack[this.undoStack.length - 1];
-    if (last && last.type === cmd.type && (last as any).canMerge?.(cmd)) {
-      this.undoStack[this.undoStack.length - 1] = (last as any).merge(cmd);
-    } else {
-      this.undoStack.push(cmd);
-      if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+    async init() { await this.engine.init(); }
+    async loadApp(name: string) { await this.engine.loadApp(name); }
+    startLoop() { this.engine.startLoop(); }
+    resize() { this.engine.resize(); }
+    get engineConfig() { return this.engine.engineConfig; }
+
+    // 只读代理
+    get scene() { return this.engine.scene; }
+    get renderGraph() { return this.engine.renderGraph; }
+
+    mountLayer(layer: UILayer) {
+      layer.mount(this.uiContainer, this);
+      this.uiLayers.push(layer);
+      if (layer.id === 'editor') {
+        this.editorLayer = layer as unknown as { dispatch(cmd: Command): boolean };
+      }
     }
-    this.redoStack = [];
-    this.engine.eventBus.emit('editor:changed', { source: cmd.type });
-    return true;
+
+    unmountAll() {
+      for (const layer of this.uiLayers) layer.unmount();
+      this.uiLayers = [];
+      this.editorLayer = undefined;
+    }
+
+    dispatch(cmd: Command): boolean {
+      if (this.editorLayer) {
+        return this.editorLayer.dispatch(cmd);
+      }
+      // 运行时无编辑器：直接执行，不入栈
+      const ctx: CommandContext = { engine: this.engine };
+      return cmd.execute(ctx);
+    }
+
+    async loadAppUI(appBase: string) { /* Phase 5 实现 */ }
+  }
+  ```
+
+#### 1.4 创建 UILayer 接口
+
+- 新建 `src/ui/UILayer.ts`：
+  ```typescript
+  import type { AppHost } from '../host/AppHost';
+
+  export interface UILayer {
+    id: string;
+    mount(container: HTMLElement, host: AppHost): void | Promise<void>;
+    unmount(): void;
+  }
+  ```
+
+---
+
+### Phase 2：迁移 ToolSystem 为编辑器内置模块（40 分钟）
+
+#### 2.1 移动文件
+
+- 将 `src/tools/` 下所有文件移动到 `src/editor/input/`
+- 更新这些文件内部的 import 路径（如 `../ecs/Scene` → `../../core/ecs/Scene`）
+
+#### 2.2 新建 EditorInputManager
+
+- 新建 `src/editor/input/EditorInputManager.ts`：
+  ```typescript
+  import { ToolSystem } from './ToolSystem';
+  import type { Scene } from '../../core/ecs/Scene';
+  import type { EventBus } from '../../core/events/EventBus';
+
+  export class EditorInputManager {
+    private toolSystem: ToolSystem;
+
+    constructor(
+      scene: Scene,
+      eventBus: EventBus,
+      getSystem: <T>(name: string) => T | null,
+      getAspect: () => number,
+    ) {
+      this.toolSystem = new ToolSystem(scene, eventBus, getSystem, getAspect);
+    }
+
+    /** 加载当前 App 的 tools.json */
+    async loadTools(appBase: string, toolsPath: string): Promise<void> {
+      this.toolSystem.setBase(appBase);
+      await this.toolSystem.loadFromFile(`${appBase}/${toolsPath}`);
+    }
+
+    dispose(): void {
+      this.toolSystem.dispose();
+    }
+  }
+  ```
+
+**注意**：`ToolSystem` 本身没有 `attach(canvas)` / `detach()` 方法，它通过 `load()` 在内部管理 `SceneTool.attach/detach`。`EditorInputManager` 封装的是 `loadTools` 和 `dispose`，不要调用不存在的 `attach/detach`。
+
+---
+
+### Phase 3：重构编辑器 UI 层（EditorUILayer）（70 分钟）
+
+#### 3.1 重命名 EditorHost → EditorCommandBus
+
+- 移动 `src/editor/EditorHost.ts` → `src/editor/EditorCommandBus.ts`
+- 类名改为 `EditorCommandBus`
+- 保留所有原有逻辑（`dispatch`, `undo`, `redo`, `play`, `pause`, `stop`, `setField`, `createEntity`, `removeEntity`, `mutateRenderGraph`）
+- 保持 `Command` 相关实现完全不变
+
+#### 3.2 修改 EditorPanel 和 PipelinePanel
+
+- **移除**对 Core 单例的**写入**依赖，保留**只读** import：
+  - 保留 `import { schemaRegistry } from '../ecs/SchemaRegistry'`（只读查询）
+  - 保留 `import { PipelineLoader } from '../render/PipelineLoader'`（只读查询）
+  - 移除任何直接调用 `scene.setField`、`renderGraph.fromData` 的代码，改为通过 `commandBus.dispatch()` 执行
+
+- **修改构造函数/attach 签名**：
+  - 原 `EditorPanel` 接收 `container: HTMLElement`，内部通过固定 ID 查找子元素
+  - 改为接收 `host: AppHost` 或 `commandBus: EditorCommandBus`，不再直接操作 Engine
+
+#### 3.3 新建 EditorUILayer
+
+- 新建 `src/ui/layers/EditorUILayer.ts`：
+  ```typescript
+  import type { AppHost } from '../../host/AppHost';
+  import type { UILayer } from '../UILayer';
+  import type { Command } from '../../editor/commands/Command';
+  import { EditorCommandBus } from '../../editor/EditorCommandBus';
+  import { EditorInputManager } from '../../editor/input/EditorInputManager';
+  import { EditorPanel } from '../../editor/EditorPanel';
+  import { PipelinePanel } from '../../editor/PipelinePanel';
+
+  export class EditorUILayer implements UILayer {
+    id = 'editor';
+    private commandBus?: EditorCommandBus;
+    private inputManager?: EditorInputManager;
+    private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
+
+    async mount(container: HTMLElement, host: AppHost) {
+      // ── 1. 构建编辑器 DOM 结构 ──
+      // 原 main.ts 中的 tab 结构移入此处
+      container.innerHTML = `
+        <div class="editor-head">
+          <span class="ed-title">Scene Editor</span>
+          <div class="editor-btn-row">
+            <button class="editor-btn" id="btn-save">Save JSON</button>
+            <button class="editor-btn" id="btn-load">Load JSON</button>
+          </div>
+        </div>
+        <div class="tab-bar">
+          <button class="tab-btn active" data-tab="scene">Scene</button>
+          <button class="tab-btn" data-tab="pipeline">Pipeline</button>
+        </div>
+        <div id="tab-scene" style="display:flex"></div>
+        <div id="tab-pipeline" style="display:none"></div>
+      `;
+
+      const sceneContainer = container.querySelector('#tab-scene') as HTMLElement;
+      const pipelineContainer = container.querySelector('#tab-pipeline') as HTMLElement;
+
+      // ── 2. 初始化命令总线 ──
+      this.commandBus = new EditorCommandBus(host.engine);
+
+      // ── 3. 初始化输入管理器（拾取/工具）──
+      this.inputManager = new EditorInputManager(
+        host.engine.scene,
+        host.eventBus,
+        (name) => host.engine.systemRegistry.resolve({ name }),
+        () => host.engine.aspect(),
+      );
+
+      // 加载当前 App 的 tools.json（关键：补全原 Engine 中的加载逻辑）
+      const appName = host.engine.currentApp;
+      if (appName) {
+        const base = `${host.engineConfig.appsRoot}/${appName}`;
+        try {
+          const manifestResp = await fetch(`${base}/app.json`);
+          if (manifestResp.ok) {
+            const manifest = await manifestResp.json();
+            if (manifest.tools) {
+              await this.inputManager.loadTools(base, manifest.tools);
+            }
+          }
+        } catch (e) {
+          console.warn('[EditorUILayer] failed to load tools:', e);
+        }
+      }
+
+      // ── 4. 初始化面板 ──
+      const editorPanel = new EditorPanel(sceneContainer);
+      const pipelinePanel = new PipelinePanel(pipelineContainer);
+
+      editorPanel.attach(this.commandBus);
+      pipelinePanel.attach(this.commandBus);
+      editorPanel.render();
+      pipelinePanel.render();
+
+      // 绑定 tab 切换
+      const buttons = container.querySelectorAll<HTMLButtonElement>('.tab-btn');
+      buttons.forEach(btn => {
+        btn.onclick = () => {
+          const tab = btn.dataset.tab;
+          buttons.forEach(b => b.classList.toggle('active', b === btn));
+          sceneContainer.style.display = tab === 'scene' ? 'flex' : 'none';
+          pipelineContainer.style.display = tab === 'pipeline' ? 'flex' : 'none';
+        };
+      });
+
+      // 绑定 app 切换回调（原 main.ts 中的 switchToApp）
+      editorPanel.onAppSwitch = async (name: string) => {
+        await host.loadApp(name);
+        editorPanel.render();
+        pipelinePanel.render();
+      };
+
+      this.panels = { editor: editorPanel, pipeline: pipelinePanel };
+
+      // 监听引擎事件刷新面板
+      host.eventBus.on('editor:changed', () => {
+        editorPanel.render();
+        pipelinePanel.render();
+      });
+    }
+
+    unmount() {
+      this.inputManager?.dispose();
+      this.commandBus = undefined;
+      this.panels = {};
+    }
+
+    dispatch(cmd: Command): boolean {
+      return this.commandBus?.dispatch(cmd) ?? false;
+    }
+  }
+  ```
+
+**关键修正**：
+- `EditorUILayer` 负责构建原 `index.html` 中的 tab DOM 结构
+- `EditorPanel` 和 `PipelinePanel` 分别挂载到 `#tab-scene` 和 `#tab-pipeline` 子容器
+- 在 `mount()` 中**补全** `tools.json` 的加载（原由 Engine 执行）
+- `onAppSwitch` 逻辑从 `main.ts` 移入 `EditorUILayer`
+
+---
+
+### Phase 4：创建双入口（main.ts / player.ts）（20 分钟）
+
+#### 4.1 重构 main.ts（编辑器入口）
+
+```typescript
+import { AppHost } from './host/AppHost';
+import { EditorUILayer } from './ui/layers/EditorUILayer';
+
+const canvas = document.getElementById('canvas') as HTMLCanvasElement;
+const uiContainer = document.getElementById('ui-container')!;
+
+async function main() {
+  if (!navigator.gpu) {
+    document.getElementById('error')!.textContent = 'WebGPU is not supported.';
+    return;
   }
 
-  undo(): void {
-    if (this.undoStack.length === 0) return;
-    const cmd = this.undoStack.pop()!;
-    cmd.undo({ engine: this.engine });
-    this.redoStack.push(cmd);
-    this.engine.eventBus.emit('editor:changed', { source: 'undo' });
+  try {
+    const host = new AppHost(canvas, uiContainer);
+    await host.init();
+
+    const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
+    await host.loadApp(appName);
+
+    // 挂载编辑器层（含命令总线、输入管理器、面板）
+    host.mountLayer(new EditorUILayer());
+
+    // 加载 App 自定义 UI
+    await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
+
+    window.addEventListener('resize', () => host.resize());
+    host.startLoop();
+
+    (window as any).host = host;
+    console.log('[ShaderLab] editor mode initialized');
+  } catch (err) {
+    console.error(err);
+    document.getElementById('error')!.textContent = `Error: ${err}`;
+  }
+}
+
+main();
+```
+
+#### 4.2 新建 player.ts（运行时入口）
+
+```typescript
+import { AppHost } from './host/AppHost';
+
+const canvas = document.getElementById('canvas') as HTMLCanvasElement;
+const uiContainer = document.getElementById('ui-container')!;
+
+async function main() {
+  if (!navigator.gpu) {
+    document.getElementById('error')!.textContent = 'WebGPU is not supported.';
+    return;
   }
 
-  redo(): void {
-    if (this.redoStack.length === 0) return;
-    const cmd = this.redoStack.pop()!;
-    cmd.execute({ engine: this.engine });
-    this.undoStack.push(cmd);
-    this.engine.eventBus.emit('editor:changed', { source: 'redo' });
-  }
+  try {
+    const host = new AppHost(canvas, uiContainer);
+    await host.init();
 
-  // ── 便捷方法（Panel 可直接调用） ──
-  setField(entityKey: string, comp: string, field: string, value: unknown): boolean {
-    return this.dispatch(new SetFieldCommand(entityKey, comp, field, value));
-  }
-  createEntity(key: string, data: Record<string, Record<string, unknown>>): boolean {
-    return this.dispatch(new CreateEntityCommand(key, data));
-  }
-  removeEntity(key: string): boolean {
-    return this.dispatch(new RemoveEntityCommand(key));
-  }
-  mutateRenderGraph(data: object): boolean {
-    return this.dispatch(new MutateRenderGraphCommand(data));
-  }
+    const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
+    await host.loadApp(appName);
 
-  // ── 读代理（可选，逐步迁移） ──
-  get scene() { return this.engine.scene; }
-  get renderGraph() { return this.engine.renderGraph; }
+    // ❌ 不挂载 EditorUILayer
+    // ❌ 不加载 EditorInputManager
+
+    // ✅ 仅加载 App 自定义 UI
+    await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
+
+    window.addEventListener('resize', () => host.resize());
+    host.startLoop();
+
+    (window as any).host = host;
+    console.log('[ShaderLab] player mode initialized');
+  } catch (err) {
+    console.error(err);
+    document.getElementById('error')!.textContent = `Error: ${err}`;
+  }
+}
+
+main();
+```
+
+---
+
+### Phase 5：实现 App 自定义 UI 数据驱动加载（30 分钟）
+
+在 `AppHost` 中实现：
+
+```typescript
+private appUILayers: Array<{ id: string; unmount: () => void }> = [];
+
+async loadAppUI(appBase: string) {
+  // 清理旧的 App UI
+  for (const layer of this.appUILayers) layer.unmount();
+  this.appUILayers = [];
+
+  const manifestResp = await fetch(`${appBase}/app.json`);
+  if (!manifestResp.ok) return;
+  const manifest = await manifestResp.json();
+  if (!manifest.ui) return;
+
+  const configs = await fetch(`${appBase}/${manifest.ui}`).then(r => r.json());
+  for (const cfg of configs) {
+    const container = document.querySelector(cfg.container) ?? this.createContainer(cfg.id);
+    const mod = await this.loadUIScript(`${appBase}/${cfg.source}`);
+    const unmount = mod.mount(container, this);
+    this.appUILayers.push({ id: cfg.id, unmount });
+  }
+}
+
+private createContainer(id: string): HTMLElement {
+  const el = document.createElement('div');
+  el.id = `ui-${id}`;
+  this.uiContainer.appendChild(el);
+  return el;
+}
+
+private async loadUIScript(url: string): Promise<{ mount: Function; unmount?: Function }> {
+  const resp = await fetch(`${url}?t=${Date.now()}`);
+  if (!resp.ok) throw new Error(`UI script not found: ${url}`);
+  const src = await resp.text();
+  const blob = new Blob([src], { type: 'text/javascript' });
+  const blobUrl = URL.createObjectURL(blob);
+  try {
+    const mod = await import(/* @vite-ignore */ blobUrl);
+    return mod.default ?? mod;
+  } finally {
+    URL.revokeObjectURL(blobUrl);
+  }
+}
+```
+
+在 `apps/demo1/app.json` 中添加：
+```json
+{
+  "name": "demo1",
+  "ui": "ui-config.json"
+}
+```
+
+创建 `apps/demo1/ui-config.json`：
+```json
+[
+  {
+    "id": "demo-hud",
+    "source": "ui/demoHUD.js",
+    "container": "#hud-container"
+  }
+]
+```
+
+创建 `apps/demo1/ui/demoHUD.js`：
+```javascript
+export function mount(container, host) {
+  const btn = document.createElement('button');
+  btn.textContent = 'Click Me';
+  btn.onclick = () => {
+    host.eventBus.emit('toast:show', 'Hello from App UI!');
+  };
+  container.appendChild(btn);
+  return () => { btn.remove(); };
 }
 ```
 
 ---
 
-## 4. 实施步骤
+### Phase 6：清理遗留文件与验证（20 分钟）
 
-### Step 1：创建 Command 基础设施（新增 3 个文件）
+1. **删除以下旧文件**（内容已迁移）：
+   - `src/editor/EditorHost.ts`（已重命名为 EditorCommandBus）
+   - `src/tools/`（已移动到 `src/editor/input/`）
 
-1. `src/editor/commands/Command.ts` — 定义 `Command` / `CommandContext` 接口
-2. `src/editor/commands/SceneCommands.ts` — `SetFieldCommand`、`CreateEntityCommand`、`RemoveEntityCommand`
-3. `src/editor/commands/RenderGraphCommands.ts` — `MutateRenderGraphCommand`
+2. **验证编译**：
+   ```bash
+   npx tsc --noEmit
+   ```
+   确保无 import 路径错误。
 
-**注意**：`RemoveEntityCommand` 的 `serializeEntity` 需要读取 entity 的所有 component 数据。参考 `Engine.ts` 中 `exportScene()` 和 `Scene.ts` 中 `toJSON()` 的逻辑，但只序列化单个 entity。
-
-### Step 2：创建 EditorHost（新增 1 个文件）
-
-4. `src/editor/EditorHost.ts` — 实现 `EditorHost` 类
-
-### Step 3：迁移 EditorPanel（修改 1 个文件）
-
-5. `src/editor/EditorPanel.ts`：
-   - 将 `private engine!: Engine` 改为 `private host!: EditorHost`
-   - `attach(engine)` 改为 `attach(host: EditorHost)`
-   - 所有 `this.engine.scene.setField(...)` 改为 `this.host.setField(...)`
-   - 所有 `this.engine.scene.createEntity(...)` 改为 `this.host.createEntity(...)`
-   - 所有 `this.engine.scene.removeEntity(...)` 改为 `this.host.removeEntity(...)`
-   - `saveJSON()` 中 `this.engine.exportScene()` 改为 `this.host.scene.toJSON()`（或保留 `this.host.engine.exportScene()`）
-   - `loadJSON()` 中 `this.engine.loadSceneData(...)` 和 `this.engine.loadApp(...)` 暂时保留直接访问（App 切换不属于 Editor 细粒度 Undo 范围）
-   - 删除 `syncTimer` 中的 `entityKeyMap.size` 轮询重建逻辑，改为监听 `editor:changed` 事件：
-     ```ts
-     attach(host: EditorHost): void {
-       this.host = host;
-       this.host.engine.eventBus.on('editor:changed', () => {
-         const count = this.host.scene.entityKeyMap.size;
-         if (count !== this.lastEntityCount) {
-           this.lastEntityCount = count;
-           this.render();
-           return;
-         }
-         for (const sync of this.syncers) sync();
-       });
-     }
-     ```
-
-### Step 4：迁移 PipelinePanel（修改 1 个文件）
-
-6. `src/editor/PipelinePanel.ts`：
-   - 将 `private engine!: Engine` 改为 `private host!: EditorHost`
-   - `attach(engine)` 改为 `attach(host: EditorHost)`
-   - 替换原有的 `history/future` 私有栈，改用 `EditorHost` 的 `undoStack`：
-     - `snapshot()` 改为 `this.host.mutateRenderGraph(this.host.renderGraph.toData())`
-     - `undo()` 改为 `this.host.undo()`
-     - `redo()` 改为 `this.host.redo()`
-   - 注意：`snapshot` 是每次参数修改前调用，而 `MutateRenderGraphCommand` 需要捕获修改后的完整数据。因此 `snapshot()` 方法应改为：
-     ```ts
-     private snapshot(): void {
-       // 记录当前状态，供下一次 mutation 的 undo 使用
-       this.pendingSnapshot = JSON.stringify(this.host.renderGraph.toData());
-     }
-     // 在参数 onChange 中：
-     // 1. 用 pendingSnapshot 创建 Command（undo 目标）
-     // 2. 应用修改
-     // 3. 用新数据创建 Command 并 dispatch
-     ```
-     更简单的方式：在 `onChange` 回调中直接构造 `MutateRenderGraphCommand`：
-     ```ts
-     onChange: () => {
-       const next = this.host.renderGraph.toData();
-       this.host.mutateRenderGraph(next);
-     }
-     ```
-     但这里有个问题：`MutateRenderGraphCommand` 的构造函数接收的是**修改后的数据**，execute 时直接 `fromData(next)`，undo 时恢复 `prevData`。所以 `snapshot()` 不需要了——每次用户触发修改时，直接 `host.mutateRenderGraph(engine.renderGraph.toData())` 是不对的，因为此时数据已经被改了。
-
-     **正确做法**：保留 `snapshot()` 但改为记录 `prevData`，然后在修改后 dispatch：
-     ```ts
-     private beforeMutation(): string {
-       return JSON.stringify(this.host.renderGraph.toData());
-     }
-     // 在 onChange 中：
-     const prev = this.beforeMutation();
-     config.primitive.topology = v as GPUPrimitiveTopology;
-     this.host.dispatch(new MutateRenderGraphCommand(this.host.renderGraph.toData(), prev));
-     ```
-     因此 `MutateRenderGraphCommand` 需要支持传入 `prevData`：
-     ```ts
-     constructor(private nextData: object, prevData?: string) {
-       this.prevData = prevData ?? JSON.stringify(nextData); // 如果未传入，则 next === prev（无变化）
-     }
-     ```
-     或者保持简单：在 `PipelinePanel` 中仍然自己维护 `history/future`，但把 `history` 的 push/pop 委托给 `EditorHost` 的 `dispatch`。Phase 1 允许 PipelinePanel 保留自己的 snapshot 逻辑，只是将 `engine` 引用改为 `host.engine`。
-
-### Step 5：修改 main.ts（修改 1 个文件）
-
-7. `src/main.ts`：
-   - 导入 `EditorHost`
-   - 在 `engine.init()` 之后创建 `const host = new EditorHost(engine);`
-   - `editor.attach(engine)` 改为 `editor.attach(host)`
-   - `pipelinePanel.attach(engine)` 改为 `pipelinePanel.attach(host)`
-   - `editor.onAppSwitch = switchToApp` 保留（App 切换是 Host 级别操作，未来可移入 Host，Phase 1 不动）
-
-### Step 6：Engine 帧循环添加模式感知（可选，修改 1 个文件）
-
-8. `src/Engine.ts`：
-   - 在 `Engine` 类中添加 `editorHost?: EditorHost`（可选引用）
-   - 在 `frame()` 方法中，Play 模式下可以跳过 `script` / `physics` 系统（如果 Editor 要求）：
-     ```ts
-     // 在 Engine.frame 中：
-     const skipSystems = this.editorHost?.editMode === 'edit' 
-       ? new Set(['script', 'physics']) 
-       : new Set();
-     for (const sys of this.activeSystems) {
-       if (skipSystems.has(sys.name)) continue;
-       // ...
-     }
-     ```
-     这一步是可选的，Phase 1 可以只做 Host 的 Play/Stop 状态切换，不修改 Engine 帧逻辑。
+3. **验证构建**：
+   ```bash
+   npm run build
+   ```
+   确保 `dist/` 下同时存在 `index.html` 和 `player.html` 的入口。
 
 ---
 
-## 5. 文件变更清单
+## 四、验收检查清单
 
-| 操作 | 文件路径 | 说明 |
-|------|----------|------|
-| 新增 | `src/editor/commands/Command.ts` | 接口定义 |
-| 新增 | `src/editor/commands/SceneCommands.ts` | 场景相关 Command |
-| 新增 | `src/editor/commands/RenderGraphCommands.ts` | 渲染图相关 Command |
-| 新增 | `src/editor/EditorHost.ts` | 核心类 |
-| 修改 | `src/editor/EditorPanel.ts` | 迁移写操作到 Host |
-| 修改 | `src/editor/PipelinePanel.ts` | 迁移 engine 引用到 host |
-| 修改 | `src/main.ts` | 初始化 Host 并注入 Panel |
-| 可选修改 | `src/Engine.ts` | 添加 `editorHost` 引用和帧循环模式感知 |
+### 1. 编辑器模式（`npm run dev` → 访问 `index.html`）
 
----
+- [ ] 场景树显示所有实体，点击实体高亮
+- [ ] 属性面板修改字段，3D 场景实时更新
+- [ ] 管线面板修改拓扑/混合模式，渲染效果变化
+- [ ] 点击 3D 视口内的模型，场景树自动高亮（验证 `EditorInputManager` + `tools.json` 加载）
+- [ ] `Ctrl+Z` / `Ctrl+Y` 撤销/重做正常工作
+- [ ] 切换 App（如 `?app=demo2`）后编辑器面板正确刷新
 
-## 6. 验收标准
+### 2. 运行时模式（`npm run dev` → 访问 `player.html`）
 
-完成以下测试即视为 Phase 1 成功：
+- [ ] 页面仅显示 3D 画布和 App UI（无场景树/管线面板）
+- [ ] 点击 3D 视口无拾取反应（无 `editor:select` 事件）
+- [ ] 控制台无报错
+- [ ] 插件系统正常加载（验证 `registerToolType` 在 player 模式下不崩溃）
 
-1. **编译通过**：`tsc --noEmit` 无错误
-2. **场景编辑 Undo**：
-   - 打开 EditorPanel，选中 Cube，修改 Transform.position.x
-   - 按 `Ctrl+Z`，字段值恢复，场景中 Cube 位置恢复
-   - 按 `Ctrl+Shift+Z`，Redo 生效
-3. **Entity 增删 Undo**：
-   - 点击 `+` 创建 Entity，Undo 后 Entity 消失
-   - 选中 Entity 点击 `✕` 删除，Undo 后 Entity 恢复且数据完整
-4. **跨 Panel Undo**：
-   - 修改场景字段 → 切换 PipelinePanel → 修改管线参数 → 连续按 `Ctrl+Z`
-   - 期望：先撤销管线修改，再撤销场景修改（统一栈）
-5. **Play 模式保护**：
-   - 调用 `host.play()` 后，在 EditorPanel 修改字段
-   - 期望：控制台出现 warn，字段未被修改，`dispatch` 返回 `false`
-6. **PipelinePanel 兼容**：
-   - 修改 topology / cullMode / blend 等参数，Undo/Redo 正常工作
-   - recompile 触发正常
+### 3. App 自定义 UI
+
+- [ ] `apps/demo1/ui/demoHUD.js` 成功加载，按钮显示
+- [ ] 点击按钮，`toast:show` 事件被触发
+
+### 4. 架构规则验证
+
+- [ ] `src/core/` 下无任何文件 import `src/host/` 或 `src/ui/`
+- [ ] `src/ui/` 下无文件直接调用 `scene.setField`（必须通过 `host.dispatch`）
 
 ---
 
-## 7. 风险与回退方案
+## 五、回滚策略
+
+如果上述验收项任意 **2 项失败**：
+
+1. 立即停止修改，不要强行修复
+2. 执行 `git reset --hard HEAD` 回退到重构前的 commit
+3. 记录失败的验收项及错误日志，分析根因后重新执行
+
+---
+
+## 六、风险与注意事项
 
 | 风险 | 缓解措施 |
-|------|----------|
-| `RemoveEntityCommand` 备份数据不完整 | 参考 `Scene.toJSON()` 的单 entity 逻辑，若组件读取失败则 warn 并跳过 |
-| PipelinePanel 的 snapshot 与 Host Undo 冲突 | Phase 1 允许 PipelinePanel 保留自己的 history，但快捷键统一走 `host.undo()`。若冲突，优先保证 PipelinePanel 原有功能 |
-| `editor:changed` 事件触发过于频繁 | `SetFieldCommand` 每次都会触发事件。若性能有问题，后续可改为批量触发或节流 |
-| Play/Stop 恢复数据时丢失运行时生成的 Entity | 这是预期行为。`editSnapshot` 只保存编辑态，Stop 时恢复。若需保留运行时数据，Phase 2 引入分支快照 |
+|------|---------|
+| `ToolSystem` 迁移后事件绑定失效 | `EditorInputManager` 封装的是 `loadTools` 和 `dispose`，不虚构 `attach/detach` API |
+| `player.ts` 下插件调用 `registerToolType` 崩溃 | 将模块级 `TOOL_REGISTRY` 保留在 `src/core/tools/ToolRegistry.ts`，与 `ToolSystem` 类解耦 |
+| `EditorPanel` / `PipelinePanel` 找不到挂载点 | `EditorUILayer.mount()` 负责构建 tab DOM 结构，面板挂载到子容器 |
+| `tools.json` 加载时机丢失 | `EditorUILayer.mount()` 中主动 fetch `app.json` 并加载 `tools.json` |
+| Vite 不打包 `player.html` | Phase 0 中已在 `vite.config.ts` 配置 `rollupOptions.input` |
+| Vue 引入导致构建问题 | 本次仅安装插件，不迁移现有面板，不影响现有构建 |
 
 ---
 
-## 8. 后续扩展方向（Phase 2+）
+**预估总时间**：约 3.5 小时（含验收）。
 
-| 阶段 | 内容 | 收益 |
-|------|------|------|
-| Phase 2 | 引入 `MacroCommand`（批量命令封装） | 支持"组合操作"一键撤销 |
-| Phase 2 | `EditorPanel` / `PipelinePanel` 完全移除 `engine` 直接引用 | 所有读操作通过 Host 代理，Engine 可被 Mock 用于测试 |
-| Phase 3 | ViewModel 层（`SceneVM`、`RenderGraphVM`） | 替换 100ms 轮询为响应式更新 |
-| Phase 3 | Editor 插件化 | 将 Editor 代码移入 `public/plugins/editor/`，通过 `EnginePlugin` 加载 |
-| Phase 4 | 多人协作 | Command 序列化后可通过 WebSocket 广播，实现操作同步 |
-
----
-
-## 9. 关键代码片段参考
-
-### RemoveEntityCommand 的 serializeEntity 实现
-
-```ts
-private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
-  const result: Record<string, Record<string, unknown>> = {};
-  // 获取该 entity 的所有 component（参考 Scene.entityComponents）
-  const comps = ctx.engine.scene['entityComponents'].get(eid) ?? [];
-  for (const compName of comps) {
-    const comp = schemaRegistry.get(compName);
-    if (comp && ctx.engine.scene.hasComponent(eid, compName)) {
-      result[compName] = schemaRegistry.readAllFields(compName, comp, eid);
-    }
-  }
-  return result;
-}
-```
-
-> 注意：`entityComponents` 是 `Scene` 的 private 字段。Phase 1 可以通过 `scene['entityComponents']` 访问，或给 `Scene` 添加 `getEntityComponents(eid): string[]` 公共方法（推荐后者，修改 Scene.ts 添加一个 getter）。
-
-### EditorPanel 的 eventBus 监听替代 setInterval
-
-```ts
-attach(host: EditorHost): void {
-  this.host = host;
-  // 替代原有的 setInterval
-  host.engine.eventBus.on('editor:changed', () => {
-    const count = host.scene.entityKeyMap.size;
-    if (count !== this.lastEntityCount) {
-      this.lastEntityCount = count;
-      this.render();
-      return;
-    }
-    for (const sync of this.syncers) sync();
-  });
-}
-```
-
----
-
-*本计划基于 engine.md 的当前代码结构制定，所有文件路径、类名、方法名均与现有代码一致，可直接执行。*
+**执行开始**：从 Phase 0 依次向下执行，每个 Phase 完成后执行一次 `git commit -m "phase N: ..."`，方便回滚。

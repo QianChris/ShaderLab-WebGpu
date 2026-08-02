@@ -25,6 +25,12 @@
             display: none; z-index: 10;
         }
 
+        /* App UI layers mount here (ui-config.json) */
+        #ui-container {
+            position: fixed; inset: 0; pointer-events: none; z-index: 5;
+        }
+        #ui-container > * { pointer-events: auto; }
+
         /* Sidebar + tabs */
         #sidebar {
             min-width:300px; max-width:340px; height:100vh;
@@ -179,6 +185,7 @@
                 <div id="pipeline-panel"></div>
             </div>
         </div>
+        <div id="ui-container"></div>
     </div>
     <script type="module" src="/src/main.ts"></script>
 </body>
