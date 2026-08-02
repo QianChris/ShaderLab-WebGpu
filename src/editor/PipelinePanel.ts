@@ -21,6 +21,7 @@ const COMPARE_OPTIONS: string[] = [
 export class PipelinePanel {
     private panel: HTMLElement;
     private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
 
     private get blendOptions(): string[] {
         return PipelineLoader.blendPresetNames.length > 0
@@ -44,7 +45,8 @@ export class PipelinePanel {
                 this.bus.redo();
             }
         });
-        bus.engine.eventBus.on('editor:changed', () => this.render());
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => this.render());
     }
 
     /** Dispatch a structural edit (enabled/params) as a live-sync patch. */

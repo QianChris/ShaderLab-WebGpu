@@ -6,6 +6,7 @@ import { ce, makeFloatField, makeSelect } from './dom';
 export class EditorPanel {
     private panel: HTMLElement;
     private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
     private selected = '';
     private syncers: (() => void)[] = [];
     private lastEntityCount = -1;
@@ -25,7 +26,10 @@ export class EditorPanel {
 
     attach(bus: EditorCommandBus): void {
         this.bus = bus;
-        bus.engine.eventBus.on('editor:changed', () => {
+        // Idempotent: app switch clears the event bus, so re-attaching must not
+        // double-subscribe.
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => {
             const count = bus.scene.entityKeyMap.size;
             if (count !== this.lastEntityCount) {
                 this.lastEntityCount = count;
@@ -248,6 +252,13 @@ export class EditorPanel {
         if (!name) return;
         this.bus.createEntity(name, {});
         this.selected = name;
+        this.render();
+    }
+
+    /** Select an entity by key (from 3D picking or the entity list). */
+    select(key: string): void {
+        if (!this.bus.scene.entityKeyMap.has(key)) return;
+        this.selected = key;
         this.render();
     }
 

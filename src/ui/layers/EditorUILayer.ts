@@ -18,6 +18,7 @@ export class EditorUILayer implements UILayer {
     private inputManager?: EditorInputManager;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private host?: AppHost;
+    private unsubscribePick?: () => void;
 
     async mount(container: HTMLElement, host: AppHost) {
         this.host = host;
@@ -75,18 +76,39 @@ export class EditorUILayer implements UILayer {
         // ── 7. Load the current app's tools.json (engine no longer does this) ──
         const appName = host.engine.currentApp;
         if (appName) await this.loadToolsFor(appName);
+
+        // ── 8. Wire 3D picking → scene-tree selection (event channel only) ──
+        this.subscribePick();
+    }
+
+    /** Pick tools emit a 'pick' event ({ key, eid, ... }); highlight the entity.
+     *  Re-subscribed on app switch (unloadCurrentApp clears the event bus). */
+    private subscribePick(): void {
+        if (!this.host || !this.panels.editor) return;
+        this.unsubscribePick?.();
+        this.unsubscribePick = this.host.eventBus.on('pick', (payload) => {
+            const key = (payload as { key?: string })?.key;
+            if (key) this.panels.editor?.select(key);
+        });
     }
 
     /** Reload the editor for a different app: detach old tools, load the app,
-     *  reload its tools.json and refresh both panels. Exposed for devtools
-     *  (window.switchApp) and the panel's Load-JSON-of-app.json path. */
+     *  reload its tools.json + app UI and refresh both panels. Exposed for
+     *  devtools (window.switchApp) and the panel's Load-JSON-of-app.json path. */
     async switchApp(name: string): Promise<void> {
         if (!this.host) return;
         this.inputManager?.dispose();
         await this.host.loadApp(name);
+        await this.host.loadAppUI(`${this.host.engineConfig.appsRoot}/${name}`);
         await this.loadToolsFor(name);
+        // unloadCurrentApp clears the event bus → re-subscribe panel listeners.
+        if (this.commandBus) {
+            this.panels.editor?.attach(this.commandBus);
+            this.panels.pipeline?.attach(this.commandBus);
+        }
         this.panels.editor?.render();
         this.panels.pipeline?.render();
+        this.subscribePick();
     }
 
     /** Fetch the app manifest's tools.json and load it through the input manager. */
@@ -107,6 +129,7 @@ export class EditorUILayer implements UILayer {
 
     unmount(): void {
         this.inputManager?.dispose();
+        this.unsubscribePick?.();
         this.commandBus = undefined;
         this.inputManager = undefined;
         this.panels = {};
