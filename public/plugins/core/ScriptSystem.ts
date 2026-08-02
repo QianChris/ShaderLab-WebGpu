@@ -35,6 +35,10 @@ export class ScriptSystem implements System {
     private query!: (w: import('bitecs').World) => readonly number[];
     private modules = new Map<string, ScriptModule>();
     private loading = new Set<string>();
+    /** Paths whose hot-reload import is in flight. While a path is reloading,
+     *  update() must NOT fall back to load() (which would re-fetch the OLD file
+     *  from disk and clobber the just-edited in-memory source). */
+    private reloading = new Set<string>();
     private initialized = new Set<string>();
 
     constructor(bus: EventBus, baseDir = '') {
@@ -70,6 +74,7 @@ export class ScriptSystem implements System {
         this.modules.clear();
         this.initialized.clear();
         this.loading.clear();
+        this.reloading.clear();
     }
 
     /** Hot-reload a gameplay script (ScriptComponent.script path) with in-memory
@@ -77,6 +82,7 @@ export class ScriptSystem implements System {
      *  implementation; per-entity init() is re-run lazily. Throws on bad import. */
     reloadScript(path: string, source: string): void {
         this.modules.delete(path);
+        this.reloading.add(path);
         for (const key of [...this.initialized]) {
             if (key.startsWith(`${path}#`)) this.initialized.delete(key);
         }
@@ -89,7 +95,10 @@ export class ScriptSystem implements System {
             .catch(err => {
                 console.error(`[ScriptSystem] failed to hot-reload '${path}':`, err);
             })
-            .finally(() => URL.revokeObjectURL(blobUrl));
+            .finally(() => {
+                this.reloading.delete(path);
+                URL.revokeObjectURL(blobUrl);
+            });
     }
 
     /** All currently-loaded gameplay script paths (ScriptComponent.script).
@@ -110,6 +119,9 @@ export class ScriptSystem implements System {
 
             const mod = this.modules.get(path);
             if (!mod) {
+                // During a hot-reload the new module's import is in flight —
+                // don't re-fetch the old file from disk (would clobber the edit).
+                if (this.reloading.has(path)) continue;
                 this.load(path);
                 continue;
             }
