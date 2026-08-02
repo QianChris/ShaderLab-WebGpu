@@ -38,6 +38,10 @@ export interface ShaderGraphDataNode {
     kind: ShaderGraphBufferKind;
     /** Per-item byte stride (storage buffers written by shaders). */
     stride?: number;
+    /** Lazily allocate a per-graph output storage buffer of
+     *  `allocCount` * `stride` bytes instead of reading an existing buffer.
+     *  `allocCount` is a component-field value source. */
+    allocCount?: string;
 }
 
 export interface ShaderGraphShaderNode {
@@ -125,6 +129,9 @@ export class ShaderGraphExecutor {
     /** Cache of compiled value-source closures keyed by the source string. */
     private compiledSrc = new Map<string, (ctx: ValueContext) => number | ArrayLike<number>>();
     private resolvedBuffers = new Map<string, GPUBuffer>();
+    /** Lazily-allocated output buffers (data nodes with allocCount). Owned by
+     *  the executor; recreated on demand when the count grows. */
+    private allocBuffers = new Map<string, { buffer: GPUBuffer; size: number }>();
     private entryPoints: string[] = [];
 
     constructor(
@@ -297,6 +304,27 @@ export class ShaderGraphExecutor {
 
     private resolveData(node: ShaderGraphDataNode, frame: ShaderGraphFrame): void {
         const { scene, eid, device } = frame;
+
+        // Lazily-allocated output storage buffer (self-contained graphs).
+        if (node.allocCount) {
+            const count = Math.max(0, Math.floor(Number(this.evalSource(node.allocCount, { scene, eid } as ValueContext))));
+            const stride = node.stride ?? 4;
+            const size = Math.max(16, count * stride);
+            let entry = this.allocBuffers.get(node.id);
+            if (!entry || entry.size < size) {
+                entry?.buffer.destroy();
+                const buffer = device.createBuffer({
+                    label: `${this.graph.name}/${node.id}`,
+                    size,
+                    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                });
+                entry = { buffer, size };
+                this.allocBuffers.set(node.id, entry);
+            }
+            this.resolvedBuffers.set(node.id, entry.buffer);
+            return;
+        }
+
         if (node.source.startsWith('buffer:')) {
             const name = node.source.slice(7);
             if (bufferRegistry.has(name)) {

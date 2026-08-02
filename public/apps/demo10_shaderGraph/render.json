@@ -1,0 +1,13 @@
+{
+  "name": "MainRenderGraph",
+  "clearColor": [0.05, 0.05, 0.1, 1.0],
+  "phases": {
+    "Compute": [
+      { "name": "DemoGraph", "pipeline": "graph.json", "kind": "shaderGraph", "enabled": true }
+    ],
+    "Opaque": [],
+    "Transparent": [],
+    "Skybox": [],
+    "Postprocess": []
+  }
+}
