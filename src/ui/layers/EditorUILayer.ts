@@ -42,14 +42,47 @@ export class EditorUILayer implements UILayer {
     private assetResizer?: HTMLElement;
     private sidebar?: HTMLElement;
     private assetBottom?: HTMLElement;
+    /** Document-level delegated tab handler (registered once in the ctor). Works
+     *  even if mount() throws before wiring per-button handlers. */
+    private docTabHandler: (ev: MouseEvent) => void;
+
+    constructor() {
+        // Document-level delegation is the LAST line of defense: as long as the
+        // sidebar + .tab-btn exist in the DOM, this handler switches tabs no
+        // matter what happens to per-button wiring. Registered here so it is
+        // active before mount() even starts.
+        this.docTabHandler = (ev: MouseEvent) => {
+            if (!this.sidebar) return;
+            const target = ev.target as HTMLElement | null;
+            const btn = target?.closest?.('.tab-btn') as HTMLButtonElement | null;
+            if (!btn) return;
+            const tab = btn.dataset.tab;
+            if (!tab) return;
+            console.log('[EditorUILayer] tab click (document delegate):', tab);
+            this.activateTab(tab);
+        };
+        document.addEventListener('click', this.docTabHandler);
+    }
 
     async mount(container: HTMLElement, host: AppHost) {
+        console.log('[EditorUILayer] mount() start');
         this.host = host;
+        try {
+            await this.mountInner(container, host);
+            console.log('[EditorUILayer] mount() complete');
+        } catch (err) {
+            console.error('[EditorUILayer] mount() failed:', err);
+        }
+    }
+
+    /** The actual mount work; wrapped so any failure is logged, not swallowed. */
+    private async mountInner(container: HTMLElement, host: AppHost): Promise<void> {
         const toolbar = this.findOrCreate(container, 'toolbar');
         const sidebar = this.findOrCreate(container, 'sidebar');
         this.sidebar = sidebar;
         this.attachSidebarResizer(sidebar);
         this.attachAssetResizer();
+        console.log('[EditorUILayer] mount: resizers ok, sidebar exists =', !!sidebar);
 
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
         this.commandBus = new EditorCommandBus(host.engine);
@@ -92,10 +125,12 @@ export class EditorUILayer implements UILayer {
         // always clickable even if a panel mount fails (a failed mount must not
         // leave the tab shell dead). ──
         this.wireTabs(sidebar);
+        console.log('[EditorUILayer] mount: tabs wired, buttons =', sidebar.querySelectorAll('.tab-btn').length);
 
         // ── 3c. Mount the Vue sidebar tabs + the asset view below the viewport ──
         this.mountVuePanels(sidebar);
         this.mountAssetPanel();
+        console.log('[EditorUILayer] mount: Vue panels mounted, unmount fns =', this.vueUnmounts.length);
 
         // ── 4. Input manager (tools/picking) — editor-only concern ──
         this.inputManager = new EditorInputManager(
@@ -212,25 +247,40 @@ export class EditorUILayer implements UILayer {
 
     /** Wire sidebar tab buttons to show/hide their panel divs. Runs before Vue
      *  panels mount so the shell stays responsive regardless of panel health.
-     *  When a panel becomes visible, a window resize is dispatched so embedded
-     *  editors (CodeMirror / vue-flow) re-measure their size in a visible box. */
+     *  Primary path is a document-level delegated click handler (registered in
+     *  the constructor); this method additionally refreshes per-button state so
+     *  the active highlight stays correct. When a panel becomes visible a window
+     *  resize is dispatched so embedded editors (CodeMirror / vue-flow)
+     *  re-measure their size in a visible box. */
     private wireTabs(sidebar: HTMLElement): void {
         const tabIds = ['scene', 'pipeline', ...this.vuePanels.map(p => p.id)];
         const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
         buttons.forEach(btn => {
             btn.onclick = () => {
-                const tab = btn.dataset.tab;
-                buttons.forEach(b => b.classList.toggle('active', b === btn));
-                for (const id of tabIds) {
-                    const panel = sidebar.querySelector<HTMLElement>(`#tab-${id}`);
-                    if (panel) panel.style.display = tab === id ? 'flex' : 'none';
-                }
-                // Let CodeMirror/vue-flow re-measure now that the container is
-                // visible (they size to 0 while display:none).
-                window.dispatchEvent(new Event('resize'));
-                if (this.host) this.host.resize();
+                const tab = btn.dataset.tab ?? '';
+                if (!tab) return;
+                this.activateTab(tab);
             };
         });
+        void tabIds;
+    }
+
+    /** Show the given tab panel + update button highlights. Shared by the
+     *  document delegate and per-button handlers. */
+    private activateTab(tab: string): void {
+        if (!this.sidebar) return;
+        const sidebar = this.sidebar;
+        const tabIds = ['scene', 'pipeline', ...this.vuePanels.map(p => p.id)];
+        const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
+        buttons.forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+        for (const id of tabIds) {
+            const panel = sidebar.querySelector<HTMLElement>(`#tab-${id}`);
+            if (panel) panel.style.display = tab === id ? 'flex' : 'none';
+        }
+        // Let CodeMirror/vue-flow re-measure now that the container is visible
+        // (they size to 0 while display:none).
+        window.dispatchEvent(new Event('resize'));
+        if (this.host) this.host.resize();
     }
 
     /** Mount every Vue sidebar-tab panel into its tab container. A mount failure
@@ -351,6 +401,7 @@ export class EditorUILayer implements UILayer {
         this.unsubscribeChanged?.();
         for (const un of this.vueUnmounts) un();
         this.vueUnmounts = [];
+        document.removeEventListener('click', this.docTabHandler);
         this.commandBus = undefined;
         this.inputManager = undefined;
         this.panels = {};

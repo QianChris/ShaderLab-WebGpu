@@ -7,6 +7,16 @@ const uiContainer = document.getElementById('ui-container')!;
 const app = document.getElementById('app')!;
 
 async function main(): Promise<void> {
+    // Surface ALL errors on first load (including unhandled promise rejections
+    // from fire-and-forget async mount() calls) so editor wiring failures are
+    // visible in the console instead of silently leaving the UI half-built.
+    window.addEventListener('error', (e) => {
+        console.error('[ShaderLab] window.onerror:', e.message, '\n', e.error);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        console.error('[ShaderLab] unhandledrejection:', e.reason);
+    });
+
     if (!navigator.gpu) {
         errorEl.style.display = 'block';
         errorEl.textContent = 'WebGPU is not supported.\nUse Chrome 113+ or Edge 113+.';
