@@ -58,6 +58,10 @@ export class PipelineLoader {
     /** Original WGSL source per shader-module cache key (for the editor's WGSL
      *  panel: shows + hot-reloads the exact text that produced each module). */
     private static shaderSources = new Map<string, string>();
+    /** Reverse index: shader-module cache key → pipeline config paths that use it.
+     *  Populated when a pipeline is loaded/rebuilt; used by shader hot-reload to
+     *  know which pipelines must be rebuilt after the module is swapped. */
+    private static shaderToPipelines = new Map<string, Set<string>>();
     private static computeMeta = new Map<string, ComputeMeta>();
     /** In-memory pipeline configs declared by plugins ('<plugin>:<name>' keys). */
     private static virtualConfigs = new Map<string, PipelineConfig | ComputePipelineConfig>();
@@ -155,6 +159,9 @@ export class PipelineLoader {
         }
         for (const key of [...this.shaderSources.keys()]) {
             if (key.startsWith(`virtual:${prefix}`)) this.shaderSources.delete(key);
+        }
+        for (const key of [...this.shaderToPipelines.keys()]) {
+            if (key.startsWith(`virtual:${prefix}`)) this.shaderToPipelines.delete(key);
         }
     }
 
@@ -309,6 +316,39 @@ export class PipelineLoader {
         return this.buildRender(device, stored.format, configPath, stored.config, shaderBase);
     }
 
+    /** Record that a pipeline config path depends on a shader module key. */
+    private static indexShaderPipeline(shaderKey: string, configPath: string): void {
+        let set = this.shaderToPipelines.get(shaderKey);
+        if (!set) {
+            set = new Set();
+            this.shaderToPipelines.set(shaderKey, set);
+        }
+        set.add(configPath);
+    }
+
+    /** List all shader refs currently loaded with the pipelines that use them. */
+    static listShaderRefs(): Array<{ ref: string; pipelines: string[] }> {
+        return [...this.shaderModules.keys()].map(ref => ({
+            ref,
+            pipelines: [...(this.shaderToPipelines.get(ref) ?? [])],
+        }));
+    }
+
+    /** Hot-reload a shader module by its cache key. Replaces the WGSL source +
+     *  module in place (pre-creating the module to validate syntax) and returns
+     *  the list of pipeline config paths that depend on it. Throws on bad source. */
+    static hotReloadShader(device: GPUDevice, shaderKey: string, newSrc: string): string[] {
+        if (!this.shaderModules.has(shaderKey)) {
+            throw new Error(`Shader '${shaderKey}' not loaded`);
+        }
+        // Pre-create the module so a syntax error throws here without corrupting
+        // the cache; only then swap source + module.
+        const newModule = device.createShaderModule({ label: shaderKey, code: newSrc });
+        this.shaderSources.set(shaderKey, newSrc);
+        this.shaderModules.set(shaderKey, newModule);
+        return [...(this.shaderToPipelines.get(shaderKey) ?? [])];
+    }
+
     private static buildRender(
         device: GPUDevice,
         format: GPUTextureFormat,
@@ -317,6 +357,9 @@ export class PipelineLoader {
         shaderBase: ShaderBase,
     ): GPURenderPipeline {
         const vsModule = this.shaderModules.get(this.shaderKey(shaderBase, config.vertex.shader))!;
+
+        this.indexShaderPipeline(this.shaderKey(shaderBase, config.vertex.shader), configPath);
+        if (config.fragment) this.indexShaderPipeline(this.shaderKey(shaderBase, config.fragment.shader), configPath);
 
         const vertex: GPUVertexState = {
             module: vsModule,
@@ -405,6 +448,8 @@ export class PipelineLoader {
         const shaderBase = this.shaderBaseFor(baseDir, configPath);
         const src = await this.shaderSource(shaderBase, config.compute.shader);
         const module = device.createShaderModule({ label: config.compute.shader, code: src });
+        this.shaderSources.set(this.shaderKey(shaderBase, config.compute.shader), src);
+        this.indexShaderPipeline(this.shaderKey(shaderBase, config.compute.shader), configPath);
 
         const layout: GPUPipelineLayout | 'auto' = config.bindLayout
             ? resourceManager.pipelineLayout(config.bindLayout)

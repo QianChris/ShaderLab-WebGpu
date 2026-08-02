@@ -709,4 +709,33 @@ export class RenderGraph implements System, IRenderer {
         if (!this.pipelines.has(pipelinePath)) return;
         this.pipelines.set(pipelinePath, PipelineLoader.rebuild(device, this.dataBase, pipelinePath));
     }
+
+    /** Hot-reload a shader module and rebuild every pipeline that references it.
+     *  The shader module is replaced first (validating syntax — throws on bad
+     *  source); affected render pipelines are rebuilt individually, and a
+     *  failure in one pipeline (e.g. an interface mismatch) is caught so the
+     *  others still update and the old pipeline stays bound until fixed.
+     *  Compute pipelines that reference the shader are rebuilt too. */
+    rebuildPipelineByShader(device: GPUDevice, shaderKey: string, newSrc: string): void {
+        const affected = PipelineLoader.hotReloadShader(device, shaderKey, newSrc);
+        for (const path of affected) {
+            if (this.pipelines.has(path)) {
+                try {
+                    this.pipelines.set(path, PipelineLoader.rebuild(device, this.dataBase, path));
+                } catch (e) {
+                    console.error(`[RenderGraph] rebuild pipeline '${path}' failed after shader reload:`, e);
+                }
+            }
+            if (this.computePipelines.has(path)) {
+                try {
+                    this.computePipelines.delete(path);
+                    void PipelineLoader.loadCompute(device, this.dataBase, path)
+                        .then(p => this.computePipelines.set(path, p))
+                        .catch(e => console.error(`[RenderGraph] rebuild compute '${path}' failed:`, e));
+                } catch (e) {
+                    console.error(`[RenderGraph] rebuild compute '${path}' failed after shader reload:`, e);
+                }
+            }
+        }
+    }
 }
