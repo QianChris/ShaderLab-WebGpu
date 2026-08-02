@@ -72,9 +72,19 @@ async function select(ref: ScriptRef): Promise<void> {
     if (sourceCache.value[ref.url]) return;
     try {
         const resp = await fetch(`${ref.url}?t=${Date.now()}`);
-        sourceCache.value[ref.url] = resp.ok ? await resp.text() : '// failed to load';
+        const ct = resp.headers.get('content-type') ?? '';
+        // Guard against the Vite SPA fallback (200 + text/html for unknown
+        // paths) and other non-JS responses — a script editor must never
+        // show the page's HTML as source.
+        if (!resp.ok || (!ct.includes('javascript') && !ct.includes('text/plain') && !ct.includes('module'))) {
+            sourceCache.value[ref.url] = `// failed to load: HTTP ${resp.status} (${ref.url})`;
+            errorMsg.value = `Failed to load ${ref.name} (HTTP ${resp.status})`;
+            return;
+        }
+        sourceCache.value[ref.url] = await resp.text();
     } catch (e) {
         sourceCache.value[ref.url] = `// failed to load: ${e}`;
+        errorMsg.value = String(e);
     }
 }
 

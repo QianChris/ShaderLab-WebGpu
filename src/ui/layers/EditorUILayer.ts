@@ -88,7 +88,12 @@ export class EditorUILayer implements UILayer {
         const sceneContainer = sidebar.querySelector('#tab-scene') as HTMLElement;
         const pipelineContainer = sidebar.querySelector('#tab-pipeline') as HTMLElement;
 
-        // ── 3b. Mount the Vue sidebar tabs + the asset view below the viewport ──
+        // ── 3b. Tab switching — wired BEFORE mounting Vue apps so the tabs are
+        // always clickable even if a panel mount fails (a failed mount must not
+        // leave the tab shell dead). ──
+        this.wireTabs(sidebar);
+
+        // ── 3c. Mount the Vue sidebar tabs + the asset view below the viewport ──
         this.mountVuePanels(sidebar);
         this.mountAssetPanel();
 
@@ -109,19 +114,7 @@ export class EditorUILayer implements UILayer {
         pipelinePanel.render();
         this.panels = { editor: editorPanel, pipeline: pipelinePanel };
 
-        // ── 6. Tab switching ──
-        const tabIds = ['scene', 'pipeline', ...this.vuePanels.map(p => p.id)];
-        const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
-        buttons.forEach(btn => {
-            btn.onclick = () => {
-                const tab = btn.dataset.tab;
-                buttons.forEach(b => b.classList.toggle('active', b === btn));
-                for (const id of tabIds) {
-                    const panel = sidebar.querySelector<HTMLElement>(`#tab-${id}`);
-                    if (panel) panel.style.display = tab === id ? 'flex' : 'none';
-                }
-            };
-        });
+        // ── 6. Tab switching (shared helper; wired again at step 3b) ──
 
         // ── 7. App switching (Load-JSON-of-app.json + window.switchApp) ──
         editorPanel.onAppSwitch = (name: string) => this.switchApp(name);
@@ -217,13 +210,41 @@ export class EditorUILayer implements UILayer {
         resizer.addEventListener('pointerdown', onPointerDown);
     }
 
-    /** Mount every Vue sidebar-tab panel into its tab container. */
+    /** Wire sidebar tab buttons to show/hide their panel divs. Runs before Vue
+     *  panels mount so the shell stays responsive regardless of panel health.
+     *  When a panel becomes visible, a window resize is dispatched so embedded
+     *  editors (CodeMirror / vue-flow) re-measure their size in a visible box. */
+    private wireTabs(sidebar: HTMLElement): void {
+        const tabIds = ['scene', 'pipeline', ...this.vuePanels.map(p => p.id)];
+        const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
+        buttons.forEach(btn => {
+            btn.onclick = () => {
+                const tab = btn.dataset.tab;
+                buttons.forEach(b => b.classList.toggle('active', b === btn));
+                for (const id of tabIds) {
+                    const panel = sidebar.querySelector<HTMLElement>(`#tab-${id}`);
+                    if (panel) panel.style.display = tab === id ? 'flex' : 'none';
+                }
+                // Let CodeMirror/vue-flow re-measure now that the container is
+                // visible (they size to 0 while display:none).
+                window.dispatchEvent(new Event('resize'));
+                if (this.host) this.host.resize();
+            };
+        });
+    }
+
+    /** Mount every Vue sidebar-tab panel into its tab container. A mount failure
+     *  (component error) is caught so the rest of the editor still works. */
     private mountVuePanels(sidebar: HTMLElement): void {
         if (!this.host) return;
         for (const def of this.vuePanels) {
             const el = sidebar.querySelector<HTMLElement>(`#tab-${def.id}`);
             if (!el) continue;
-            this.vueUnmounts.push(mountVuePanel(el, def.component, this.host));
+            try {
+                this.vueUnmounts.push(mountVuePanel(el, def.component, this.host));
+            } catch (e) {
+                console.error(`[EditorUILayer] failed to mount Vue panel '${def.id}':`, e);
+            }
         }
     }
 
@@ -232,7 +253,11 @@ export class EditorUILayer implements UILayer {
         if (!this.host) return;
         const el = document.getElementById('tab-assets');
         if (!el) return;
-        this.vueUnmounts.push(mountVuePanel(el, this.assetPanel.component, this.host));
+        try {
+            this.vueUnmounts.push(mountVuePanel(el, this.assetPanel.component, this.host));
+        } catch (e) {
+            console.error('[EditorUILayer] failed to mount asset view:', e);
+        }
     }
 
     /** Re-mount Vue panels after an app switch. The engine clears the event bus
@@ -240,6 +265,7 @@ export class EditorUILayer implements UILayer {
     private remountVuePanels(sidebar: HTMLElement): void {
         for (const un of this.vueUnmounts) un();
         this.vueUnmounts = [];
+        this.wireTabs(sidebar);
         this.mountVuePanels(sidebar);
         this.mountAssetPanel();
     }

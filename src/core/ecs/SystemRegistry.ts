@@ -195,16 +195,25 @@ class SystemRegistry {
         this.scripts.set(def.source, await this.loadScriptSystemFromText(def.source, sourceCode));
     }
 
+    /** True for a source that names a real script file ('<path>.js') — i.e.
+     *  NOT a builtin registration and NOT a plugin-injected system (whose
+     *  `source` is 'plugin:<id>', not a fetchable path). */
+    private isFileScriptSource(source: string): boolean {
+        return !source.startsWith('builtin:') && !source.startsWith('plugin:') && source.includes('.');
+    }
+
     /** Get the script source path for a system entry (for display / fetch). */
     getScriptSource(entryName: string): string | undefined {
         const def = this.getDef(entryName);
-        return def?.source && !def.source.startsWith('builtin:') ? def.source : undefined;
+        return def?.source && this.isFileScriptSource(def.source) ? def.source : undefined;
     }
 
-    /** List all script-loaded system entries (the ones editable in the editor). */
+    /** List all script-loaded system entries (the ones editable in the editor).
+     *  Excludes plugin-injected systems (source: 'plugin:<id>') — those are not
+     *  file-backed and cannot be hot-reloaded from source text. */
     getScriptSystemEntries(): string[] {
         return [...this.defs.values(), ...[...this.injectedDefs.values()].map(e => e.def)]
-            .filter(d => d.source && !d.source.startsWith('builtin:'))
+            .filter(d => d.source && this.isFileScriptSource(d.source))
             .map(d => d.name);
     }
 
