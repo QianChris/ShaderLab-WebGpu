@@ -4,7 +4,7 @@ import { EditorUILayer } from './ui/layers/EditorUILayer';
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const errorEl = document.getElementById('error')!;
 const uiContainer = document.getElementById('ui-container')!;
-const sidebar = document.getElementById('sidebar')!;
+const app = document.getElementById('app')!;
 
 async function main(): Promise<void> {
     if (!navigator.gpu) {
@@ -20,9 +20,9 @@ async function main(): Promise<void> {
         const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
         await host.loadApp(appName);
 
-        // Editor layer: tab shell, command bus, input manager (tools) and panels.
+        // Editor layer: toolbar, tab shell, command bus, input manager, panels.
         const editorLayer = new EditorUILayer();
-        host.mountLayer(editorLayer, sidebar);
+        host.mountLayer(editorLayer, app);
 
         // Load the App's custom UI (ui-config.json).
         await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);

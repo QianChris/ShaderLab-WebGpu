@@ -8,13 +8,30 @@
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { background: #1a1a2e; overflow: hidden; font-family: 'Segoe UI', monospace; }
 
-        #app { display: flex; width: 100vw; height: 100vh; }
+        #app { display: flex; flex-direction: column; width: 100vw; height: 100vh; }
+
+        /* Top toolbar (undo/redo) — built by EditorUILayer */
+        #toolbar {
+            width: 100%; height: 36px; flex-shrink: 0; z-index: 6;
+            background: #16213e; border-bottom: 1px solid #2a3a5c;
+            display: flex; align-items: center; gap: 8px; padding: 0 10px;
+        }
+        .tb-btn {
+            padding: 4px 12px; font-size: 12px; background: #2a3a5c; color: #ccc;
+            border: 1px solid #3a4a6c; border-radius: 4px; cursor: pointer;
+            font-family: inherit;
+        }
+        .tb-btn:hover:not(:disabled) { background: #3a4a6c; color: #fff; }
+        .tb-btn:disabled { opacity: 0.4; cursor: default; }
+        .tb-title { margin-left: auto; color: #556; font-size: 11px; }
+
+        #main { flex: 1; display: flex; min-height: 0; }
 
         #canvas-wrap { flex: 1; position: relative; }
         canvas { display: block; width: 100%; height: 100%; }
 
         #info {
-            position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+            position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
             color: #fff; font-family: monospace; font-size: 12px;
             background: rgba(0,0,0,0.6); padding: 6px 14px; border-radius: 6px;
             pointer-events: none; z-index: 10;
@@ -33,7 +50,7 @@
 
         /* Sidebar + tabs */
         #sidebar {
-            min-width:300px; max-width:340px; height:100vh;
+            min-width:300px; max-width:340px; height:100%;
             background:#16213e; border-left:1px solid #2a3a5c; color:#ccc;
             font-size:12px; flex-shrink:0; display:flex; flex-direction:column;
         }
@@ -168,13 +185,18 @@
 </head>
 <body>
     <div id="app">
-        <div id="canvas-wrap">
-            <div id="info">ShaderLab-WebGPU | WebGPU</div>
-            <div id="error"></div>
-            <canvas id="canvas"></canvas>
+        <div id="toolbar">
+            <!-- Undo/redo buttons are built by EditorUILayer.mount() -->
         </div>
-        <div id="sidebar">
-            <!-- Tab shell + panels are built by EditorUILayer.mount() -->
+        <div id="main">
+            <div id="canvas-wrap">
+                <div id="info">ShaderLab-WebGPU | WebGPU</div>
+                <div id="error"></div>
+                <canvas id="canvas"></canvas>
+            </div>
+            <div id="sidebar">
+                <!-- Tab shell + panels are built by EditorUILayer.mount() -->
+            </div>
         </div>
         <div id="ui-container"></div>
     </div>

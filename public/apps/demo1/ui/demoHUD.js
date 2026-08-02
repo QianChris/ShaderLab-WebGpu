@@ -1,4 +1,7 @@
 export function mount(container, host) {
+    container.style.marginTop = '40px';
+    container.style.padding = '6px 10px';
+
     const btn = document.createElement('button');
     btn.textContent = 'Click Me';
     const msg = document.createElement('div');

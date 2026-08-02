@@ -7,10 +7,11 @@ import { EditorPanel } from '../../editor/EditorPanel';
 import { PipelinePanel } from '../../editor/PipelinePanel';
 
 /**
- * Editor UI layer: owns the whole editor experience (tab shell, command bus,
- * input manager / tools, panels). Mounted ONLY by the editor entry (main.ts).
- * All state changes flow through the command bus; the layer itself never
- * writes to the engine. App-switch reloads the editor state for the new app.
+ * Editor UI layer: owns the whole editor experience (top toolbar, tab shell,
+ * command bus, input manager / tools, panels). Mounted ONLY by the editor
+ * entry (main.ts). All state changes flow through the command bus; the layer
+ * itself never writes to the engine. App-switch reloads the editor state for
+ * the new app.
  */
 export class EditorUILayer implements UILayer {
     id = 'editor';
@@ -19,12 +20,31 @@ export class EditorUILayer implements UILayer {
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private host?: AppHost;
     private unsubscribePick?: () => void;
+    private unsubscribeChanged?: () => void;
+    private undoBtn?: HTMLButtonElement;
+    private redoBtn?: HTMLButtonElement;
 
     async mount(container: HTMLElement, host: AppHost) {
         this.host = host;
+        const toolbar = this.findOrCreate(container, 'toolbar');
+        const sidebar = this.findOrCreate(container, 'sidebar');
 
-        // ── 1. Build the editor tab shell (was static markup in index.html) ──
-        container.innerHTML = `
+        // ── 1. Command bus (undo/redo + edit-mode gating) ──
+        this.commandBus = new EditorCommandBus(host.engine);
+
+        // ── 2. Top toolbar: undo / redo ──
+        toolbar.innerHTML = `
+            <button class="tb-btn" id="btn-undo" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
+            <button class="tb-btn" id="btn-redo" title="Redo (Ctrl+Y)" disabled>↷ Redo</button>
+            <span class="tb-title">ShaderLab Editor</span>
+        `;
+        this.undoBtn = toolbar.querySelector('#btn-undo') as HTMLButtonElement;
+        this.redoBtn = toolbar.querySelector('#btn-redo') as HTMLButtonElement;
+        this.undoBtn.onclick = () => this.commandBus?.undo();
+        this.redoBtn.onclick = () => this.commandBus?.redo();
+
+        // ── 3. Sidebar tab shell (was static markup in index.html) ──
+        sidebar.innerHTML = `
             <div id="tabs">
                 <button class="tab-btn active" data-tab="scene">Scene</button>
                 <button class="tab-btn" data-tab="pipeline">Pipeline</button>
@@ -36,13 +56,10 @@ export class EditorUILayer implements UILayer {
                 <div id="pipeline-panel"></div>
             </div>
         `;
-        const sceneContainer = container.querySelector('#tab-scene') as HTMLElement;
-        const pipelineContainer = container.querySelector('#tab-pipeline') as HTMLElement;
+        const sceneContainer = sidebar.querySelector('#tab-scene') as HTMLElement;
+        const pipelineContainer = sidebar.querySelector('#tab-pipeline') as HTMLElement;
 
-        // ── 2. Command bus (undo/redo + edit-mode gating) ──
-        this.commandBus = new EditorCommandBus(host.engine);
-
-        // ── 3. Input manager (tools/picking) — editor-only concern ──
+        // ── 4. Input manager (tools/picking) — editor-only concern ──
         this.inputManager = new EditorInputManager(
             host.engine.scene,
             host.eventBus,
@@ -50,7 +67,7 @@ export class EditorUILayer implements UILayer {
             () => host.engine.aspect(),
         );
 
-        // ── 4. Panels (attach through the command bus; read-only core imports) ──
+        // ── 5. Panels (attach through the command bus; read-only core imports) ──
         const editorPanel = new EditorPanel(sceneContainer);
         const pipelinePanel = new PipelinePanel(pipelineContainer);
         editorPanel.attach(this.commandBus);
@@ -59,8 +76,8 @@ export class EditorUILayer implements UILayer {
         pipelinePanel.render();
         this.panels = { editor: editorPanel, pipeline: pipelinePanel };
 
-        // ── 5. Tab switching ──
-        const buttons = container.querySelectorAll<HTMLButtonElement>('.tab-btn');
+        // ── 6. Tab switching ──
+        const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
         buttons.forEach(btn => {
             btn.onclick = () => {
                 const tab = btn.dataset.tab;
@@ -70,15 +87,37 @@ export class EditorUILayer implements UILayer {
             };
         });
 
-        // ── 6. App switching (Load-JSON-of-app.json + window.switchApp) ──
+        // ── 7. App switching (Load-JSON-of-app.json + window.switchApp) ──
         editorPanel.onAppSwitch = (name: string) => this.switchApp(name);
 
-        // ── 7. Load the current app's tools.json (engine no longer does this) ──
+        // ── 8. Load the current app's tools.json (engine no longer does this) ──
         const appName = host.engine.currentApp;
         if (appName) await this.loadToolsFor(appName);
 
-        // ── 8. Wire 3D picking → scene-tree selection (event channel only) ──
+        // ── 9. Wire 3D picking → scene-tree selection (event channel only) ──
         this.subscribePick();
+
+        // ── 10. Toolbar button states follow the command bus ──
+        this.unsubscribeChanged = host.eventBus.on('editor:changed', () => this.refreshToolbar());
+        this.refreshToolbar();
+    }
+
+    /** Refresh undo/redo button enabled state (stack emptiness). */
+    private refreshToolbar(): void {
+        if (!this.undoBtn || !this.redoBtn || !this.commandBus) return;
+        this.undoBtn.disabled = !this.commandBus.canUndo;
+        this.redoBtn.disabled = !this.commandBus.canRedo;
+    }
+
+    /** Find a child element by id or create it (robust to container variants). */
+    private findOrCreate(container: HTMLElement, id: string): HTMLElement {
+        return container.querySelector<HTMLElement>(`#${id}`)
+            ?? (() => {
+                const el = document.createElement('div');
+                el.id = id;
+                container.appendChild(el);
+                return el;
+            })();
     }
 
     /** Pick tools emit a 'pick' event ({ key, eid, ... }); highlight the entity.
@@ -106,8 +145,11 @@ export class EditorUILayer implements UILayer {
             this.panels.editor?.attach(this.commandBus);
             this.panels.pipeline?.attach(this.commandBus);
         }
+        this.unsubscribeChanged?.();
+        this.unsubscribeChanged = this.host.eventBus.on('editor:changed', () => this.refreshToolbar());
         this.panels.editor?.render();
         this.panels.pipeline?.render();
+        this.refreshToolbar();
         this.subscribePick();
     }
 
@@ -130,10 +172,13 @@ export class EditorUILayer implements UILayer {
     unmount(): void {
         this.inputManager?.dispose();
         this.unsubscribePick?.();
+        this.unsubscribeChanged?.();
         this.commandBus = undefined;
         this.inputManager = undefined;
         this.panels = {};
         this.host = undefined;
+        this.undoBtn = undefined;
+        this.redoBtn = undefined;
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */

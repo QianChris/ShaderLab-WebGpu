@@ -15,7 +15,7 @@
  * Phase C) is complete, after which this file is the frozen contract.
  *
  * What belongs here:
- *   - the plugin base class + lifecycle/context types (src/plugins/Plugin.ts)
+ *   - the plugin base class + lifecycle/context types (src/core/plugins/Plugin.ts)
  *   - engine mechanism singletons (usage surface: scene field access, uniform
  *     layouts, GPU resources, buffers, events, math)
  *   - declaration types consumed by plugin declaration fields
@@ -26,7 +26,7 @@
  */
 
 /* ── Plugin system ─────────────────────────────────────────────── */
-export { EnginePlugin } from './plugins/Plugin';
+export { EnginePlugin } from './core/plugins/Plugin';
 export type {
     PluginMeta,
     PluginContext,
@@ -34,34 +34,34 @@ export type {
     MeshCatalogEntry,
     FallbackTextureDecls,
     VboPresetDecls,
-} from './plugins/Plugin';
-export type { ToolFactory } from './tools/ToolSystem';
+} from './core/plugins/Plugin';
+export type { ToolFactory } from './core/tools/ToolRegistry';
 
 /* ── ECS mechanisms ────────────────────────────────────────────── */
-export { Scene } from './ecs/Scene';
-export type { SceneData, CameraView } from './ecs/Scene';
-export { schemaRegistry, SchemaRegistry } from './ecs/SchemaRegistry';
-export type { ComponentDef, FieldDef } from './ecs/SchemaRegistry';
-export { systemRegistry } from './ecs/SystemRegistry';
+export { Scene } from './core/ecs/Scene';
+export type { SceneData, CameraView } from './core/ecs/Scene';
+export { schemaRegistry, SchemaRegistry } from './core/ecs/SchemaRegistry';
+export type { ComponentDef, FieldDef } from './core/ecs/SchemaRegistry';
+export { systemRegistry } from './core/ecs/SystemRegistry';
 export type {
     System,
     FrameContext,
     SystemDef,
     SystemBufferDecl,
-} from './ecs/SystemRegistry';
+} from './core/ecs/SystemRegistry';
 
 /* ── Render mechanisms (usage surface) ─────────────────────────── */
-export { resourceManager } from './render/ResourceManager';
-export { bufferRegistry } from './render/BufferRegistry';
-export { uniformLayouts, UniformLayout } from './render/UniformLayout';
-export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './render/UniformLayout';
-export { PipelineLoader } from './render/PipelineLoader';
-export { VERTEX_SLOTS, SLOT_ORDER, isSlotName } from './render/vertexSlots';
-export type { SlotName, SlotDef, VertexSlotDecls } from './render/vertexSlots';
-export { meshEdges, isPbrMeshData } from './render/Primitives';
-export type { MeshData, PbrMeshData, MeshGenerator } from './render/Primitives';
-export { resolveValue, resolveString, resolveHandle } from './render/valueResolver';
-export type { ValueContext, AtomResolver } from './render/valueResolver';
+export { resourceManager } from './core/render/ResourceManager';
+export { bufferRegistry } from './core/render/BufferRegistry';
+export { uniformLayouts, UniformLayout } from './core/render/UniformLayout';
+export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './core/render/UniformLayout';
+export { PipelineLoader } from './core/render/PipelineLoader';
+export { VERTEX_SLOTS, SLOT_ORDER, isSlotName } from './core/render/vertexSlots';
+export type { SlotName, SlotDef, VertexSlotDecls } from './core/render/vertexSlots';
+export { meshEdges, isPbrMeshData } from './core/render/Primitives';
+export type { MeshData, PbrMeshData, MeshGenerator } from './core/render/Primitives';
+export { resolveValue, resolveString, resolveHandle } from './core/render/valueResolver';
+export type { ValueContext, AtomResolver } from './core/render/valueResolver';
 export type {
     PipelineConfig,
     ComputePipelineConfig,
@@ -78,23 +78,23 @@ export type {
     BindLayoutDecls,
     BindEntryDecl,
     SamplerDecls,
-} from './render/types';
-export type { RendererDecl, RenderTargetDecls, RenderTargetSize } from './render/rendererDecl';
+} from './core/render/types';
+export type { RendererDecl, RenderTargetDecls, RenderTargetSize } from './core/render/rendererDecl';
 export type {
     GeometryHook,
     ComputeHook,
     GeometryHookContext,
     ComputeHookContext,
-} from './render/PipelineDriver';
+} from './core/render/PipelineDriver';
 
 /* ── Events ────────────────────────────────────────────────────── */
-export { EventBus } from './events/EventBus';
-export type { EventHandler } from './events/EventBus';
-export { EVENT_TYPES } from './events/eventTypes';
-export type { EventType } from './events/eventTypes';
+export { EventBus } from './core/events/EventBus';
+export type { EventHandler } from './core/events/EventBus';
+export { EVENT_TYPES } from './core/events/eventTypes';
+export type { EventType } from './core/events/eventTypes';
 
 /* ── Tools ─────────────────────────────────────────────────────── */
-export type { ToolConfig, ToolContext, SceneTool } from './tools/SceneTool';
+export type { ToolConfig, ToolContext, SceneTool } from './editor/input/SceneTool';
 
 /* ── Math ──────────────────────────────────────────────────────── */
 export {
@@ -116,11 +116,11 @@ export {
     quatRotateVec3,
     normalMatrix,
     normalMatrixInto,
-} from './math';
-export type { TRS } from './math';
+} from './core/math';
+export type { TRS } from './core/math';
 
 /* ── Engine config type (read-only view for plugins) ──────────── */
-export type { EngineConfig, SystemEntry, AppManifest } from './Engine';
+export type { EngineConfig, SystemEntry, AppManifest } from './core/Engine';
 
 /* ── Third-party re-exports (the only non-relative imports allowed
  *    in plugins go through here so the engine controls the version) ── */
@@ -130,11 +130,113 @@ export type { World, EntityId } from 'bitecs';
 
 ```
 
-## Engine.ts
+## main.ts
+
+```ts
+import { AppHost } from './host/AppHost';
+import { EditorUILayer } from './ui/layers/EditorUILayer';
+
+const canvas = document.getElementById('canvas') as HTMLCanvasElement;
+const errorEl = document.getElementById('error')!;
+const uiContainer = document.getElementById('ui-container')!;
+const sidebar = document.getElementById('sidebar')!;
+
+async function main(): Promise<void> {
+    if (!navigator.gpu) {
+        errorEl.style.display = 'block';
+        errorEl.textContent = 'WebGPU is not supported.\nUse Chrome 113+ or Edge 113+.';
+        return;
+    }
+
+    try {
+        const host = new AppHost(canvas, uiContainer);
+        await host.init();
+
+        const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
+        await host.loadApp(appName);
+
+        // Editor layer: tab shell, command bus, input manager (tools) and panels.
+        const editorLayer = new EditorUILayer();
+        host.mountLayer(editorLayer, sidebar);
+
+        // Load the App's custom UI (ui-config.json).
+        await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
+
+        window.addEventListener('resize', () => host.resize());
+        host.startLoop();
+
+        // Devtools back-compat: switchApp reloads app + refreshes the editor.
+        (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = (name: string) => editorLayer.switchApp(name);
+        (window as unknown as { engine: unknown }).engine = host.engine;
+        (window as unknown as { host: unknown }).host = host;
+
+        console.log('[ShaderLab] editor mode initialized');
+        console.log('[ShaderLab] scene:', JSON.stringify(host.engine.exportScene(), null, 2));
+    } catch (err) {
+        console.error(err);
+        errorEl.style.display = 'block';
+        errorEl.textContent = `Error: ${err}`;
+    }
+}
+
+main();
+
+```
+
+## player.ts
+
+```ts
+import { AppHost } from './host/AppHost';
+
+const canvas = document.getElementById('canvas') as HTMLCanvasElement;
+const errorEl = document.getElementById('error')!;
+const uiContainer = document.getElementById('ui-container')!;
+
+/**
+ * Runtime entry (player.html): engine + app UI only. No editor UI, no input
+ * manager / tools, no undo — the AppHost dispatches commands directly to the
+ * engine (unstacked) and no editor layer intercepts them.
+ */
+async function main(): Promise<void> {
+    if (!navigator.gpu) {
+        errorEl.style.display = 'block';
+        errorEl.textContent = 'WebGPU is not supported.\nUse Chrome 113+ or Edge 113+.';
+        return;
+    }
+
+    try {
+        const host = new AppHost(canvas, uiContainer);
+        await host.init();
+
+        const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
+        await host.loadApp(appName);
+
+        // ❌ No editor layer / input manager in player mode.
+        // ✅ Load the App's custom UI only.
+        await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
+
+        window.addEventListener('resize', () => host.resize());
+        host.startLoop();
+
+        (window as unknown as { host: unknown }).host = host;
+
+        console.log('[ShaderLab] player mode initialized');
+    } catch (err) {
+        console.error(err);
+        errorEl.style.display = 'block';
+        errorEl.textContent = `Error: ${err}`;
+    }
+}
+
+main();
+
+```
+
+## core\Engine.ts
 
 ```ts
 import { Scene, type SceneData } from './ecs/Scene';
-import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem';
+import { registerToolType } from './tools/ToolRegistry';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
@@ -228,7 +330,6 @@ export class Engine {
     format!: GPUTextureFormat;
     scene!: Scene;
     renderGraph!: RenderGraph;
-    toolSystem!: ToolSystem;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -253,7 +354,7 @@ export class Engine {
     private pluginHost!: PluginHostHelper;
 
     private dpr: number;
-    private canvas: HTMLCanvasElement;
+    private _canvas: HTMLCanvasElement;
     private startTime = 0;
     private lastTime = 0;
     /** True while loadApp is in flight — frame() skips system updates. */
@@ -268,8 +369,21 @@ export class Engine {
     private pendingComputePass: GPUComputePassEncoder | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
-        this.canvas = canvas;
+        this._canvas = canvas;
         this.dpr = window.devicePixelRatio || 1;
+    }
+
+    /* ── Read-only accessors (UI layer may query these; writes must go
+     *    through the AppHost command channel) ──────────────────────── */
+    get schemaRegistry() { return schemaRegistry; }
+    get systemRegistry() { return systemRegistry; }
+    get uniformLayouts() { return uniformLayouts; }
+    get resourceManager() { return resourceManager; }
+    get canvas(): HTMLCanvasElement { return this._canvas; }
+
+    /** Render canvas aspect ratio (width/height). */
+    aspect(): number {
+        return this._canvas.width / Math.max(1, this._canvas.height);
     }
 
     async init(): Promise<void> {
@@ -301,7 +415,7 @@ export class Engine {
         if (!adapter) throw new Error('No GPU adapter');
         this.device = await adapter.requestDevice();
         this.format = navigator.gpu.getPreferredCanvasFormat();
-        this.context = this.canvas.getContext('webgpu')!;
+        this.context = this._canvas.getContext('webgpu')!;
 
         this.resize();
         this.context.configure({ device: this.device, format: this.format, alphaMode: this.engineConfig.alphaMode });
@@ -324,8 +438,6 @@ export class Engine {
         this.scene = new Scene();
         this.renderGraph = new RenderGraph();
         this.eventBus = new EventBus();
-        const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
-        this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
 
         // Engine-level plugins (session lifetime). The engine has no compile-time
         // knowledge of any plugin: ids come from engine-config.json, invocation
@@ -370,7 +482,7 @@ export class Engine {
             scene: this.scene,
             eventBus: this.eventBus,
             engineConfig: this.engineConfig,
-            canvas: this.canvas,
+            canvas: this._canvas,
             baseUrl,
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
@@ -413,10 +525,6 @@ export class Engine {
     /** The active renderer: a plugin replacement when installed, else the built-in graph. */
     get renderer(): IRenderer {
         return this.customRenderer ?? this.renderGraph;
-    }
-
-    private aspect(): number {
-        return this.canvas.width / Math.max(1, this.canvas.height);
     }
 
     /** Publish an opaque object under `name` (owner-tagged for sweeps). */
@@ -550,10 +658,8 @@ export class Engine {
             resourceManager.enterApp(name);
         }
 
-        if (manifest.tools) {
-            this.toolSystem.setBase(base);
-            await this.toolSystem.loadFromFile(this.resolveAsset(base, manifest.tools));
-        }
+        // Interaction tools (tools.json) are an editor concern — the editor's
+        // input manager loads them after the app is up (EditorUILayer.mount).
         for (const glb of manifest.gltf ?? []) {
             await this.loadGltf(this.resolveAsset(base, glb));
         }
@@ -587,7 +693,6 @@ export class Engine {
         if (!this.currentApp) return;
         const appId = this.currentApp;
         pluginManager.broadcastAppUnloading();
-        this.toolSystem.dispose();
         this.eventBus.clear();
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
@@ -625,8 +730,8 @@ export class Engine {
     }
 
     resize(): void {
-        this.canvas.width = this.canvas.clientWidth * this.dpr;
-        this.canvas.height = this.canvas.clientHeight * this.dpr;
+        this._canvas.width = this._canvas.clientWidth * this.dpr;
+        this._canvas.height = this._canvas.clientHeight * this.dpr;
     }
 
     /** Build the reusable FrameContext: stable references + closures that
@@ -637,9 +742,9 @@ export class Engine {
             scene: this.scene,
             time: 0, dt: 0,
             aspect: this.aspect(),
-            cw: this.canvas.width,
-            ch: this.canvas.height,
-            canvas: this.canvas,
+            cw: this._canvas.width,
+            ch: this._canvas.height,
+            canvas: this._canvas,
             device: this.device,
             context: this.context,
             format: this.format,
@@ -673,8 +778,8 @@ export class Engine {
         ctx.time = time;
         ctx.dt = dt;
         ctx.aspect = this.aspect();
-        ctx.cw = this.canvas.width;
-        ctx.ch = this.canvas.height;
+        ctx.cw = this._canvas.width;
+        ctx.ch = this._canvas.height;
 
         for (const sys of this.activeSystems) {
             const impl = systemRegistry.resolve(sys);
@@ -799,97 +904,7 @@ export class Engine {
 
 ```
 
-## main.ts
-
-```ts
-import { Engine } from './Engine';
-import { EditorHost } from './editor/EditorHost';
-import { EditorPanel } from './editor/EditorPanel';
-import { PipelinePanel } from './editor/PipelinePanel';
-
-const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-const errorEl = document.getElementById('error')!;
-const editorEl = document.getElementById('editor')!;
-const pipelineEl = document.getElementById('pipeline-panel')!;
-
-function setupTabs(): void {
-    const buttons = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
-    for (const btn of buttons) {
-        btn.onclick = () => {
-            const tab = btn.dataset.tab;
-            for (const b of buttons) b.classList.toggle('active', b === btn);
-            document.getElementById('tab-scene')!.style.display = tab === 'scene' ? 'flex' : 'none';
-            document.getElementById('tab-pipeline')!.style.display = tab === 'pipeline' ? 'flex' : 'none';
-        };
-    }
-}
-
-async function main(): Promise<void> {
-    if (!navigator.gpu) {
-        errorEl.style.display = 'block';
-        errorEl.textContent = 'WebGPU is not supported.\nUse Chrome 113+ or Edge 113+.';
-        return;
-    }
-
-    try {
-        const engine = new Engine(canvas);
-        await engine.init();
-
-        const app = new URLSearchParams(location.search).get('app') ?? engine.engineConfig.defaultApp;
-        await engine.loadApp(app);
-
-        window.addEventListener('resize', () => engine.resize());
-
-        const editor = new EditorPanel(editorEl);
-        const pipelinePanel = new PipelinePanel(pipelineEl);
-
-        const host = new EditorHost(engine);
-        editor.attach(host);
-        editor.render();
-        pipelinePanel.attach(host);
-        pipelinePanel.render();
-
-        setupTabs();
-
-        engine.startLoop();
-
-        // Unified app-switch refresh: both switchApp() (devtools) and the
-        // editor's Load-JSON-of-app.json button go through this path so the
-        // scene editor and pipeline panel both rebuild after a full loadApp.
-        const refreshPanels = (): void => {
-            editor.render();
-            pipelinePanel.render();
-        };
-        const switchToApp = async (name: string): Promise<void> => {
-            try {
-                await engine.loadApp(name);
-                refreshPanels();
-                console.log(`[ShaderLab] switched to app '${name}'`);
-            } catch (err) {
-                console.error(err);
-                errorEl.style.display = 'block';
-                errorEl.textContent = `Error: ${err}`;
-            }
-        };
-        editor.onAppSwitch = switchToApp;
-        (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = switchToApp;
-        (window as unknown as { engine: unknown }).engine = engine;
-        (window as unknown as { host: unknown }).host = host;
-
-        console.log('[ShaderLab] initialized');
-        console.log('[ShaderLab] scene:', JSON.stringify(engine.exportScene(), null, 2));
-    } catch (err) {
-        console.error(err);
-        errorEl.style.display = 'block';
-        errorEl.textContent = `Error: ${err}`;
-    }
-}
-
-main();
-
-```
-
-## math.ts
+## core\math.ts
 
 ```ts
 export interface TRS {
@@ -1171,7 +1186,7 @@ export function mat4InverseInto(m: Float32Array, out: Float32Array): Float32Arra
 
 ```
 
-## PluginHost.ts
+## core\PluginHost.ts
 
 ```ts
 import { schemaRegistry } from './ecs/SchemaRegistry';
@@ -1185,7 +1200,7 @@ import {
     meshGenerators, isPbrMeshData,
     registerMeshGenerator, unregisterMeshGenerator,
 } from './render/Primitives';
-import { registerToolType, unregisterToolType } from './tools/ToolSystem';
+import { registerToolType, unregisterToolType } from './tools/ToolRegistry';
 import { atomNamespaces } from './render/valueResolver';
 import type { RenderGraph } from './render/RenderGraph';
 import type { EnginePlugin, MeshCatalogEntry } from './plugins/Plugin';
@@ -1350,7 +1365,7 @@ export class PluginHostHelper {
 
 ```
 
-## ecs\Scene.ts
+## core\ecs\Scene.ts
 
 ```ts
 import { createWorld, addEntity, removeEntity, type World } from 'bitecs';
@@ -1660,7 +1675,7 @@ export class Scene {
 
 ```
 
-## ecs\SchemaRegistry.ts
+## core\ecs\SchemaRegistry.ts
 
 ```ts
 import { defineComponent, Types } from 'bitecs/legacy';
@@ -1929,7 +1944,7 @@ export const schemaRegistry = new SchemaRegistry();
 
 ```
 
-## ecs\SystemRegistry.ts
+## core\ecs\SystemRegistry.ts
 
 ```ts
 import type { Scene } from './Scene';
@@ -2287,854 +2302,7 @@ export const systemRegistry = new SystemRegistry();
 
 ```
 
-## editor\dom.ts
-
-```ts
-export function ce(tag: string, cls?: string, text?: string): HTMLElement {
-    const el = document.createElement(tag);
-    if (cls) el.className = cls;
-    if (text) el.textContent = text;
-    return el;
-}
-
-export function makeSelect(options: string[], value: string, onChange: (v: string) => void): HTMLSelectElement {
-    const sel = ce('select', 'ed-select') as HTMLSelectElement;
-    for (const opt of options) {
-        const o = ce('option') as HTMLOptionElement;
-        o.value = opt;
-        o.textContent = opt;
-        sel.appendChild(o);
-    }
-    sel.value = value;
-    sel.onchange = () => onChange(sel.value);
-    return sel;
-}
-
-export function makeCheckbox(checked: boolean, onChange: (v: boolean) => void): HTMLInputElement {
-    const chk = ce('input', 'ed-check') as HTMLInputElement;
-    chk.type = 'checkbox';
-    chk.checked = checked;
-    chk.onchange = () => onChange(chk.checked);
-    return chk;
-}
-
-export interface FloatField {
-    el: HTMLElement;
-    setValue(v: number): void;
-}
-
-export function makeFloatField(initial: number, onChange: (v: number) => void): FloatField {
-    const wrap = ce('div', 'ed-float-wrap') as HTMLElement;
-    const display = ce('span', 'ed-float-val');
-    const step = 0.1;
-
-    const format = (v: number) => {
-        if (Number.isInteger(v)) return String(v);
-        const fixed = v.toFixed(4);
-        return parseFloat(fixed).toString();
-    };
-    display.textContent = format(initial);
-
-    let dragging = false;
-    let editing = false;
-    let startX = 0;
-    let startVal = initial;
-    let currentVal = initial;
-
-    const onMouseMove = (e: MouseEvent) => {
-        const dx = e.clientX - startX;
-        currentVal = parseFloat((startVal + dx * step).toFixed(4));
-        display.textContent = format(currentVal);
-        onChange(currentVal);
-    };
-
-    const onMouseUp = () => {
-        dragging = false;
-        document.removeEventListener('mousemove', onMouseMove);
-        document.removeEventListener('mouseup', onMouseUp);
-        document.body.style.cursor = '';
-        document.body.style.userSelect = '';
-    };
-
-    display.addEventListener('mousedown', (e: MouseEvent) => {
-        e.preventDefault();
-        dragging = true;
-        startX = e.clientX;
-        startVal = currentVal;
-        document.body.style.cursor = 'ew-resize';
-        document.body.style.userSelect = 'none';
-        document.addEventListener('mousemove', onMouseMove);
-        document.addEventListener('mouseup', onMouseUp);
-    });
-
-    display.addEventListener('dblclick', () => {
-        if (dragging) return;
-        editing = true;
-        const input = ce('input', 'ed-float-edit') as HTMLInputElement;
-        input.type = 'number';
-        input.step = String(step);
-        input.value = String(currentVal);
-        input.style.width = '100%';
-        wrap.replaceChildren(input);
-        input.focus();
-        input.select();
-
-        const commit = () => {
-            const v = parseFloat(input.value);
-            if (!isNaN(v)) {
-                currentVal = v;
-                display.textContent = format(v);
-                onChange(v);
-            }
-            editing = false;
-            wrap.replaceChildren(display);
-        };
-        input.addEventListener('blur', commit);
-        input.addEventListener('keydown', (e: KeyboardEvent) => {
-            if (e.key === 'Enter') commit();
-            if (e.key === 'Escape') { editing = false; wrap.replaceChildren(display); }
-        });
-    });
-
-    wrap.appendChild(display);
-    return {
-        el: wrap,
-        setValue(v: number): void {
-            if (dragging || editing) return;
-            if (v === currentVal) return;
-            currentVal = v;
-            display.textContent = format(v);
-        },
-    };
-}
-
-```
-
-## editor\EditorHost.ts
-
-```ts
-import type { Engine } from '../Engine';
-import type { Command, CommandContext } from './commands/Command';
-import { SetFieldCommand, CreateEntityCommand, RemoveEntityCommand } from './commands/SceneCommands';
-import { MutateRenderGraphCommand } from './commands/RenderGraphCommands';
-
-export type EditMode = 'edit' | 'play' | 'pause';
-
-export class EditorHost {
-    private mode: EditMode = 'edit';
-    private undoStack: Command[] = [];
-    private redoStack: Command[] = [];
-    private maxHistory = 50;
-    private editSnapshot: object | null = null;
-
-    constructor(private _engine: Engine) {}
-
-    get engine(): Engine { return this._engine; }
-    get editMode(): EditMode { return this.mode; }
-    get scene() { return this._engine.scene; }
-    get renderGraph() { return this._engine.renderGraph; }
-
-    play(): void {
-        if (this.mode === 'play') return;
-        this.editSnapshot = {
-            scene: this._engine.exportScene(),
-            renderGraph: this._engine.exportRenderGraph(),
-        };
-        this.mode = 'play';
-        this._engine.eventBus.emit('editor:play');
-    }
-
-    pause(): void {
-        if (this.mode !== 'play') return;
-        this.mode = 'pause';
-        this._engine.eventBus.emit('editor:pause');
-    }
-
-    stop(): void {
-        if (this.mode === 'edit') return;
-        this.mode = 'edit';
-        if (this.editSnapshot) {
-            const s = this.editSnapshot as { scene: unknown; renderGraph: unknown };
-            this._engine.loadSceneData(s.scene as Record<string, Record<string, Record<string, unknown>>>);
-            this._engine.renderGraph.fromData(s.renderGraph as import('../render/types').RenderGraphData);
-        }
-        this._engine.eventBus.emit('editor:stop');
-    }
-
-    dispatch(cmd: Command): boolean {
-        if (this.mode !== 'edit') {
-            console.warn(`[EditorHost] Blocked ${cmd.type} while in ${this.mode} mode`);
-            return false;
-        }
-        const ctx: CommandContext = { engine: this._engine };
-        if (!cmd.execute(ctx)) return false;
-
-        this.undoStack.push(cmd);
-        if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
-        this.redoStack.length = 0;
-        this._engine.eventBus.emit('editor:changed', { source: cmd.type });
-        return true;
-    }
-
-    undo(): void {
-        if (this.undoStack.length === 0) return;
-        const cmd = this.undoStack.pop()!;
-        cmd.undo({ engine: this._engine });
-        this.redoStack.push(cmd);
-        this._engine.eventBus.emit('editor:changed', { source: 'undo' });
-    }
-
-    redo(): void {
-        if (this.redoStack.length === 0) return;
-        const cmd = this.redoStack.pop()!;
-        cmd.execute({ engine: this._engine });
-        this.undoStack.push(cmd);
-        this._engine.eventBus.emit('editor:changed', { source: 'redo' });
-    }
-
-    setField(entityKey: string, comp: string, field: string, value: unknown): boolean {
-        return this.dispatch(new SetFieldCommand(entityKey, comp, field, value));
-    }
-
-    createEntity(key: string, data: Record<string, Record<string, unknown>>): boolean {
-        return this.dispatch(new CreateEntityCommand(key, data));
-    }
-
-    removeEntity(key: string): boolean {
-        return this.dispatch(new RemoveEntityCommand(key));
-    }
-
-    mutateRenderGraph(data: object): boolean {
-        return this.dispatch(new MutateRenderGraphCommand(data));
-    }
-}
-
-```
-
-## editor\EditorPanel.ts
-
-```ts
-import type { EditorHost } from './EditorHost';
-import { schemaRegistry } from '../ecs/SchemaRegistry';
-import { ce, makeFloatField, makeSelect } from './dom';
-
-export class EditorPanel {
-    private panel: HTMLElement;
-    private host!: EditorHost;
-    private selected = '';
-    private syncers: (() => void)[] = [];
-    private lastEntityCount = -1;
-    /** Scroll position of the entity list (preserved across re-renders). */
-    private entityScrollTop = 0;
-    /** Estimated entity row height in pixels (matches CSS ed-ent-row). */
-    private readonly ROW_H = 28;
-    /** Maximum visible rows in the entity list viewport. */
-    private readonly VISIBLE_ROWS = 18;
-    /** Called when loadJSON receives an app.json manifest; main.ts wires this to
-     *  engine.loadApp + panel refresh so glTF / render graph / tools all reload. */
-    onAppSwitch?: (name: string) => Promise<void>;
-
-    constructor(container: HTMLElement) {
-        this.panel = container;
-    }
-
-    attach(host: EditorHost): void {
-        this.host = host;
-        host.engine.eventBus.on('editor:changed', () => {
-            const count = host.scene.entityKeyMap.size;
-            if (count !== this.lastEntityCount) {
-                this.lastEntityCount = count;
-                this.render();
-                return;
-            }
-            for (const sync of this.syncers) sync();
-        });
-    }
-
-    render(): void {
-        this.panel.innerHTML = '';
-        this.syncers = [];
-        const scene = this.host.scene;
-        this.lastEntityCount = scene.entityKeyMap.size;
-
-        // ── Header ──
-        const head = ce('div', 'editor-head');
-        head.appendChild(ce('span', 'ed-title', 'Scene Editor'));
-        const btns = ce('div', 'editor-btn-row');
-        btns.appendChild(this.btn('Save JSON', () => this.saveJSON()));
-        btns.appendChild(this.btn('Load JSON', () => this.loadJSON()));
-        head.appendChild(btns);
-        this.panel.appendChild(head);
-
-        // ── Entity list (virtual scroll) ──
-        const list = ce('div', 'ed-ent-list');
-        const listHead = ce('div', 'ed-ent-list-head');
-        listHead.appendChild(ce('span', '', 'Entities'));
-        const ab = ce('div', 'ed-ent-list-actions');
-        ab.appendChild(this.btn('+', () => this.addEntity()));
-        ab.appendChild(this.btn('✕', () => { if (this.selected) { this.host.removeEntity(this.selected); this.selected = ''; this.render(); } }));
-        listHead.appendChild(ab);
-        list.appendChild(listHead);
-
-        const allEntities = scene.getAllEntities();
-        const total = allEntities.length;
-        const rowsScroll = ce('div', 'ed-ent-rows');
-        rowsScroll.style.maxHeight = `${this.ROW_H * this.VISIBLE_ROWS}px`;
-        rowsScroll.style.overflowY = 'auto';
-        rowsScroll.style.position = 'relative';
-        rowsScroll.scrollTop = this.entityScrollTop;
-        rowsScroll.onscroll = () => {
-            this.entityScrollTop = rowsScroll.scrollTop;
-            this.renderVisibleRows(content, allEntities);
-        };
-
-        // Content container sized to the full list height so the scrollbar
-        // reflects the true entity count; only visible rows are in the DOM.
-        const content = ce('div');
-        content.style.height = `${total * this.ROW_H}px`;
-        content.style.position = 'relative';
-        this.renderVisibleRows(content, allEntities);
-        rowsScroll.appendChild(content);
-        list.appendChild(rowsScroll);
-
-        if (!this.selected && scene.entityKeyMap.size > 0) {
-            this.selected = [...scene.entityKeyMap.keys()][0];
-        }
-        this.panel.appendChild(list);
-
-        // ── Selected entity detail ──
-        if (this.selected && scene.entityKeyMap.has(this.selected)) {
-            const eid = scene.entityKeyMap.get(this.selected)!;
-            const detail = this.renderDetail(eid);
-            this.panel.appendChild(detail);
-        }
-    }
-
-    /** Render only the entity rows visible in the scroll viewport (+ a small
-     *  overscan buffer). Rows are absolutely positioned within the content
-     *  container so the scrollbar reflects the true entity count without
-     *  materializing a DOM node per entity. */
-    private renderVisibleRows(content: HTMLElement, allEntities: { key: string }[]): void {
-        content.innerHTML = '';
-        const total = allEntities.length;
-        const overscan = 5;
-        const start = Math.max(0, Math.floor(this.entityScrollTop / this.ROW_H) - overscan);
-        const end = Math.min(total, start + this.VISIBLE_ROWS + overscan * 2);
-        for (let i = start; i < end; i++) {
-            const { key } = allEntities[i];
-            const row = ce('div', `ed-ent-row ${this.selected === key ? 'ed-ent-sel' : ''}`);
-            row.style.position = 'absolute';
-            row.style.top = `${i * this.ROW_H}px`;
-            row.style.height = `${this.ROW_H}px`;
-            row.style.width = '100%';
-            row.style.boxSizing = 'border-box';
-            const eid = this.host.scene.entityKeyMap.get(key);
-            const name = eid != null
-                ? (this.host.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
-                : key;
-            row.appendChild(ce('span', 'ed-ent-name', name));
-            row.onclick = () => { this.selected = key; this.render(); };
-            content.appendChild(row);
-        }
-    }
-
-    private renderDetail(eid: number): HTMLElement {
-        const scene = this.host.scene;
-        const wrap = ce('div', 'ed-detail');
-
-        const hdr = ce('div', 'ed-detail-head');
-        const name = scene.getField(eid, 'NameComponent', 'name') as string ?? this.selected;
-        hdr.appendChild(ce('span', '', `Components — ${name}`));
-        wrap.appendChild(hdr);
-
-        const compNames = scene.componentNames
-            .filter(compName => {
-                const def = schemaRegistry.getDef(compName);
-                return def && Object.keys(def.fields).length > 0;
-            })
-            .sort((a, b) => Number(scene.hasComponent(eid, b)) - Number(scene.hasComponent(eid, a)));
-
-        for (const compName of compNames) {
-            const def = schemaRegistry.getDef(compName)!;
-
-            const hasComp = scene.hasComponent(eid, compName);
-            const locked = schemaRegistry.mandatory.has(compName);
-
-            const compDiv = ce('div', `ed-comp ${hasComp ? '' : 'ed-comp-off'}`);
-            const compHead = ce('div', 'ed-comp-head');
-
-            if (locked) {
-                compHead.appendChild(ce('span', 'ed-lock', '🔒'));
-            } else {
-                const chk = ce('input') as HTMLInputElement;
-                chk.type = 'checkbox'; chk.checked = hasComp;
-                chk.onchange = () => { scene.toggleComponent(eid, compName, chk.checked); this.render(); };
-                compHead.appendChild(chk);
-            }
-            compHead.appendChild(ce('span', '', compName));
-            compDiv.appendChild(compHead);
-
-            if (hasComp) {
-                const grid = ce('div', 'ed-fields');
-                for (const [fieldName, fd] of Object.entries(def.fields)) {
-                    grid.appendChild(this.renderField(this.selected, eid, compName, fieldName, fd));
-                }
-                compDiv.appendChild(grid);
-            }
-            wrap.appendChild(compDiv);
-        }
-        return wrap;
-    }
-
-    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
-        const scene = this.host.scene;
-        const row = ce('div', 'ed-field-row');
-        row.appendChild(ce('label', 'ed-field-label', field));
-
-        const val = scene.getField(eid, compName, field);
-        const numInputs = ce('div', 'ed-field-inputs');
-
-        if (fd.type === 'string' && fd.options) {
-            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => this.host.setField(entityKey, compName, field, v));
-            this.syncers.push(() => {
-                const cur = scene.getField(eid, compName, field) as string | undefined;
-                if (cur != null) sel.value = cur;
-            });
-            numInputs.appendChild(sel);
-        } else if (fd.type === 'string') {
-            const inp = this.makeInput('text', val as string, v => this.host.setField(entityKey, compName, field, v));
-            numInputs.appendChild(inp);
-        } else if (fd.type === 'bool') {
-            const chk = ce('input', 'ed-check') as HTMLInputElement;
-            chk.type = 'checkbox';
-            chk.checked = Number(val ?? fd.default) === 1;
-            chk.onchange = () => this.host.setField(entityKey, compName, field, chk.checked ? 1 : 0);
-            this.syncers.push(() => {
-                const cur = scene.getField(eid, compName, field);
-                if (cur != null) chk.checked = Number(cur) === 1;
-            });
-            numInputs.appendChild(chk);
-        } else if (fd.type === 'f32' || fd.type === 'u32') {
-            const defVal = (fd.default as number[]) ?? [0];
-            const v = val != null ? Number(val) : defVal[0] ?? 0;
-            const el = makeFloatField(v, newVal => {
-                this.host.setField(entityKey, compName, field, newVal);
-            });
-            this.syncers.push(() => {
-                const cur = scene.getField(eid, compName, field);
-                if (cur != null) el.setValue(Number(cur));
-            });
-            numInputs.appendChild(el.el);
-        } else if (fd.type === 'vec2' || fd.type === 'vec3' || fd.type === 'vec4') {
-            const count = parseInt(fd.type[3]);
-            const arr = (Array.isArray(val) ? val : (fd.default as number[])) as number[];
-            for (let i = 0; i < count; i++) {
-                const el = makeFloatField(arr[i] ?? 0, newVal => {
-                    const a = [...(scene.getField(eid, compName, field) as number[] ?? (fd.default as number[]))];
-                    for (let j = 0; j < count; j++) a[j] = a[j] ?? 0;
-                    a[i] = newVal;
-                    this.host.setField(entityKey, compName, field, a);
-                });
-                this.syncers.push(() => {
-                    const cur = scene.getField(eid, compName, field) as number[] | undefined;
-                    if (cur?.[i] != null) el.setValue(cur[i]);
-                });
-                numInputs.appendChild(el.el);
-            }
-        }
-        row.appendChild(numInputs);
-        return row;
-    }
-
-    private makeInput(type: string, val: string, onChange: (v: string) => void): HTMLInputElement {
-        const inp = ce('input', 'ed-input') as HTMLInputElement;
-        inp.type = type; inp.value = val;
-        inp.onchange = () => onChange(inp.value);
-        return inp;
-    }
-
-    private btn(text: string, cb: () => void): HTMLButtonElement {
-        const b = ce('button', 'editor-btn', text);
-        b.onclick = cb; return b as HTMLButtonElement;
-    }
-
-    private addEntity(): void {
-        const name = prompt('Entity name:', 'NewEntity');
-        if (!name) return;
-        this.host.createEntity(name, {});
-        this.selected = name;
-        this.render();
-    }
-
-    private saveJSON(): void {
-        const json = { entities: this.host.scene.toJSON() };
-        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
-    }
-
-    private loadJSON(): void {
-        const input = ce('input') as HTMLInputElement;
-        input.type = 'file'; input.accept = '.json';
-        input.onchange = async () => {
-            const file = input.files?.[0]; if (!file) return;
-            const json = JSON.parse(await file.text()) as Record<string, unknown>;
-            // App manifest (has gltf/render/scene-as-string) → full app reload,
-            // which re-loads glTF models, render graph and tools via loadApp.
-            const isAppManifest = !!json.gltf || !!json.render
-                || (typeof json.scene === 'string');
-            if (isAppManifest) {
-                const name = json.name as string | undefined;
-                if (!name) { alert('app manifest missing "name" field'); return; }
-                if (this.onAppSwitch) {
-                    await this.onAppSwitch(name);
-                } else {
-                    await this.host.engine.loadApp(name);
-                }
-            } else {
-                // Scene entity data → reload entities in place (no glTF / render graph).
-                for (const k of [...this.host.scene.entityKeyMap.keys()]) {
-                    this.host.scene.removeEntity(k);
-                }
-                this.host.engine.loadSceneData((json.entities ?? json) as import('../ecs/Scene').SceneData);
-            }
-            this.selected = '';
-            this.render();
-        };
-        input.click();
-    }
-}
-
-```
-
-## editor\PipelinePanel.ts
-
-```ts
-import type { EditorHost } from './EditorHost';
-import { type PipelineEntry, type PipelineConfig } from '../render/types';
-import { PipelineLoader } from '../render/PipelineLoader';
-import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
-
-const TOPOLOGY_OPTIONS: string[] = [
-    'point-list', 'line-list', 'line-strip', 'triangle-list', 'triangle-strip',
-];
-const CULL_OPTIONS: string[] = ['none', 'front', 'back'];
-const FRONT_FACE_OPTIONS: string[] = ['ccw', 'cw'];
-const COMPARE_OPTIONS: string[] = [
-    'never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always',
-];
-
-export class PipelinePanel {
-    private panel: HTMLElement;
-    private host!: EditorHost;
-    /** Undo/redo stacks: JSON snapshots of render graph data (phases + params). */
-    private history: string[] = [];
-    private future: string[] = [];
-    private readonly MAX_HISTORY = 50;
-
-    private get blendOptions(): string[] {
-        return PipelineLoader.blendPresetNames.length > 0
-            ? PipelineLoader.blendPresetNames
-            : ['opaque', 'alpha', 'additive'];
-    }
-
-    constructor(container: HTMLElement) {
-        this.panel = container;
-    }
-
-    attach(host: EditorHost): void {
-        this.host = host;
-        this.panel.tabIndex = 0;
-        this.panel.addEventListener('keydown', (e) => {
-            if (e.ctrlKey && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
-                e.preventDefault();
-                this.undo();
-            } else if (e.ctrlKey && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
-                e.preventDefault();
-                this.redo();
-            }
-        });
-    }
-
-    /** Snapshot the current render graph state before a mutation (for undo). */
-    private snapshot(): void {
-        const data = JSON.stringify(this.host.renderGraph.toData());
-        this.history.push(data);
-        if (this.history.length > this.MAX_HISTORY) this.history.shift();
-        this.future.length = 0;
-    }
-
-    private undo(): void {
-        if (this.history.length === 0) return;
-        const current = JSON.stringify(this.host.renderGraph.toData());
-        this.future.push(current);
-        const prev = this.history.pop()!;
-        this.host.renderGraph.fromData(JSON.parse(prev));
-        this.render();
-    }
-
-    private redo(): void {
-        if (this.future.length === 0) return;
-        const current = JSON.stringify(this.host.renderGraph.toData());
-        this.history.push(current);
-        const next = this.future.pop()!;
-        this.host.renderGraph.fromData(JSON.parse(next));
-        this.render();
-    }
-
-    render(): void {
-        this.panel.innerHTML = '';
-
-        const head = ce('div', 'editor-head');
-        head.appendChild(ce('span', 'ed-title', 'Render Pipeline'));
-        this.panel.appendChild(head);
-
-        const phases = this.host.renderGraph.phases;
-        const phaseNames = this.host.renderGraph.getPhaseNames();
-        for (const phase of phaseNames) {
-            const section = ce('div', 'pp-phase');
-            section.appendChild(ce('div', 'pp-phase-title', phase));
-
-            const entries = phases[phase] ?? [];
-            if (entries.length === 0) {
-                section.appendChild(ce('div', 'pp-empty', '(empty)'));
-            } else {
-                for (const entry of entries) {
-                    section.appendChild(this.renderEntry(entry));
-                }
-            }
-            this.panel.appendChild(section);
-        }
-    }
-
-    private renderEntry(entry: PipelineEntry): HTMLElement {
-        const wrap = ce('div', 'pp-entry-wrap');
-
-        const row = ce('div', 'pp-entry');
-        const chk = ce('input') as HTMLInputElement;
-        chk.type = 'checkbox';
-        chk.checked = entry.enabled;
-        chk.onchange = () => { this.snapshot(); entry.enabled = chk.checked; };
-        row.appendChild(chk);
-        row.appendChild(ce('span', 'pp-entry-name', entry.name));
-        const config = PipelineLoader.getConfig(entry.pipeline);
-        const badge = config?.renderer?.phase ?? entry.kind ?? '';
-        row.appendChild(ce('span', 'pp-entry-kind', badge));
-        wrap.appendChild(row);
-
-        if (entry.params) {
-            for (const [key, values] of Object.entries(entry.params)) {
-                wrap.appendChild(this.renderParam(key, values));
-            }
-        }
-
-        if (config) {
-            wrap.appendChild(this.renderConfig(entry, config));
-        }
-        return wrap;
-    }
-
-    private renderParam(key: string, values: number[]): HTMLElement {
-        const box = ce('div', 'pp-params');
-        box.appendChild(ce('span', 'pp-param-label', key));
-        values.forEach((v, i) => {
-            const field = makeFloatField(v, newVal => { this.snapshot(); values[i] = newVal; });
-            box.appendChild(field.el);
-        });
-        return box;
-    }
-
-    private renderConfig(entry: PipelineEntry, config: PipelineConfig): HTMLElement {
-        const box = ce('div', 'pp-config');
-        const recompile = (): void => {
-            this.host.renderGraph.rebuildPipeline(this.host.engine.device, entry.pipeline);
-        };
-
-        // ── Primitive ──
-        box.appendChild(this.field('topology', makeSelect(
-            TOPOLOGY_OPTIONS, config.primitive.topology,
-            v => { this.snapshot(); config.primitive.topology = v as GPUPrimitiveTopology; recompile(); },
-        )));
-        box.appendChild(this.field('cullMode', makeSelect(
-            CULL_OPTIONS, config.primitive.cullMode,
-            v => { this.snapshot(); config.primitive.cullMode = v as GPUCullMode; recompile(); },
-        )));
-        box.appendChild(this.field('frontFace', makeSelect(
-            FRONT_FACE_OPTIONS, config.primitive.frontFace ?? 'ccw',
-            v => { this.snapshot(); config.primitive.frontFace = v as GPUFrontFace; recompile(); },
-        )));
-
-        // ── Blend ──
-        const blendVal = typeof config.blend === 'string' ? config.blend : 'opaque';
-        box.appendChild(this.field('blend', makeSelect(
-            this.blendOptions, blendVal,
-            v => { this.snapshot(); config.blend = v as PipelineConfig['blend']; recompile(); },
-        )));
-
-        // ── Depth ──
-        if (config.depthStencil) {
-            const ds = config.depthStencil;
-            const writeEnabled = ds.depthWriteEnabled === true;
-            box.appendChild(this.field('depthWrite', makeCheckbox(
-                writeEnabled,
-                v => { this.snapshot(); ds.depthWriteEnabled = v; recompile(); },
-            )));
-            const compare = (ds.depthCompare as string) ?? 'less';
-            box.appendChild(this.field('depthCompare', makeSelect(
-                COMPARE_OPTIONS, compare,
-                v => { this.snapshot(); ds.depthCompare = v as GPUCompareFunction; recompile(); },
-            )));
-        }
-
-        return box;
-    }
-
-    private field(label: string, control: HTMLElement): HTMLElement {
-        const row = ce('div', 'pp-config-row');
-        row.appendChild(ce('span', 'pp-config-label', label));
-        row.appendChild(control);
-        return row;
-    }
-}
-
-```
-
-## editor\commands\Command.ts
-
-```ts
-import type { Engine } from '../../Engine';
-
-export interface Command {
-    readonly type: string;
-    readonly description: string;
-    execute(ctx: CommandContext): boolean;
-    undo(ctx: CommandContext): boolean;
-}
-
-export interface CommandContext {
-    engine: Engine;
-}
-
-```
-
-## editor\commands\RenderGraphCommands.ts
-
-```ts
-import type { Command, CommandContext } from './Command';
-import type { RenderGraphData } from '../../render/types';
-
-export class MutateRenderGraphCommand implements Command {
-    readonly type = 'mutateRenderGraph';
-    readonly description = 'mutateRenderGraph';
-    private prevData: string;
-    constructor(private nextData: object, prevData?: string) {
-        this.prevData = prevData ?? JSON.stringify(nextData);
-    }
-
-    execute(ctx: CommandContext): boolean {
-        ctx.engine.renderGraph.fromData(this.nextData as RenderGraphData);
-        return true;
-    }
-
-    undo(ctx: CommandContext): boolean {
-        ctx.engine.renderGraph.fromData(JSON.parse(this.prevData));
-        return true;
-    }
-}
-
-```
-
-## editor\commands\SceneCommands.ts
-
-```ts
-import { schemaRegistry } from '../../ecs/SchemaRegistry';
-import type { Command, CommandContext } from './Command';
-
-export class SetFieldCommand implements Command {
-    readonly type = 'setField';
-    get description(): string { return `setField ${this.compName}.${this.field} = ${this.newValue}`; }
-    private oldValue: unknown;
-    constructor(
-        private entityKey: string,
-        private compName: string,
-        private field: string,
-        private newValue: unknown,
-    ) {}
-
-    execute(ctx: CommandContext): boolean {
-        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
-        if (eid == null) return false;
-        this.oldValue = ctx.engine.scene.getField(eid, this.compName, this.field);
-        ctx.engine.scene.setField(eid, this.compName, this.field, this.newValue);
-        return true;
-    }
-
-    undo(ctx: CommandContext): boolean {
-        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
-        if (eid == null) return false;
-        ctx.engine.scene.setField(eid, this.compName, this.field, this.oldValue);
-        return true;
-    }
-}
-
-export class CreateEntityCommand implements Command {
-    readonly type = 'createEntity';
-    get description(): string { return `createEntity ${this.key}`; }
-    private createdKey: string;
-    constructor(
-        private key: string,
-        private data: Record<string, Record<string, unknown>>,
-    ) {
-        this.createdKey = key;
-    }
-
-    execute(ctx: CommandContext): boolean {
-        ctx.engine.scene.createEntity(this.createdKey, this.data);
-        return true;
-    }
-
-    undo(ctx: CommandContext): boolean {
-        ctx.engine.scene.removeEntity(this.createdKey);
-        return true;
-    }
-}
-
-export class RemoveEntityCommand implements Command {
-    readonly type = 'removeEntity';
-    get description(): string { return `removeEntity ${this.key}`; }
-    private backupData: Record<string, Record<string, unknown>> | null = null;
-    constructor(private key: string) {}
-
-    execute(ctx: CommandContext): boolean {
-        const eid = ctx.engine.scene.entityKeyMap.get(this.key);
-        if (eid == null) return false;
-        this.backupData = this.serializeEntity(ctx, eid);
-        ctx.engine.scene.removeEntity(this.key);
-        return true;
-    }
-
-    undo(ctx: CommandContext): boolean {
-        if (!this.backupData) return false;
-        ctx.engine.scene.createEntity(this.key, this.backupData);
-        return true;
-    }
-
-    private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
-        const result: Record<string, Record<string, unknown>> = {};
-        const comps = ctx.engine.scene.getEntityComponentNames(eid);
-        for (const compName of comps) {
-            const comp = schemaRegistry.get(compName);
-            if (comp && ctx.engine.scene.hasComponent(eid, compName)) {
-                result[compName] = schemaRegistry.readAllFields(compName, comp, eid);
-            }
-        }
-        return result;
-    }
-}
-
-```
-
-## events\EventBus.ts
+## core\events\EventBus.ts
 
 ```ts
 export type EventHandler = (payload: unknown) => void;
@@ -3163,7 +2331,7 @@ export class EventBus {
 
 ```
 
-## events\eventTypes.ts
+## core\events\eventTypes.ts
 
 ```ts
 /** Centralized event type constants. Single source of truth for engine-internal events. */
@@ -3179,7 +2347,7 @@ export type EventType = typeof EVENT_TYPES[keyof typeof EVENT_TYPES];
 
 ```
 
-## gltf\GltfLoader.ts
+## core\gltf\GltfLoader.ts
 
 ```ts
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
@@ -3336,7 +2504,7 @@ export class GltfLoader {
 
 ```
 
-## gltf\GltfTypes.ts
+## core\gltf\GltfTypes.ts
 
 ```ts
 import type { PbrMeshData } from '../render/Primitives';
@@ -3381,7 +2549,7 @@ export interface GltfNodeResult {
 
 ```
 
-## plugins\Plugin.ts
+## core\plugins\Plugin.ts
 
 ```ts
 import type { ComponentDef } from '../ecs/SchemaRegistry';
@@ -3405,7 +2573,7 @@ import type { RenderTargetDecls } from '../render/rendererDecl';
 import type { GeometryHook, ComputeHook } from '../render/PipelineDriver';
 import type { ValueContext, AtomResolver } from '../render/valueResolver';
 import type { MeshGenerator } from '../render/Primitives';
-import type { ToolFactory } from '../tools/ToolSystem';
+import type { ToolFactory } from '../tools/ToolRegistry';
 
 /** Identity + dependency declaration of a plugin. `id` must equal the plugin's
  *  folder name under the plugins root (fail-loud checked at load). */
@@ -3523,7 +2691,7 @@ export abstract class EnginePlugin {
 
 ```
 
-## plugins\PluginManager.ts
+## core\plugins\PluginManager.ts
 
 ```ts
 import type { EnginePlugin, PluginContext } from './Plugin';
@@ -3774,7 +2942,7 @@ export const pluginManager = new PluginManager();
 
 ```
 
-## render\BufferRegistry.ts
+## core\render\BufferRegistry.ts
 
 ```ts
 import { uniformLayouts } from './UniformLayout';
@@ -3922,7 +3090,7 @@ export const bufferRegistry = new BufferRegistry();
 
 ```
 
-## render\phaseBehaviors.ts
+## core\render\phaseBehaviors.ts
 
 ```ts
 import { resourceManager } from './ResourceManager';
@@ -4020,7 +3188,7 @@ export const postProcessChainBehavior: PhaseBehavior = {
 
 ```
 
-## render\PipelineDriver.ts
+## core\render\PipelineDriver.ts
 
 ```ts
 import { resourceManager } from './ResourceManager';
@@ -4596,7 +3764,7 @@ export class PipelineDriver {
 
 ```
 
-## render\PipelineLoader.ts
+## core\render\PipelineLoader.ts
 
 ```ts
 import { resourceManager } from './ResourceManager';
@@ -5001,7 +4169,7 @@ export class PipelineLoader {
 
 ```
 
-## render\Primitives.ts
+## core\render\Primitives.ts
 
 ```ts
 export interface MeshData {
@@ -5330,7 +4498,7 @@ export function isPbrMeshData(data: MeshData | PbrMeshData): data is PbrMeshData
 
 ```
 
-## render\rendererDecl.ts
+## core\render\rendererDecl.ts
 
 ```ts
 import type { RenderPhase } from './types';
@@ -5475,7 +4643,7 @@ export type RenderTargetDecls = Record<string, RenderTargetDecl>;
 
 ```
 
-## render\RenderGraph.ts
+## core\render\RenderGraph.ts
 
 ```ts
 import { defineQuery } from 'bitecs/legacy';
@@ -6155,7 +5323,7 @@ export class RenderGraph implements System, IRenderer {
 
 ```
 
-## render\RenderScriptLoader.ts
+## core\render\RenderScriptLoader.ts
 
 ```ts
 import type { ValueContext } from './valueResolver';
@@ -6240,7 +5408,7 @@ export class RenderScriptLoader {
 
 ```
 
-## render\ResourceManager.ts
+## core\render\ResourceManager.ts
 
 ```ts
 import { meshEdges, type MeshData, type PbrMeshData } from './Primitives';
@@ -7299,7 +6467,7 @@ export const resourceManager = new ResourceManager();
 
 ```
 
-## render\types.ts
+## core\render\types.ts
 
 ```ts
 import type { SlotName } from './vertexSlots';
@@ -7546,7 +6714,7 @@ export interface IRenderer {
 
 ```
 
-## render\UniformLayout.ts
+## core\render\UniformLayout.ts
 
 ```ts
 /**
@@ -7689,7 +6857,7 @@ export const uniformLayouts = new UniformLayoutRegistry();
 
 ```
 
-## render\valueResolver.ts
+## core\render\valueResolver.ts
 
 ```ts
 import { normalMatrixInto } from '../math';
@@ -7979,7 +7147,7 @@ export function compileString(src: string): CompiledString {
 
 ```
 
-## render\vertexSlots.ts
+## core\render\vertexSlots.ts
 
 ```ts
 export type SlotName = string;
@@ -8038,11 +7206,1128 @@ export function isSlotName(name: string): name is SlotName {
 
 ```
 
-## tools\SceneTool.ts
+## core\tools\ToolRegistry.ts
 
 ```ts
-import type { Scene } from '../ecs/Scene';
-import type { EventBus } from '../events/EventBus';
+import type { ToolFactory } from '../../editor/input/SceneTool';
+
+export type { ToolFactory } from '../../editor/input/SceneTool';
+
+/** Module-level registry of tool factories, keyed by config `type`. Populated
+ *  entirely by plugins (ctx.registerToolType) — the engine ships no built-in
+ *  tools. Lives in core (no DOM/editor deps) so plugins may register tool
+ *  types in player mode too; only the editor's input manager ever instantiates
+ *  them from a tools.json config. */
+export const TOOL_REGISTRY: Record<string, ToolFactory> = {};
+
+/** Register a tool type (plugins). Duplicate names throw (fail-loud). */
+export function registerToolType(type: string, factory: ToolFactory): void {
+    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
+    TOOL_REGISTRY[type] = factory;
+}
+
+/** Remove a tool type (plugin unload). */
+export function unregisterToolType(type: string): void {
+    delete TOOL_REGISTRY[type];
+}
+
+```
+
+## editor\dom.ts
+
+```ts
+export function ce(tag: string, cls?: string, text?: string): HTMLElement {
+    const el = document.createElement(tag);
+    if (cls) el.className = cls;
+    if (text) el.textContent = text;
+    return el;
+}
+
+export function makeSelect(options: string[], value: string, onChange: (v: string) => void): HTMLSelectElement {
+    const sel = ce('select', 'ed-select') as HTMLSelectElement;
+    for (const opt of options) {
+        const o = ce('option') as HTMLOptionElement;
+        o.value = opt;
+        o.textContent = opt;
+        sel.appendChild(o);
+    }
+    sel.value = value;
+    sel.onchange = () => onChange(sel.value);
+    return sel;
+}
+
+export function makeCheckbox(checked: boolean, onChange: (v: boolean) => void): HTMLInputElement {
+    const chk = ce('input', 'ed-check') as HTMLInputElement;
+    chk.type = 'checkbox';
+    chk.checked = checked;
+    chk.onchange = () => onChange(chk.checked);
+    return chk;
+}
+
+export interface FloatField {
+    el: HTMLElement;
+    setValue(v: number): void;
+}
+
+export function makeFloatField(initial: number, onChange: (v: number) => void): FloatField {
+    const wrap = ce('div', 'ed-float-wrap') as HTMLElement;
+    const display = ce('span', 'ed-float-val');
+    const step = 0.1;
+
+    const format = (v: number) => {
+        if (Number.isInteger(v)) return String(v);
+        const fixed = v.toFixed(4);
+        return parseFloat(fixed).toString();
+    };
+    display.textContent = format(initial);
+
+    let dragging = false;
+    let editing = false;
+    let startX = 0;
+    let startVal = initial;
+    let currentVal = initial;
+
+    const onMouseMove = (e: MouseEvent) => {
+        const dx = e.clientX - startX;
+        currentVal = parseFloat((startVal + dx * step).toFixed(4));
+        display.textContent = format(currentVal);
+        onChange(currentVal);
+    };
+
+    const onMouseUp = () => {
+        dragging = false;
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+    };
+
+    display.addEventListener('mousedown', (e: MouseEvent) => {
+        e.preventDefault();
+        dragging = true;
+        startX = e.clientX;
+        startVal = currentVal;
+        document.body.style.cursor = 'ew-resize';
+        document.body.style.userSelect = 'none';
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+
+    display.addEventListener('dblclick', () => {
+        if (dragging) return;
+        editing = true;
+        const input = ce('input', 'ed-float-edit') as HTMLInputElement;
+        input.type = 'number';
+        input.step = String(step);
+        input.value = String(currentVal);
+        input.style.width = '100%';
+        wrap.replaceChildren(input);
+        input.focus();
+        input.select();
+
+        const commit = () => {
+            const v = parseFloat(input.value);
+            if (!isNaN(v)) {
+                currentVal = v;
+                display.textContent = format(v);
+                onChange(v);
+            }
+            editing = false;
+            wrap.replaceChildren(display);
+        };
+        input.addEventListener('blur', commit);
+        input.addEventListener('keydown', (e: KeyboardEvent) => {
+            if (e.key === 'Enter') commit();
+            if (e.key === 'Escape') { editing = false; wrap.replaceChildren(display); }
+        });
+    });
+
+    wrap.appendChild(display);
+    return {
+        el: wrap,
+        setValue(v: number): void {
+            if (dragging || editing) return;
+            if (v === currentVal) return;
+            currentVal = v;
+            display.textContent = format(v);
+        },
+    };
+}
+
+```
+
+## editor\EditorCommandBus.ts
+
+```ts
+import type { Engine } from '../core/Engine';
+import type { Command, CommandContext } from './commands/Command';
+import {
+    SetFieldCommand,
+    CreateEntityCommand,
+    RemoveEntityCommand,
+    LoadSceneDataCommand,
+    ToggleComponentCommand,
+} from './commands/SceneCommands';
+import {
+    MutateRenderGraphCommand,
+    PatchRenderGraphCommand,
+    MutatePipelineConfigCommand,
+} from './commands/RenderGraphCommands';
+import type { SceneData } from '../core/ecs/Scene';
+import type { RenderGraphData } from '../core/render/types';
+
+export type EditMode = 'edit' | 'play' | 'pause';
+
+/**
+ * Editor command channel: the ONLY path by which editor UI state changes reach
+ * the engine. Dispatches execute commands with undo/redo + edit-mode gating,
+ * then broadcast `editor:changed` for panels to refresh. UI never touches the
+ * engine registries/scene/render-graph write methods directly.
+ */
+export class EditorCommandBus {
+    private mode: EditMode = 'edit';
+    private undoStack: Command[] = [];
+    private redoStack: Command[] = [];
+    private maxHistory = 50;
+    private editSnapshot: object | null = null;
+
+    constructor(private _engine: Engine) {}
+
+    get engine(): Engine { return this._engine; }
+    get editMode(): EditMode { return this.mode; }
+    get scene() { return this._engine.scene; }
+    get renderGraph() { return this._engine.renderGraph; }
+
+    play(): void {
+        if (this.mode === 'play') return;
+        this.editSnapshot = {
+            scene: this._engine.exportScene(),
+            renderGraph: this._engine.exportRenderGraph(),
+        };
+        this.mode = 'play';
+        this._engine.eventBus.emit('editor:play');
+    }
+
+    pause(): void {
+        if (this.mode !== 'play') return;
+        this.mode = 'pause';
+        this._engine.eventBus.emit('editor:pause');
+    }
+
+    stop(): void {
+        if (this.mode === 'edit') return;
+        this.mode = 'edit';
+        if (this.editSnapshot) {
+            const s = this.editSnapshot as { scene: unknown; renderGraph: unknown };
+            this._engine.loadSceneData(s.scene as SceneData);
+            this._engine.renderGraph.fromData(s.renderGraph as RenderGraphData);
+        }
+        this._engine.eventBus.emit('editor:stop');
+    }
+
+    dispatch(cmd: Command): boolean {
+        if (this.mode !== 'edit') {
+            console.warn(`[EditorCommandBus] Blocked ${cmd.type} while in ${this.mode} mode`);
+            return false;
+        }
+        const ctx: CommandContext = { engine: this._engine };
+        if (!cmd.execute(ctx)) return false;
+
+        this.undoStack.push(cmd);
+        if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
+        this.redoStack.length = 0;
+        this._engine.eventBus.emit('editor:changed', { source: cmd.type });
+        return true;
+    }
+
+    undo(): void {
+        if (this.undoStack.length === 0) return;
+        const cmd = this.undoStack.pop()!;
+        cmd.undo({ engine: this._engine });
+        this.redoStack.push(cmd);
+        this._engine.eventBus.emit('editor:changed', { source: 'undo' });
+    }
+
+    redo(): void {
+        if (this.redoStack.length === 0) return;
+        const cmd = this.redoStack.pop()!;
+        cmd.execute({ engine: this._engine });
+        this.undoStack.push(cmd);
+        this._engine.eventBus.emit('editor:changed', { source: 'redo' });
+    }
+
+    setField(entityKey: string, comp: string, field: string, value: unknown): boolean {
+        return this.dispatch(new SetFieldCommand(entityKey, comp, field, value));
+    }
+
+    createEntity(key: string, data: Record<string, Record<string, unknown>>): boolean {
+        return this.dispatch(new CreateEntityCommand(key, data));
+    }
+
+    removeEntity(key: string): boolean {
+        return this.dispatch(new RemoveEntityCommand(key));
+    }
+
+    loadSceneData(data: SceneData, prevData?: string): boolean {
+        return this.dispatch(new LoadSceneDataCommand(data, prevData));
+    }
+
+    toggleComponent(entityKey: string, compName: string, enabled: boolean): boolean {
+        return this.dispatch(new ToggleComponentCommand(entityKey, compName, enabled));
+    }
+
+    mutateRenderGraph(data: object): boolean {
+        return this.dispatch(new MutateRenderGraphCommand(data));
+    }
+
+    patchRenderGraph(data: RenderGraphData, prevData?: string): boolean {
+        return this.dispatch(new PatchRenderGraphCommand(data, prevData));
+    }
+
+    mutatePipelineConfig(pipeline: string, nextJson: string, prevJson?: string): boolean {
+        return this.dispatch(new MutatePipelineConfigCommand(pipeline, nextJson, prevJson));
+    }
+}
+
+```
+
+## editor\EditorPanel.ts
+
+```ts
+import type { EditorCommandBus } from './EditorCommandBus';
+import { schemaRegistry } from '../core/ecs/SchemaRegistry';
+import type { SceneData } from '../core/ecs/Scene';
+import { ce, makeFloatField, makeSelect } from './dom';
+
+export class EditorPanel {
+    private panel: HTMLElement;
+    private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
+    private selected = '';
+    private syncers: (() => void)[] = [];
+    private lastEntityCount = -1;
+    /** Scroll position of the entity list (preserved across re-renders). */
+    private entityScrollTop = 0;
+    /** Estimated entity row height in pixels (matches CSS ed-ent-row). */
+    private readonly ROW_H = 28;
+    /** Maximum visible rows in the entity list viewport. */
+    private readonly VISIBLE_ROWS = 18;
+    /** Called when loadJSON receives an app.json manifest; the host layer wires
+     *  this to engine.loadApp + panel refresh so glTF / render graph reload. */
+    onAppSwitch?: (name: string) => Promise<void>;
+
+    constructor(container: HTMLElement) {
+        this.panel = container;
+    }
+
+    attach(bus: EditorCommandBus): void {
+        this.bus = bus;
+        // Idempotent: app switch clears the event bus, so re-attaching must not
+        // double-subscribe.
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => {
+            const count = bus.scene.entityKeyMap.size;
+            if (count !== this.lastEntityCount) {
+                this.lastEntityCount = count;
+                this.render();
+                return;
+            }
+            for (const sync of this.syncers) sync();
+        });
+    }
+
+    render(): void {
+        this.panel.innerHTML = '';
+        this.syncers = [];
+        const scene = this.bus.scene;
+        this.lastEntityCount = scene.entityKeyMap.size;
+
+        // ── Header ──
+        const head = ce('div', 'editor-head');
+        head.appendChild(ce('span', 'ed-title', 'Scene Editor'));
+        const btns = ce('div', 'editor-btn-row');
+        btns.appendChild(this.btn('Save JSON', () => this.saveJSON()));
+        btns.appendChild(this.btn('Load JSON', () => this.loadJSON()));
+        head.appendChild(btns);
+        this.panel.appendChild(head);
+
+        // ── Entity list (virtual scroll) ──
+        const list = ce('div', 'ed-ent-list');
+        const listHead = ce('div', 'ed-ent-list-head');
+        listHead.appendChild(ce('span', '', 'Entities'));
+        const ab = ce('div', 'ed-ent-list-actions');
+        ab.appendChild(this.btn('+', () => this.addEntity()));
+        ab.appendChild(this.btn('✕', () => { if (this.selected) { this.bus.removeEntity(this.selected); this.selected = ''; this.render(); } }));
+        listHead.appendChild(ab);
+        list.appendChild(listHead);
+
+        const allEntities = scene.getAllEntities();
+        const total = allEntities.length;
+        const rowsScroll = ce('div', 'ed-ent-rows');
+        rowsScroll.style.maxHeight = `${this.ROW_H * this.VISIBLE_ROWS}px`;
+        rowsScroll.style.overflowY = 'auto';
+        rowsScroll.style.position = 'relative';
+        rowsScroll.scrollTop = this.entityScrollTop;
+        rowsScroll.onscroll = () => {
+            this.entityScrollTop = rowsScroll.scrollTop;
+            this.renderVisibleRows(content, allEntities);
+        };
+
+        // Content container sized to the full list height so the scrollbar
+        // reflects the true entity count; only visible rows are in the DOM.
+        const content = ce('div');
+        content.style.height = `${total * this.ROW_H}px`;
+        content.style.position = 'relative';
+        this.renderVisibleRows(content, allEntities);
+        rowsScroll.appendChild(content);
+        list.appendChild(rowsScroll);
+
+        if (!this.selected && scene.entityKeyMap.size > 0) {
+            this.selected = [...scene.entityKeyMap.keys()][0];
+        }
+        this.panel.appendChild(list);
+
+        // ── Selected entity detail ──
+        if (this.selected && scene.entityKeyMap.has(this.selected)) {
+            const eid = scene.entityKeyMap.get(this.selected)!;
+            const detail = this.renderDetail(eid);
+            this.panel.appendChild(detail);
+        }
+    }
+
+    /** Render only the entity rows visible in the scroll viewport (+ a small
+     *  overscan buffer). Rows are absolutely positioned within the content
+     *  container so the scrollbar reflects the true entity count without
+     *  materializing a DOM node per entity. */
+    private renderVisibleRows(content: HTMLElement, allEntities: { key: string }[]): void {
+        content.innerHTML = '';
+        const total = allEntities.length;
+        const overscan = 5;
+        const start = Math.max(0, Math.floor(this.entityScrollTop / this.ROW_H) - overscan);
+        const end = Math.min(total, start + this.VISIBLE_ROWS + overscan * 2);
+        for (let i = start; i < end; i++) {
+            const { key } = allEntities[i];
+            const row = ce('div', `ed-ent-row ${this.selected === key ? 'ed-ent-sel' : ''}`);
+            row.style.position = 'absolute';
+            row.style.top = `${i * this.ROW_H}px`;
+            row.style.height = `${this.ROW_H}px`;
+            row.style.width = '100%';
+            row.style.boxSizing = 'border-box';
+            const eid = this.bus.scene.entityKeyMap.get(key);
+            const name = eid != null
+                ? (this.bus.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
+                : key;
+            row.appendChild(ce('span', 'ed-ent-name', name));
+            row.onclick = () => { this.selected = key; this.render(); };
+            content.appendChild(row);
+        }
+    }
+
+    private renderDetail(eid: number): HTMLElement {
+        const scene = this.bus.scene;
+        const wrap = ce('div', 'ed-detail');
+
+        const hdr = ce('div', 'ed-detail-head');
+        const name = scene.getField(eid, 'NameComponent', 'name') as string ?? this.selected;
+        hdr.appendChild(ce('span', '', `Components — ${name}`));
+        wrap.appendChild(hdr);
+
+        const compNames = scene.componentNames
+            .filter(compName => {
+                const def = schemaRegistry.getDef(compName);
+                return def && Object.keys(def.fields).length > 0;
+            })
+            .sort((a, b) => Number(scene.hasComponent(eid, b)) - Number(scene.hasComponent(eid, a)));
+
+        for (const compName of compNames) {
+            const def = schemaRegistry.getDef(compName)!;
+
+            const hasComp = scene.hasComponent(eid, compName);
+            const locked = schemaRegistry.mandatory.has(compName);
+
+            const compDiv = ce('div', `ed-comp ${hasComp ? '' : 'ed-comp-off'}`);
+            const compHead = ce('div', 'ed-comp-head');
+
+            if (locked) {
+                compHead.appendChild(ce('span', 'ed-lock', '🔒'));
+            } else {
+                const chk = ce('input') as HTMLInputElement;
+                chk.type = 'checkbox'; chk.checked = hasComp;
+                chk.onchange = () => { this.bus.toggleComponent(this.selected, compName, chk.checked); this.render(); };
+                compHead.appendChild(chk);
+            }
+            compHead.appendChild(ce('span', '', compName));
+            compDiv.appendChild(compHead);
+
+            if (hasComp) {
+                const grid = ce('div', 'ed-fields');
+                for (const [fieldName, fd] of Object.entries(def.fields)) {
+                    grid.appendChild(this.renderField(this.selected, eid, compName, fieldName, fd));
+                }
+                compDiv.appendChild(grid);
+            }
+            wrap.appendChild(compDiv);
+        }
+        return wrap;
+    }
+
+    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
+        const scene = this.bus.scene;
+        const row = ce('div', 'ed-field-row');
+        row.appendChild(ce('label', 'ed-field-label', field));
+
+        const val = scene.getField(eid, compName, field);
+        const numInputs = ce('div', 'ed-field-inputs');
+
+        if (fd.type === 'string' && fd.options) {
+            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => this.bus.setField(entityKey, compName, field, v));
+            this.syncers.push(() => {
+                const cur = scene.getField(eid, compName, field) as string | undefined;
+                if (cur != null) sel.value = cur;
+            });
+            numInputs.appendChild(sel);
+        } else if (fd.type === 'string') {
+            const inp = this.makeInput('text', val as string, v => this.bus.setField(entityKey, compName, field, v));
+            numInputs.appendChild(inp);
+        } else if (fd.type === 'bool') {
+            const chk = ce('input', 'ed-check') as HTMLInputElement;
+            chk.type = 'checkbox';
+            chk.checked = Number(val ?? fd.default) === 1;
+            chk.onchange = () => this.bus.setField(entityKey, compName, field, chk.checked ? 1 : 0);
+            this.syncers.push(() => {
+                const cur = scene.getField(eid, compName, field);
+                if (cur != null) chk.checked = Number(cur) === 1;
+            });
+            numInputs.appendChild(chk);
+        } else if (fd.type === 'f32' || fd.type === 'u32') {
+            const defVal = (fd.default as number[]) ?? [0];
+            const v = val != null ? Number(val) : defVal[0] ?? 0;
+            const el = makeFloatField(v, newVal => {
+                this.bus.setField(entityKey, compName, field, newVal);
+            });
+            this.syncers.push(() => {
+                const cur = scene.getField(eid, compName, field);
+                if (cur != null) el.setValue(Number(cur));
+            });
+            numInputs.appendChild(el.el);
+        } else if (fd.type === 'vec2' || fd.type === 'vec3' || fd.type === 'vec4') {
+            const count = parseInt(fd.type[3]);
+            const arr = (Array.isArray(val) ? val : (fd.default as number[])) as number[];
+            for (let i = 0; i < count; i++) {
+                const el = makeFloatField(arr[i] ?? 0, newVal => {
+                    const a = [...(scene.getField(eid, compName, field) as number[] ?? (fd.default as number[]))];
+                    for (let j = 0; j < count; j++) a[j] = a[j] ?? 0;
+                    a[i] = newVal;
+                    this.bus.setField(entityKey, compName, field, a);
+                });
+                this.syncers.push(() => {
+                    const cur = scene.getField(eid, compName, field) as number[] | undefined;
+                    if (cur?.[i] != null) el.setValue(cur[i]);
+                });
+                numInputs.appendChild(el.el);
+            }
+        }
+        row.appendChild(numInputs);
+        return row;
+    }
+
+    private makeInput(type: string, val: string, onChange: (v: string) => void): HTMLInputElement {
+        const inp = ce('input', 'ed-input') as HTMLInputElement;
+        inp.type = type; inp.value = val;
+        inp.onchange = () => onChange(inp.value);
+        return inp;
+    }
+
+    private btn(text: string, cb: () => void): HTMLButtonElement {
+        const b = ce('button', 'editor-btn', text);
+        b.onclick = cb; return b as HTMLButtonElement;
+    }
+
+    private addEntity(): void {
+        const name = prompt('Entity name:', 'NewEntity');
+        if (!name) return;
+        this.bus.createEntity(name, {});
+        this.selected = name;
+        this.render();
+    }
+
+    /** Select an entity by key (from 3D picking or the entity list). */
+    select(key: string): void {
+        if (!this.bus.scene.entityKeyMap.has(key)) return;
+        this.selected = key;
+        this.render();
+    }
+
+    private saveJSON(): void {
+        const json = { entities: this.bus.scene.toJSON() };
+        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
+    }
+
+    private loadJSON(): void {
+        const input = ce('input') as HTMLInputElement;
+        input.type = 'file'; input.accept = '.json';
+        input.onchange = async () => {
+            const file = input.files?.[0]; if (!file) return;
+            const json = JSON.parse(await file.text()) as Record<string, unknown>;
+            // App manifest (has gltf/render/scene-as-string) → full app reload,
+            // which re-loads glTF models, render graph and tools via loadApp.
+            const isAppManifest = !!json.gltf || !!json.render
+                || (typeof json.scene === 'string');
+            if (isAppManifest) {
+                const name = json.name as string | undefined;
+                if (!name) { alert('app manifest missing "name" field'); return; }
+                if (!this.onAppSwitch) {
+                    alert('No app-switch handler wired (run through the host layer).');
+                    return;
+                }
+                await this.onAppSwitch(name);
+            } else {
+                // Scene entity data → reload entities in place (no glTF / render graph).
+                this.bus.loadSceneData(
+                    (json.entities ?? json) as SceneData,
+                    JSON.stringify(this.bus.scene.toJSON()),
+                );
+            }
+            this.selected = '';
+            this.render();
+        };
+        input.click();
+    }
+}
+
+```
+
+## editor\PipelinePanel.ts
+
+```ts
+import type { EditorCommandBus } from './EditorCommandBus';
+import { type PipelineEntry, type PipelineConfig, type RenderGraphData } from '../core/render/types';
+import { PipelineLoader } from '../core/render/PipelineLoader';
+import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
+
+const TOPOLOGY_OPTIONS: string[] = [
+    'point-list', 'line-list', 'line-strip', 'triangle-list', 'triangle-strip',
+];
+const CULL_OPTIONS: string[] = ['none', 'front', 'back'];
+const FRONT_FACE_OPTIONS: string[] = ['ccw', 'cw'];
+const COMPARE_OPTIONS: string[] = [
+    'never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always',
+];
+
+/**
+ * Pipeline inspector. All state changes — entry toggles, parameter edits and
+ * pipeline config edits — go through the EditorCommandBus so they are undoable
+ * and never write to the render graph directly. Ctrl+Z / Ctrl+Y delegate to
+ * the command bus's unified undo/redo.
+ */
+export class PipelinePanel {
+    private panel: HTMLElement;
+    private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
+
+    private get blendOptions(): string[] {
+        return PipelineLoader.blendPresetNames.length > 0
+            ? PipelineLoader.blendPresetNames
+            : ['opaque', 'alpha', 'additive'];
+    }
+
+    constructor(container: HTMLElement) {
+        this.panel = container;
+    }
+
+    attach(bus: EditorCommandBus): void {
+        this.bus = bus;
+        this.panel.tabIndex = 0;
+        this.panel.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
+                e.preventDefault();
+                this.bus.undo();
+            } else if (e.ctrlKey && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+                e.preventDefault();
+                this.bus.redo();
+            }
+        });
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => this.render());
+    }
+
+    /** Dispatch a structural edit (enabled/params) as a live-sync patch. */
+    private patchStructural(apply: (data: RenderGraphData) => void): void {
+        const prev = JSON.stringify(this.bus.renderGraph.toData());
+        const data = this.bus.renderGraph.toData();
+        apply(data);
+        this.bus.patchRenderGraph(data, prev);
+        this.render();
+    }
+
+    /** Dispatch a pipeline config edit (topology/blend/cull/depth) + rebuild.
+     *  The panel mutates a deep copy; the command applies it to the live config. */
+    private patchConfig(entry: PipelineEntry, mutate: (config: PipelineConfig) => void): void {
+        const config = PipelineLoader.getConfig(entry.pipeline);
+        if (!config) return;
+        const prev = JSON.stringify(config);
+        const next = JSON.parse(prev) as PipelineConfig;
+        mutate(next);
+        this.bus.mutatePipelineConfig(entry.pipeline, JSON.stringify(next), prev);
+        this.render();
+    }
+
+    render(): void {
+        this.panel.innerHTML = '';
+
+        const head = ce('div', 'editor-head');
+        head.appendChild(ce('span', 'ed-title', 'Render Pipeline'));
+        this.panel.appendChild(head);
+
+        const phases = this.bus.renderGraph.phases;
+        const phaseNames = this.bus.renderGraph.getPhaseNames();
+        for (const phase of phaseNames) {
+            const section = ce('div', 'pp-phase');
+            section.appendChild(ce('div', 'pp-phase-title', phase));
+
+            const entries = phases[phase] ?? [];
+            if (entries.length === 0) {
+                section.appendChild(ce('div', 'pp-empty', '(empty)'));
+            } else {
+                for (const entry of entries) {
+                    section.appendChild(this.renderEntry(entry));
+                }
+            }
+            this.panel.appendChild(section);
+        }
+    }
+
+    private renderEntry(entry: PipelineEntry): HTMLElement {
+        const wrap = ce('div', 'pp-entry-wrap');
+
+        const row = ce('div', 'pp-entry');
+        const chk = ce('input') as HTMLInputElement;
+        chk.type = 'checkbox';
+        chk.checked = entry.enabled;
+        chk.onchange = () => this.patchStructural(data => {
+            for (const list of Object.values(data.phases)) {
+                const target = (list ?? []).find(e => e.name === entry.name);
+                if (target) target.enabled = chk.checked;
+            }
+        });
+        row.appendChild(chk);
+        row.appendChild(ce('span', 'pp-entry-name', entry.name));
+        const config = PipelineLoader.getConfig(entry.pipeline);
+        const badge = config?.renderer?.phase ?? entry.kind ?? '';
+        row.appendChild(ce('span', 'pp-entry-kind', badge));
+        wrap.appendChild(row);
+
+        if (entry.params) {
+            for (const [key, values] of Object.entries(entry.params)) {
+                wrap.appendChild(this.renderParam(entry, key, values));
+            }
+        }
+
+        if (config) {
+            wrap.appendChild(this.renderConfig(entry, config));
+        }
+        return wrap;
+    }
+
+    private renderParam(entry: PipelineEntry, key: string, values: number[]): HTMLElement {
+        const box = ce('div', 'pp-params');
+        box.appendChild(ce('span', 'pp-param-label', key));
+        values.forEach((v, i) => {
+            const field = makeFloatField(v, newVal => this.patchStructural(data => {
+                for (const list of Object.values(data.phases)) {
+                    const target = (list ?? []).find(e => e.name === entry.name);
+                    if (target && target.params?.[key]) target.params[key][i] = newVal;
+                }
+            }));
+            box.appendChild(field.el);
+        });
+        return box;
+    }
+
+    private renderConfig(entry: PipelineEntry, config: PipelineConfig): HTMLElement {
+        const box = ce('div', 'pp-config');
+        const edit = (mutate: (c: PipelineConfig) => void): void => this.patchConfig(entry, mutate);
+
+        // ── Primitive ──
+        box.appendChild(this.field('topology', makeSelect(
+            TOPOLOGY_OPTIONS, config.primitive.topology,
+            v => edit(c => { c.primitive.topology = v as GPUPrimitiveTopology; }),
+        )));
+        box.appendChild(this.field('cullMode', makeSelect(
+            CULL_OPTIONS, config.primitive.cullMode,
+            v => edit(c => { c.primitive.cullMode = v as GPUCullMode; }),
+        )));
+        box.appendChild(this.field('frontFace', makeSelect(
+            FRONT_FACE_OPTIONS, config.primitive.frontFace ?? 'ccw',
+            v => edit(c => { c.primitive.frontFace = v as GPUFrontFace; }),
+        )));
+
+        // ── Blend ──
+        const blendVal = typeof config.blend === 'string' ? config.blend : 'opaque';
+        box.appendChild(this.field('blend', makeSelect(
+            this.blendOptions, blendVal,
+            v => edit(c => { c.blend = v as PipelineConfig['blend']; }),
+        )));
+
+        // ── Depth ──
+        if (config.depthStencil) {
+            const writeEnabled = config.depthStencil.depthWriteEnabled === true;
+            box.appendChild(this.field('depthWrite', makeCheckbox(
+                writeEnabled,
+                v => edit(c => { if (c.depthStencil) c.depthStencil.depthWriteEnabled = v; }),
+            )));
+            const compare = (config.depthStencil.depthCompare as string) ?? 'less';
+            box.appendChild(this.field('depthCompare', makeSelect(
+                COMPARE_OPTIONS, compare,
+                v => edit(c => { if (c.depthStencil) c.depthStencil.depthCompare = v as GPUCompareFunction; }),
+            )));
+        }
+
+        return box;
+    }
+
+    private field(label: string, control: HTMLElement): HTMLElement {
+        const row = ce('div', 'pp-config-row');
+        row.appendChild(ce('span', 'pp-config-label', label));
+        row.appendChild(control);
+        return row;
+    }
+}
+
+```
+
+## editor\commands\Command.ts
+
+```ts
+import type { Engine } from '../../core/Engine';
+
+export interface Command {
+    readonly type: string;
+    readonly description: string;
+    execute(ctx: CommandContext): boolean;
+    undo(ctx: CommandContext): boolean;
+}
+
+export interface CommandContext {
+    engine: Engine;
+}
+
+```
+
+## editor\commands\RenderGraphCommands.ts
+
+```ts
+import type { Command, CommandContext } from './Command';
+import type { RenderGraphData, PipelineConfig } from '../../core/render/types';
+import { PipelineLoader } from '../../core/render/PipelineLoader';
+
+export class MutateRenderGraphCommand implements Command {
+    readonly type = 'mutateRenderGraph';
+    readonly description = 'mutateRenderGraph';
+    private prevData: string;
+    constructor(private nextData: object, prevData?: string) {
+        this.prevData = prevData ?? JSON.stringify(nextData);
+    }
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.fromData(this.nextData as RenderGraphData);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.fromData(JSON.parse(this.prevData));
+        return true;
+    }
+}
+
+/**
+ * Live-sync structural render-graph edits (entry.enabled / entry.params) onto
+ * the EXISTING entry objects so PipelineDriver references stay valid — a plain
+ * fromData() would replace entries with clones and silently detach drivers.
+ * Prev state is stored as JSON for undo. Used by the pipeline panel.
+ */
+export class PatchRenderGraphCommand implements Command {
+    readonly type = 'patchRenderGraph';
+    readonly description = 'patchRenderGraph';
+    private prevData: string;
+    constructor(private nextData: RenderGraphData, prevData?: string) {
+        this.prevData = prevData ?? JSON.stringify(nextData);
+    }
+
+    execute(ctx: CommandContext): boolean {
+        this.patch(ctx, this.nextData);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        this.patch(ctx, JSON.parse(this.prevData) as RenderGraphData);
+        return true;
+    }
+
+    private patch(ctx: CommandContext, data: RenderGraphData): void {
+        for (const [phaseName, entries] of Object.entries(data.phases)) {
+            if (!entries) continue;
+            const live = ctx.engine.renderGraph.phases[phaseName] ?? [];
+            for (const next of entries) {
+                const target = live.find(e => e.name === next.name);
+                if (!target) continue;
+                target.enabled = next.enabled ?? true;
+                if (next.params) target.params = next.params;
+            }
+        }
+    }
+}
+
+/** Apply a full pipeline config (topology/blend/cull/depth) to a named
+ *  pipeline and recompile its GPU pipeline. Undo restores the prior config. */
+export class MutatePipelineConfigCommand implements Command {
+    readonly type = 'mutatePipelineConfig';
+    readonly description = 'mutatePipelineConfig';
+    private prevJson: string;
+    constructor(
+        private pipeline: string,
+        private nextJson: string,
+        prevJson?: string,
+    ) {
+        this.prevJson = prevJson ?? nextJson;
+    }
+
+    execute(ctx: CommandContext): boolean {
+        const config = PipelineLoader.getConfig(this.pipeline);
+        if (!config) return false;
+        this.apply(config, this.nextJson);
+        ctx.engine.renderGraph.rebuildPipeline(ctx.engine.device, this.pipeline);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const config = PipelineLoader.getConfig(this.pipeline);
+        if (!config) return false;
+        this.apply(config, this.prevJson);
+        ctx.engine.renderGraph.rebuildPipeline(ctx.engine.device, this.pipeline);
+        return true;
+    }
+
+    private apply(config: PipelineConfig, json: string): void {
+        const parsed = JSON.parse(json) as PipelineConfig;
+        // Replace top-level fields wholesale so nested objects (primitive /
+        // depthStencil) are swapped in, keeping any runtime references coherent.
+        const cfg = config as unknown as Record<string, unknown>;
+        for (const key of Object.keys(config)) delete cfg[key];
+        Object.assign(config, parsed);
+    }
+}
+
+
+```
+
+## editor\commands\SceneCommands.ts
+
+```ts
+import { schemaRegistry } from '../../core/ecs/SchemaRegistry';
+import type { SceneData } from '../../core/ecs/Scene';
+import type { Command, CommandContext } from './Command';
+
+export class SetFieldCommand implements Command {
+    readonly type = 'setField';
+    get description(): string { return `setField ${this.compName}.${this.field} = ${this.newValue}`; }
+    private oldValue: unknown;
+    constructor(
+        private entityKey: string,
+        private compName: string,
+        private field: string,
+        private newValue: unknown,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        this.oldValue = ctx.engine.scene.getField(eid, this.compName, this.field);
+        ctx.engine.scene.setField(eid, this.compName, this.field, this.newValue);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        ctx.engine.scene.setField(eid, this.compName, this.field, this.oldValue);
+        return true;
+    }
+}
+
+export class CreateEntityCommand implements Command {
+    readonly type = 'createEntity';
+    get description(): string { return `createEntity ${this.key}`; }
+    private createdKey: string;
+    constructor(
+        private key: string,
+        private data: Record<string, Record<string, unknown>>,
+    ) {
+        this.createdKey = key;
+    }
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.scene.createEntity(this.createdKey, this.data);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.scene.removeEntity(this.createdKey);
+        return true;
+    }
+}
+
+export class RemoveEntityCommand implements Command {
+    readonly type = 'removeEntity';
+    get description(): string { return `removeEntity ${this.key}`; }
+    private backupData: Record<string, Record<string, unknown>> | null = null;
+    constructor(private key: string) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.key);
+        if (eid == null) return false;
+        this.backupData = this.serializeEntity(ctx, eid);
+        ctx.engine.scene.removeEntity(this.key);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        if (!this.backupData) return false;
+        ctx.engine.scene.createEntity(this.key, this.backupData);
+        return true;
+    }
+
+    private serializeEntity(ctx: CommandContext, eid: number): Record<string, Record<string, unknown>> {
+        const result: Record<string, Record<string, unknown>> = {};
+        const comps = ctx.engine.scene.getEntityComponentNames(eid);
+        for (const compName of comps) {
+            const comp = schemaRegistry.get(compName);
+            if (comp && ctx.engine.scene.hasComponent(eid, compName)) {
+                result[compName] = schemaRegistry.readAllFields(compName, comp, eid);
+            }
+        }
+        return result;
+    }
+}
+
+/** Replace the whole scene (clear + load entity data), e.g. editor "Load JSON"
+ *  of a plain scene-entities file. Snapshot is the previous scene data. */
+export class LoadSceneDataCommand implements Command {
+    readonly type = 'loadSceneData';
+    readonly description = 'loadSceneData';
+    private prevData: string;
+    constructor(private data: SceneData, prevData?: string) {
+        this.prevData = prevData ?? JSON.stringify(data);
+    }
+
+    execute(ctx: CommandContext): boolean {
+        this.replaceScene(ctx, this.data);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        this.replaceScene(ctx, JSON.parse(this.prevData) as SceneData);
+        return true;
+    }
+
+    private replaceScene(ctx: CommandContext, data: SceneData): void {
+        const scene = ctx.engine.scene;
+        for (const k of [...scene.entityKeyMap.keys()]) scene.removeEntity(k);
+        ctx.engine.loadSceneData(data);
+    }
+}
+
+/** Add/remove a component on an entity (undo restores prior field values when
+ *  the component was removed). Used by the editor's component checkboxes. */
+export class ToggleComponentCommand implements Command {
+    readonly type = 'toggleComponent';
+    get description(): string { return `toggleComponent ${this.compName}`; }
+    private backup: Record<string, Record<string, unknown>> | null = null;
+    private added = false;
+    constructor(
+        private entityKey: string,
+        private compName: string,
+        private enabled: boolean,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        const wasEnabled = ctx.engine.scene.hasComponent(eid, this.compName);
+        if (wasEnabled === this.enabled) return false;
+        if (!this.enabled) {
+            const comp = schemaRegistry.get(this.compName);
+            if (comp) {
+                this.backup = { [this.compName]: schemaRegistry.readAllFields(this.compName, comp, eid) };
+            }
+        }
+        ctx.engine.scene.toggleComponent(eid, this.compName, this.enabled);
+        this.added = this.enabled;
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        if (this.added) {
+            ctx.engine.scene.toggleComponent(eid, this.compName, false);
+        } else if (this.backup) {
+            ctx.engine.scene.toggleComponent(eid, this.compName, true);
+            for (const [field, value] of Object.entries(this.backup[this.compName] ?? {})) {
+                ctx.engine.scene.setField(eid, this.compName, field, value);
+            }
+        }
+        return true;
+    }
+}
+
+```
+
+## editor\input\EditorInputManager.ts
+
+```ts
+import { ToolSystem } from './ToolSystem';
+import type { Scene } from '../../core/ecs/Scene';
+import type { EventBus } from '../../core/events/EventBus';
+
+/**
+ * Editor-owned wrapper around the tool lifecycle. The engine core no longer
+ * loads tools.json — only the editor mounts an input manager, so picking and
+ * other interaction tools stay fully editor-side (player mode never loads
+ * them). ToolSystem manages SceneTool attach/detach internally via load().
+ */
+export class EditorInputManager {
+    private toolSystem: ToolSystem;
+
+    constructor(
+        scene: Scene,
+        eventBus: EventBus,
+        getSystem: <T>(name: string) => T | null,
+        getAspect: () => number,
+    ) {
+        this.toolSystem = new ToolSystem(scene, eventBus, getSystem, getAspect);
+    }
+
+    /** Load the current App's tools.json (path resolved from the app base). */
+    async loadTools(appBase: string, toolsPath: string): Promise<void> {
+        this.toolSystem.setBase(appBase);
+        await this.toolSystem.loadFromFile(`${appBase}/${toolsPath}`);
+    }
+
+    dispose(): void {
+        this.toolSystem.dispose();
+    }
+}
+
+```
+
+## editor\input\SceneTool.ts
+
+```ts
+import type { Scene } from '../../core/ecs/Scene';
+import type { EventBus } from '../../core/events/EventBus';
 
 export interface ToolConfig {
     /** Builtin tool name (e.g., "pick"). Mutually exclusive with `source`. */
@@ -8069,6 +8354,9 @@ export interface SceneTool {
     detach(): void;
 }
 
+/** Factory for a builtin tool type (TOOL_REGISTRY value). */
+export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
+
 /** Lifecycle hooks a script tool may export. All optional; missing hooks are skipped. */
 export interface ToolScriptModule {
     attach?: (ctx: ToolContext) => void;
@@ -8078,29 +8366,15 @@ export interface ToolScriptModule {
 
 ```
 
-## tools\ToolSystem.ts
+## editor\input\ToolSystem.ts
 
 ```ts
-import type { Scene } from '../ecs/Scene';
-import type { EventBus } from '../events/EventBus';
+import type { Scene } from '../../core/ecs/Scene';
+import type { EventBus } from '../../core/events/EventBus';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
+import { TOOL_REGISTRY } from '../../core/tools/ToolRegistry';
 
-export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
-
-/** Registry of tool factories, keyed by config `type`. Populated entirely by
- *  plugins (ctx.registerToolType) — the engine ships no built-in tools. */
-const TOOL_REGISTRY: Record<string, ToolFactory> = {};
-
-/** Register a tool type (plugins). Duplicate names throw (fail-loud). */
-export function registerToolType(type: string, factory: ToolFactory): void {
-    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
-    TOOL_REGISTRY[type] = factory;
-}
-
-/** Remove a tool type (plugin unload). */
-export function unregisterToolType(type: string): void {
-    delete TOOL_REGISTRY[type];
-}
+export type { ToolFactory } from './SceneTool';
 
 /** Wraps a script-loaded tool module in the SceneTool interface. */
 class ScriptToolAdapter implements SceneTool {
@@ -8215,6 +8489,125 @@ export class ToolSystem {
 
 ```
 
+## host\AppHost.ts
+
+```ts
+import { Engine } from '../core/Engine';
+import { EventBus } from '../core/events/EventBus';
+import type { Command, CommandContext } from '../editor/commands/Command';
+import type { UILayer } from '../ui/UILayer';
+
+/**
+ * Unified host layer: owns the Engine and the UI layers mounted above it.
+ *
+ * The dependency direction is strictly downward — UI Layer → AppHost → Engine
+ * Core. AppHost is the ONLY bridge between them:
+ *   - state changes flow down via `dispatch(new Command())` (command channel)
+ *   - notifications flow up via `eventBus.emit(...)` (event channel)
+ *   - UI layers get read-only engine access through the engine's accessors
+ *
+ * In editor mode a mounted editor layer (id === 'editor') intercepts dispatch
+ * to run the command bus (edit-mode gating + undo/redo). Without one (player
+ * mode) commands execute directly against the engine, unstacked.
+ */
+export class AppHost {
+    public engine: Engine;
+    private uiLayers: UILayer[] = [];
+    private uiContainer: HTMLElement;
+    private editorLayer?: { dispatch(cmd: Command): boolean };
+
+    constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
+        this.engine = new Engine(canvas);
+        this.uiContainer = uiContainer;
+    }
+
+    async init(): Promise<void> { await this.engine.init(); }
+    async loadApp(name: string): Promise<void> { await this.engine.loadApp(name); }
+    startLoop(): void { this.engine.startLoop(); }
+    resize(): void { this.engine.resize(); }
+    get engineConfig() { return this.engine.engineConfig; }
+
+    // Read-only proxies (UI layer queries).
+    get scene() { return this.engine.scene; }
+    get renderGraph() { return this.engine.renderGraph; }
+    /** Live delegate: Engine.eventBus is created in init(), so it must be read
+     *  after init() — a field copied in the constructor would be undefined. */
+    get eventBus(): EventBus { return this.engine.eventBus; }
+
+    mountLayer(layer: UILayer, container?: HTMLElement): void {
+        layer.mount(container ?? this.uiContainer, this);
+        this.uiLayers.push(layer);
+        if (layer.id === 'editor') {
+            this.editorLayer = layer as unknown as { dispatch(cmd: Command): boolean };
+        }
+    }
+
+    unmountAll(): void {
+        for (const layer of this.uiLayers) layer.unmount();
+        this.uiLayers = [];
+        this.editorLayer = undefined;
+    }
+
+    dispatch(cmd: Command): boolean {
+        if (this.editorLayer) {
+            return this.editorLayer.dispatch(cmd);
+        }
+        // Runtime has no editor: execute directly, no undo stack.
+        const ctx: CommandContext = { engine: this.engine };
+        return cmd.execute(ctx);
+    }
+
+    async loadAppUI(appBase: string): Promise<void> {
+        for (const layer of this.appUILayers) layer.unmount();
+        this.appUILayers = [];
+
+        const manifestResp = await fetch(`${appBase}/app.json`);
+        if (!manifestResp.ok) return;
+        const manifest = await manifestResp.json() as { ui?: string };
+        if (!manifest.ui) return;
+
+        const configs = await fetch(`${appBase}/${manifest.ui}`).then(r => r.json()) as AppUIConfig[];
+        for (const cfg of configs) {
+            const container = (cfg.container ? document.querySelector<HTMLElement>(cfg.container) : null)
+                ?? this.createContainer(cfg.id);
+            const mod = await this.loadUIScript(`${appBase}/${cfg.source}`);
+            const unmount = mod.mount(container, this);
+            this.appUILayers.push({ id: cfg.id, unmount });
+        }
+    }
+
+    private appUILayers: Array<{ id: string; unmount: () => void }> = [];
+
+    private createContainer(id: string): HTMLElement {
+        const el = document.createElement('div');
+        el.id = `ui-${id}`;
+        this.uiContainer.appendChild(el);
+        return el;
+    }
+
+    private async loadUIScript(url: string): Promise<{ mount: (container: HTMLElement, host: AppHost) => () => void }> {
+        const resp = await fetch(`${url}?t=${Date.now()}`);
+        if (!resp.ok) throw new Error(`UI script not found: ${url}`);
+        const src = await resp.text();
+        const blob = new Blob([src], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+            const mod = await import(/* @vite-ignore */ blobUrl);
+            return mod.default ?? mod;
+        } finally {
+            URL.revokeObjectURL(blobUrl);
+        }
+    }
+}
+
+interface AppUIConfig {
+    id: string;
+    source: string;
+    container?: string;
+}
+
+```
+
 ## types\bitecs-legacy.d.ts
 
 ```ts
@@ -8234,6 +8627,172 @@ declare module 'bitecs/legacy' {
     export function addComponent(world: World, component: object, eid: EntityId): void;
     export function removeComponent(world: World, component: object, eid: EntityId): void;
     export function hasComponent(world: World, component: object, eid: EntityId): boolean;
+}
+
+```
+
+## ui\UILayer.ts
+
+```ts
+import type { AppHost } from '../host/AppHost';
+
+/** A mountable UI layer. Layers are the only place UI code lives; they receive
+ *  the AppHost (and through it the engine) on mount and must tear everything
+ *  down in unmount(). State changes go through host.dispatch(), notifications
+ *  through host.eventBus.emit(). */
+export interface UILayer {
+    id: string;
+    mount(container: HTMLElement, host: AppHost): void | Promise<void>;
+    unmount(): void;
+}
+
+```
+
+## ui\layers\EditorUILayer.ts
+
+```ts
+import type { AppHost } from '../../host/AppHost';
+import type { UILayer } from '../UILayer';
+import type { Command } from '../../editor/commands/Command';
+import { EditorCommandBus } from '../../editor/EditorCommandBus';
+import { EditorInputManager } from '../../editor/input/EditorInputManager';
+import { EditorPanel } from '../../editor/EditorPanel';
+import { PipelinePanel } from '../../editor/PipelinePanel';
+
+/**
+ * Editor UI layer: owns the whole editor experience (tab shell, command bus,
+ * input manager / tools, panels). Mounted ONLY by the editor entry (main.ts).
+ * All state changes flow through the command bus; the layer itself never
+ * writes to the engine. App-switch reloads the editor state for the new app.
+ */
+export class EditorUILayer implements UILayer {
+    id = 'editor';
+    private commandBus?: EditorCommandBus;
+    private inputManager?: EditorInputManager;
+    private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
+    private host?: AppHost;
+    private unsubscribePick?: () => void;
+
+    async mount(container: HTMLElement, host: AppHost) {
+        this.host = host;
+
+        // ── 1. Build the editor tab shell (was static markup in index.html) ──
+        container.innerHTML = `
+            <div id="tabs">
+                <button class="tab-btn active" data-tab="scene">Scene</button>
+                <button class="tab-btn" data-tab="pipeline">Pipeline</button>
+            </div>
+            <div id="tab-scene" class="tab-panel" style="display:flex;">
+                <div id="editor"></div>
+            </div>
+            <div id="tab-pipeline" class="tab-panel" style="display:none;">
+                <div id="pipeline-panel"></div>
+            </div>
+        `;
+        const sceneContainer = container.querySelector('#tab-scene') as HTMLElement;
+        const pipelineContainer = container.querySelector('#tab-pipeline') as HTMLElement;
+
+        // ── 2. Command bus (undo/redo + edit-mode gating) ──
+        this.commandBus = new EditorCommandBus(host.engine);
+
+        // ── 3. Input manager (tools/picking) — editor-only concern ──
+        this.inputManager = new EditorInputManager(
+            host.engine.scene,
+            host.eventBus,
+            <N,>(name: string): N | null => host.engine.systemRegistry.resolve({ name }) as unknown as N | null,
+            () => host.engine.aspect(),
+        );
+
+        // ── 4. Panels (attach through the command bus; read-only core imports) ──
+        const editorPanel = new EditorPanel(sceneContainer);
+        const pipelinePanel = new PipelinePanel(pipelineContainer);
+        editorPanel.attach(this.commandBus);
+        pipelinePanel.attach(this.commandBus);
+        editorPanel.render();
+        pipelinePanel.render();
+        this.panels = { editor: editorPanel, pipeline: pipelinePanel };
+
+        // ── 5. Tab switching ──
+        const buttons = container.querySelectorAll<HTMLButtonElement>('.tab-btn');
+        buttons.forEach(btn => {
+            btn.onclick = () => {
+                const tab = btn.dataset.tab;
+                buttons.forEach(b => b.classList.toggle('active', b === btn));
+                sceneContainer.style.display = tab === 'scene' ? 'flex' : 'none';
+                pipelineContainer.style.display = tab === 'pipeline' ? 'flex' : 'none';
+            };
+        });
+
+        // ── 6. App switching (Load-JSON-of-app.json + window.switchApp) ──
+        editorPanel.onAppSwitch = (name: string) => this.switchApp(name);
+
+        // ── 7. Load the current app's tools.json (engine no longer does this) ──
+        const appName = host.engine.currentApp;
+        if (appName) await this.loadToolsFor(appName);
+
+        // ── 8. Wire 3D picking → scene-tree selection (event channel only) ──
+        this.subscribePick();
+    }
+
+    /** Pick tools emit a 'pick' event ({ key, eid, ... }); highlight the entity.
+     *  Re-subscribed on app switch (unloadCurrentApp clears the event bus). */
+    private subscribePick(): void {
+        if (!this.host || !this.panels.editor) return;
+        this.unsubscribePick?.();
+        this.unsubscribePick = this.host.eventBus.on('pick', (payload) => {
+            const key = (payload as { key?: string })?.key;
+            if (key) this.panels.editor?.select(key);
+        });
+    }
+
+    /** Reload the editor for a different app: detach old tools, load the app,
+     *  reload its tools.json + app UI and refresh both panels. Exposed for
+     *  devtools (window.switchApp) and the panel's Load-JSON-of-app.json path. */
+    async switchApp(name: string): Promise<void> {
+        if (!this.host) return;
+        this.inputManager?.dispose();
+        await this.host.loadApp(name);
+        await this.host.loadAppUI(`${this.host.engineConfig.appsRoot}/${name}`);
+        await this.loadToolsFor(name);
+        // unloadCurrentApp clears the event bus → re-subscribe panel listeners.
+        if (this.commandBus) {
+            this.panels.editor?.attach(this.commandBus);
+            this.panels.pipeline?.attach(this.commandBus);
+        }
+        this.panels.editor?.render();
+        this.panels.pipeline?.render();
+        this.subscribePick();
+    }
+
+    /** Fetch the app manifest's tools.json and load it through the input manager. */
+    private async loadToolsFor(appName: string): Promise<void> {
+        if (!this.host || !this.inputManager) return;
+        const base = `${this.host.engineConfig.appsRoot}/${appName}`;
+        try {
+            const manifestResp = await fetch(`${base}/app.json`);
+            if (!manifestResp.ok) return;
+            const manifest = await manifestResp.json() as { tools?: string };
+            if (manifest.tools) {
+                await this.inputManager.loadTools(base, manifest.tools);
+            }
+        } catch (e) {
+            console.warn('[EditorUILayer] failed to load tools:', e);
+        }
+    }
+
+    unmount(): void {
+        this.inputManager?.dispose();
+        this.unsubscribePick?.();
+        this.commandBus = undefined;
+        this.inputManager = undefined;
+        this.panels = {};
+        this.host = undefined;
+    }
+
+    /** AppHost routes host.dispatch() here while the editor layer is mounted. */
+    dispatch(cmd: Command): boolean {
+        return this.commandBus?.dispatch(cmd) ?? false;
+    }
 }
 
 ```

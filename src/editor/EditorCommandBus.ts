@@ -36,6 +36,9 @@ export class EditorCommandBus {
     get editMode(): EditMode { return this.mode; }
     get scene() { return this._engine.scene; }
     get renderGraph() { return this._engine.renderGraph; }
+    /** Whether the undo/redo stacks are non-empty (toolbar button states). */
+    get canUndo(): boolean { return this.undoStack.length > 0; }
+    get canRedo(): boolean { return this.redoStack.length > 0; }
 
     play(): void {
         if (this.mode === 'play') return;
