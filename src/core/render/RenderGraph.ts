@@ -3,6 +3,7 @@ import { resourceManager } from './ResourceManager';
 import { PipelineLoader } from './PipelineLoader';
 import { PipelineDriver, type GeometryHook, type ComputeHook } from './PipelineDriver';
 import { RenderScriptLoader } from './RenderScriptLoader';
+import { ShaderGraphExecutor, shaderGraphRegistry } from './shaderGraph';
 import { schemaRegistry } from '../ecs/SchemaRegistry';
 import { uniformLayouts } from './UniformLayout';
 import { normalBehavior, shadowClearBehavior, postProcessChainBehavior } from './phaseBehaviors';
@@ -18,7 +19,7 @@ import {
 } from './types';
 import type { RenderTargetDecls } from './rendererDecl';
 import type { ValueContext } from './valueResolver';
-import type { CameraView } from '../ecs/Scene';
+import type { CameraView, Scene } from '../ecs/Scene';
 import type { FrameContext, System } from '../ecs/SystemRegistry';
 
 const SCREEN = 'screen';
@@ -154,6 +155,27 @@ export class RenderGraph implements System, IRenderer {
         this.cameraStagingBuffer?.destroy();
         this.cameraStagingBuffer = null;
         this.removeHooksByOwner('app');
+        shaderGraphRegistry.removeByOwner('app');
+    }
+
+    /** Run every registered shader graph (app-scoped) against its matching
+     *  entities, in the compute stage before render passes. Each graph handles
+     *  its own entity query + binding + dispatch. */
+    private runShaderGraphs(
+        encoder: GPUCommandEncoder, scene: Scene, time: number, dt: number, device: GPUDevice,
+    ): void {
+        for (const executor of shaderGraphRegistry.all()) {
+            let entities: readonly number[] = [];
+            if (executor.query && executor.query.length > 0) {
+                entities = scene.entityKeyMap.values().toArray().filter(eid =>
+                    executor.query!.every(c => scene.hasComponent(eid, c)));
+            } else {
+                entities = scene.entityKeyMap.values().toArray();
+            }
+            for (const eid of entities) {
+                executor.run({ scene, eid, device, encoder, time, dt });
+            }
+        }
     }
 
     /** Names of render escape-hatch scripts to load at compile (e.g. "render/pbr.js"). */
@@ -242,6 +264,15 @@ export class RenderGraph implements System, IRenderer {
         // Load every pipeline listed in the manifest, build a driver from its renderer block.
         for (const phase of this.phaseList) {
             for (const entry of this.phases[phase.name] ?? []) {
+                // Shader-graph entries: load + compile a compute node graph, run
+                // each frame in the compute stage for its matching entities.
+                if (entry.kind === 'shaderGraph') {
+                    if (!shaderGraphRegistry.get(entry.pipeline)) {
+                        const executor = await this.loadShaderGraph(device, dataBase, appBase, entry.pipeline);
+                        shaderGraphRegistry.register(executor, 'app');
+                    }
+                    continue;
+                }
                 // compute-only entries (particle emit/sim) are loaded lazily by their driver
                 if (entry.kind === 'compute') {
                     if (!this.computePipelines.has(entry.pipeline)) {
@@ -344,6 +375,31 @@ export class RenderGraph implements System, IRenderer {
             if (!appBase) throw new Error(`Compute pipeline '${path}' not found in ${commonBase}`);
             return PipelineLoader.loadCompute(device, appBase, path);
         }
+    }
+
+    /** Load a shader-graph JSON (common first, app fallback) and compile it. */
+    private async loadShaderGraph(
+        device: GPUDevice, commonBase: string, appBase: string | undefined, path: string,
+    ): Promise<ShaderGraphExecutor> {
+        const fetchGraph = async (base: string): Promise<import('./shaderGraph').ShaderGraph> => {
+            const url = path.startsWith('/') ? path : `${base}/${path}`;
+            const resp = await fetch(url);
+            const ct = resp.headers.get('content-type') ?? '';
+            if (!resp.ok || (!ct.includes('json') && !ct.includes('application'))) {
+                throw new Error(`Shader graph not found: ${url}`);
+            }
+            return await resp.json() as import('./shaderGraph').ShaderGraph;
+        };
+        let graph: import('./shaderGraph').ShaderGraph;
+        try {
+            graph = await fetchGraph(commonBase);
+        } catch {
+            if (!appBase) throw new Error(`Shader graph '${path}' not found in ${commonBase}`);
+            graph = await fetchGraph(appBase);
+        }
+        const executor = new ShaderGraphExecutor(graph, commonBase);
+        await executor.compile(device);
+        return executor;
     }
 
     /** System interface: run the render graph for this frame. */
@@ -460,6 +516,7 @@ export class RenderGraph implements System, IRenderer {
                 attachments: ctx.attachments,
             });
         }
+        this.runShaderGraphs(encoder, ctx.scene, ctx.time, ctx.dt, ctx.device);
 
         // If nothing post-processes, the "scene" target is the swapchain directly.
         this.sceneIsScreen = !this.hasEnabledWithBehavior('postprocess-chain');
@@ -528,6 +585,7 @@ export class RenderGraph implements System, IRenderer {
                 attachments: ctx.attachments,
             });
         }
+        this.runShaderGraphs(enc, ctx.scene, ctx.time, ctx.dt, ctx.device);
         const cleared0 = new Set<string>();
         for (const phase of this.phaseList) {
             const behavior = this.behaviorFor(phase);
