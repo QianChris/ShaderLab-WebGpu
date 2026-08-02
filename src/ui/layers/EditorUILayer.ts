@@ -23,13 +23,15 @@ export class EditorUILayer implements UILayer {
     private commandBus?: EditorCommandBus;
     private inputManager?: EditorInputManager;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
-    /** Vue panel definitions mounted as tabs (mixed with the native DOM tabs). */
+    /** Vue panel definitions mounted as sidebar tabs (mixed with the native
+     *  DOM tabs). The Asset view is NOT here — it lives below the viewport. */
     private readonly vuePanels: VuePanelDef[] = [
-        { id: 'assets', label: 'Assets', component: AssetViewPanel },
         { id: 'scripts', label: 'Scripts', component: ScriptEditorPanel },
         { id: 'shaders', label: 'Shaders', component: WgslEditorPanel },
         { id: 'nodes', label: 'Nodes', component: PipelineNodeEditor },
     ];
+    /** Asset view mounts below the viewport (not a sidebar tab). */
+    private readonly assetPanel: VuePanelDef = { id: 'assets', label: 'Assets', component: AssetViewPanel };
     private vueUnmounts: (() => void)[] = [];
     private host?: AppHost;
     private unsubscribePick?: () => void;
@@ -37,7 +39,9 @@ export class EditorUILayer implements UILayer {
     private undoBtn?: HTMLButtonElement;
     private redoBtn?: HTMLButtonElement;
     private resizer?: HTMLElement;
+    private assetResizer?: HTMLElement;
     private sidebar?: HTMLElement;
+    private assetBottom?: HTMLElement;
 
     async mount(container: HTMLElement, host: AppHost) {
         this.host = host;
@@ -45,6 +49,7 @@ export class EditorUILayer implements UILayer {
         const sidebar = this.findOrCreate(container, 'sidebar');
         this.sidebar = sidebar;
         this.attachSidebarResizer(sidebar);
+        this.attachAssetResizer();
 
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
         this.commandBus = new EditorCommandBus(host.engine);
@@ -83,8 +88,9 @@ export class EditorUILayer implements UILayer {
         const sceneContainer = sidebar.querySelector('#tab-scene') as HTMLElement;
         const pipelineContainer = sidebar.querySelector('#tab-pipeline') as HTMLElement;
 
-        // ── 3b. Mount the Vue panels into their tab containers ──
+        // ── 3b. Mount the Vue sidebar tabs + the asset view below the viewport ──
         this.mountVuePanels(sidebar);
+        this.mountAssetPanel();
 
         // ── 4. Input manager (tools/picking) — editor-only concern ──
         this.inputManager = new EditorInputManager(
@@ -133,9 +139,12 @@ export class EditorUILayer implements UILayer {
     }
 
     /** Wire the sidebar drag handle (in #main) so the right panel width can be
-     *  dragged between its min/max CSS bounds. Pointer events + setPointerCapture
-     *  keep the drag running outside the handle; body cursor/user-select are
-     *  toggled so text selection doesn't fight the resize. */
+     *  dragged between its min/max CSS bounds. The handle is the sidebar's LEFT
+     *  edge, so dragging LEFT widens the sidebar (next = startWidth - dx).
+     *  Pointer events + setPointerCapture keep the drag running outside the
+     *  handle; body cursor/user-select are toggled so text selection doesn't
+     *  fight the resize. After each move the engine resize() is called so the
+     *  canvas backing store + viewport aspect track the new layout. */
     private attachSidebarResizer(sidebar: HTMLElement): void {
         const main = sidebar.parentElement;
         if (!main) return;
@@ -152,8 +161,9 @@ export class EditorUILayer implements UILayer {
             const startWidth = sidebar.getBoundingClientRect().width;
 
             const onMove = (ev: PointerEvent) => {
-                const next = startWidth + (ev.clientX - startX);
+                const next = startWidth - (ev.clientX - startX);
                 sidebar.style.width = `${Math.max(240, Math.min(640, next))}px`;
+                this.host?.resize();
             };
             const onUp = (ev: PointerEvent) => {
                 resizer.releasePointerCapture(ev.pointerId);
@@ -161,6 +171,7 @@ export class EditorUILayer implements UILayer {
                 document.body.classList.remove('sidebar-resizing');
                 resizer.removeEventListener('pointermove', onMove);
                 resizer.removeEventListener('pointerup', onUp);
+                this.host?.resize();
             };
             resizer.addEventListener('pointermove', onMove);
             resizer.addEventListener('pointerup', onUp);
@@ -168,7 +179,45 @@ export class EditorUILayer implements UILayer {
         resizer.addEventListener('pointerdown', onPointerDown);
     }
 
-    /** Mount every Vue panel into its tab container, providing the AppHost. */
+    /** Wire the horizontal handle above the asset strip so the asset view height
+     *  is draggable. The handle is the strip's TOP edge: dragging UP grows the
+     *  strip (next = startHeight - dy). Resizes the canvas after each move. */
+    private attachAssetResizer(): void {
+        const bottom = document.getElementById('asset-bottom');
+        if (!bottom) return;
+        const resizer = document.getElementById('asset-resizer');
+        if (!resizer) return;
+        this.assetBottom = bottom;
+        this.assetResizer = resizer;
+
+        const onPointerDown = (e: PointerEvent) => {
+            e.preventDefault();
+            resizer.setPointerCapture(e.pointerId);
+            resizer.classList.add('dragging');
+            document.body.classList.add('asset-resizing');
+            const startY = e.clientY;
+            const startHeight = bottom.getBoundingClientRect().height;
+
+            const onMove = (ev: PointerEvent) => {
+                const next = startHeight - (ev.clientY - startY);
+                bottom.style.height = `${Math.max(80, Math.min(480, next))}px`;
+                this.host?.resize();
+            };
+            const onUp = (ev: PointerEvent) => {
+                resizer.releasePointerCapture(ev.pointerId);
+                resizer.classList.remove('dragging');
+                document.body.classList.remove('asset-resizing');
+                resizer.removeEventListener('pointermove', onMove);
+                resizer.removeEventListener('pointerup', onUp);
+                this.host?.resize();
+            };
+            resizer.addEventListener('pointermove', onMove);
+            resizer.addEventListener('pointerup', onUp);
+        };
+        resizer.addEventListener('pointerdown', onPointerDown);
+    }
+
+    /** Mount every Vue sidebar-tab panel into its tab container. */
     private mountVuePanels(sidebar: HTMLElement): void {
         if (!this.host) return;
         for (const def of this.vuePanels) {
@@ -178,12 +227,21 @@ export class EditorUILayer implements UILayer {
         }
     }
 
+    /** Mount the Asset view into the strip below the viewport. */
+    private mountAssetPanel(): void {
+        if (!this.host) return;
+        const el = document.getElementById('tab-assets');
+        if (!el) return;
+        this.vueUnmounts.push(mountVuePanel(el, this.assetPanel.component, this.host));
+    }
+
     /** Re-mount Vue panels after an app switch. The engine clears the event bus
      *  on unload, so each panel's subscriptions must be recreated. */
     private remountVuePanels(sidebar: HTMLElement): void {
         for (const un of this.vueUnmounts) un();
         this.vueUnmounts = [];
         this.mountVuePanels(sidebar);
+        this.mountAssetPanel();
     }
 
     /** Refresh undo/redo button enabled state (stack emptiness). */
@@ -274,7 +332,9 @@ export class EditorUILayer implements UILayer {
         this.undoBtn = undefined;
         this.redoBtn = undefined;
         this.resizer = undefined;
+        this.assetResizer = undefined;
         this.sidebar = undefined;
+        this.assetBottom = undefined;
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */
