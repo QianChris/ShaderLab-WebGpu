@@ -64,7 +64,10 @@
         #ui-container {
             position: fixed; inset: 0; pointer-events: none; z-index: 5;
         }
-        #ui-container > * { pointer-events: auto; }
+        /* Children are interactive, but ONLY within their own content box —
+           a full-width block child (e.g. the HUD container) must NOT stretch
+           across the whole screen and swallow clicks meant for the sidebar. */
+        #ui-container > * { pointer-events: auto; width: max-content; max-width: 100%; }
 
         /* Sidebar + tabs */
         #sidebar {
