@@ -55,6 +55,9 @@ export class PipelineLoader {
     private static pipelineSlots = new Map<string, SlotName[]>();
     private static configs = new Map<string, { config: PipelineConfig; format: GPUTextureFormat }>();
     private static shaderModules = new Map<string, GPUShaderModule>();
+    /** Original WGSL source per shader-module cache key (for the editor's WGSL
+     *  panel: shows + hot-reloads the exact text that produced each module). */
+    private static shaderSources = new Map<string, string>();
     private static computeMeta = new Map<string, ComputeMeta>();
     /** In-memory pipeline configs declared by plugins ('<plugin>:<name>' keys). */
     private static virtualConfigs = new Map<string, PipelineConfig | ComputePipelineConfig>();
@@ -150,6 +153,9 @@ export class PipelineLoader {
         for (const key of [...this.shaderModules.keys()]) {
             if (key.startsWith(`virtual:${prefix}`)) this.shaderModules.delete(key);
         }
+        for (const key of [...this.shaderSources.keys()]) {
+            if (key.startsWith(`virtual:${prefix}`)) this.shaderSources.delete(key);
+        }
     }
 
     /** All declared blend preset names (keys of blend-presets.json). */
@@ -176,6 +182,26 @@ export class PipelineLoader {
     /** Retained parsed config for a loaded render pipeline (for live editing). */
     static getConfig(configPath: string): PipelineConfig | undefined {
         return this.configs.get(configPath)?.config;
+    }
+
+    /** Names of all loaded render pipelines (editor asset view). */
+    static listPipelineNames(): string[] {
+        return [...this.configs.keys()];
+    }
+
+    /** Names of all loaded compute pipelines (editor asset view). */
+    static listComputePipelineNames(): string[] {
+        return [...this.computeMeta.keys()];
+    }
+
+    /** All shader module cache keys currently loaded (editor asset view). */
+    static listShaderKeys(): string[] {
+        return [...this.shaderModules.keys()];
+    }
+
+    /** WGSL source for a shader module cache key (editor WGSL panel). */
+    static getShaderKeySource(key: string): string | undefined {
+        return this.shaderSources.get(key);
     }
 
     /** '<plugin>:rest' → parts, or null for URL/relative paths. */
@@ -235,6 +261,7 @@ export class PipelineLoader {
         if (this.shaderModules.has(key)) return;
         const src = await this.shaderSource(base, shaderRef);
         this.shaderModules.set(key, device.createShaderModule({ label: shaderRef, code: src }));
+        this.shaderSources.set(key, src);
     }
 
     /** Fetch/lookup a render-pipeline config (virtual registry first). */

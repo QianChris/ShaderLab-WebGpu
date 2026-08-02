@@ -661,6 +661,22 @@ export class RenderGraph implements System, IRenderer {
         return { name: this.name, clearColor: [...this.clearColor], phases, multiView: this.multiView };
     }
 
+    /** Get all pipeline entries (read-only) for the editor's asset/pipeline view. */
+    getPipelineEntries(): Array<{ name: string; pipeline: string; phase: string; enabled: boolean; kind?: string }> {
+        const out: Array<{ name: string; pipeline: string; phase: string; enabled: boolean; kind?: string }> = [];
+        for (const phase of this.phaseList) {
+            for (const entry of this.phases[phase.name] ?? []) {
+                out.push({ name: entry.name, pipeline: entry.pipeline, phase: phase.name, enabled: entry.enabled, kind: entry.kind });
+            }
+        }
+        return out;
+    }
+
+    /** Access the raw phase map (read-only query for editors). */
+    get phasesData(): PhaseMap {
+        return this.phases;
+    }
+
     /** Look up a loaded compute pipeline by name (for script systems that
      *  want to dispatch their own compute via ctx.dispatchCompute). */
     getComputePipeline(name: string): GPUComputePipeline | undefined {

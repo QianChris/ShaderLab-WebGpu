@@ -148,6 +148,29 @@ export class ResourceManager {
         };
     }
 
+    /* ── Read-only enumeration (editor asset view) ─────────────── */
+
+    /** Names of all registered meshes (simple + PBR). */
+    getMeshNames(): string[] { return [...new Set([...this.meshData.keys(), ...this.pbrMeshData.keys()])]; }
+    /** Texture keys currently cached on the GPU. */
+    getTextureNames(): string[] { return [...this.textures.keys()]; }
+    /** Named offscreen color target names (render-targets.json + runtime). */
+    getColorTargetNames(): string[] { return [...this.colorTargets.keys()]; }
+    /** Named depth target names (render-targets.json + runtime). */
+    getDepthTargetNames(): string[] { return [...this.depthTargets.keys()]; }
+    /** Uniform buffer cache keys. */
+    getUniformNames(): string[] { return [...this.uniformBuffers.keys()]; }
+    /** Storage buffer cache keys. */
+    getStorageNames(): string[] { return [...this.storageBuffers.keys()]; }
+    /** Named bind-layout declaration names. */
+    getBindLayoutNames(): string[] { return [...this.bindLayouts.keys()]; }
+    /** Named sampler declaration names. */
+    getSamplerNames(): string[] { return [...this.samplers.keys()]; }
+    /** Named VBO preset names. */
+    getNamedVboNames(): string[] { return [...this.namedVbos.keys()]; }
+    /** Named render-target declaration names (render-targets.json). */
+    getRenderTargetNames(): string[] { return Object.keys(this.renderTargetDecls); }
+
     /** Claim a name in a named-decl registry for the current owner.
      *  Cross-owner duplicates throw (fail-loud); same-owner reloads pass. */
     private claimName(owners: Map<string, string>, name: string, kind: string): void {
