@@ -18,14 +18,12 @@ import type { UILayer } from '../ui/UILayer';
  */
 export class AppHost {
     public engine: Engine;
-    public eventBus: EventBus;
     private uiLayers: UILayer[] = [];
     private uiContainer: HTMLElement;
     private editorLayer?: { dispatch(cmd: Command): boolean };
 
     constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
         this.engine = new Engine(canvas);
-        this.eventBus = this.engine.eventBus;
         this.uiContainer = uiContainer;
     }
 
@@ -38,6 +36,9 @@ export class AppHost {
     // Read-only proxies (UI layer queries).
     get scene() { return this.engine.scene; }
     get renderGraph() { return this.engine.renderGraph; }
+    /** Live delegate: Engine.eventBus is created in init(), so it must be read
+     *  after init() — a field copied in the constructor would be undefined. */
+    get eventBus(): EventBus { return this.engine.eventBus; }
 
     mountLayer(layer: UILayer, container?: HTMLElement): void {
         layer.mount(container ?? this.uiContainer, this);
