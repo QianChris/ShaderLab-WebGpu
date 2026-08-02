@@ -32,16 +32,20 @@ export class EditorUILayer implements UILayer {
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
         this.commandBus = new EditorCommandBus(host.engine);
 
-        // ── 2. Top toolbar: undo / redo ──
+        // ── 2. Top toolbar: undo / redo / open player ──
         toolbar.innerHTML = `
             <button class="tb-btn" id="btn-undo" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
             <button class="tb-btn" id="btn-redo" title="Redo (Ctrl+Y)" disabled>↷ Redo</button>
+            <button class="tb-btn tb-btn-player" id="btn-player" title="Open this app in player mode">▶ Player</button>
             <span class="tb-title">ShaderLab Editor</span>
         `;
         this.undoBtn = toolbar.querySelector('#btn-undo') as HTMLButtonElement;
         this.redoBtn = toolbar.querySelector('#btn-redo') as HTMLButtonElement;
         this.undoBtn.onclick = () => this.commandBus?.undo();
         this.redoBtn.onclick = () => this.commandBus?.redo();
+
+        const playerBtn = toolbar.querySelector('#btn-player') as HTMLButtonElement;
+        playerBtn.onclick = () => this.openPlayer();
 
         // ── 3. Sidebar tab shell (was static markup in index.html) ──
         sidebar.innerHTML = `
@@ -107,6 +111,13 @@ export class EditorUILayer implements UILayer {
         if (!this.undoBtn || !this.redoBtn || !this.commandBus) return;
         this.undoBtn.disabled = !this.commandBus.canUndo;
         this.redoBtn.disabled = !this.commandBus.canRedo;
+    }
+
+    /** Open the current app in player mode (no editor UI) in a new tab. */
+    private openPlayer(): void {
+        const appName = this.host?.engine.currentApp;
+        if (!appName) return;
+        window.open(`player.html?app=${appName}`, '_blank');
     }
 
     /** Find a child element by id or create it (robust to container variants). */
