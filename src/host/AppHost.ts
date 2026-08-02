@@ -39,8 +39,8 @@ export class AppHost {
     get scene() { return this.engine.scene; }
     get renderGraph() { return this.engine.renderGraph; }
 
-    mountLayer(layer: UILayer): void {
-        layer.mount(this.uiContainer, this);
+    mountLayer(layer: UILayer, container?: HTMLElement): void {
+        layer.mount(container ?? this.uiContainer, this);
         this.uiLayers.push(layer);
         if (layer.id === 'editor') {
             this.editorLayer = layer as unknown as { dispatch(cmd: Command): boolean };

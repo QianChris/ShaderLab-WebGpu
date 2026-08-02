@@ -1,11 +1,14 @@
 import { AppHost } from './host/AppHost';
-import { EditorUILayer } from './ui/layers/EditorUILayer';
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const errorEl = document.getElementById('error')!;
 const uiContainer = document.getElementById('ui-container')!;
-const sidebar = document.getElementById('sidebar')!;
 
+/**
+ * Runtime entry (player.html): engine + app UI only. No editor UI, no input
+ * manager / tools, no undo — the AppHost dispatches commands directly to the
+ * engine (unstacked) and no editor layer intercepts them.
+ */
 async function main(): Promise<void> {
     if (!navigator.gpu) {
         errorEl.style.display = 'block';
@@ -20,23 +23,16 @@ async function main(): Promise<void> {
         const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
         await host.loadApp(appName);
 
-        // Editor layer: tab shell, command bus, input manager (tools) and panels.
-        const editorLayer = new EditorUILayer();
-        host.mountLayer(editorLayer, sidebar);
-
-        // Load the App's custom UI (ui-config.json).
+        // ❌ No editor layer / input manager in player mode.
+        // ✅ Load the App's custom UI only.
         await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
 
         window.addEventListener('resize', () => host.resize());
         host.startLoop();
 
-        // Devtools back-compat: switchApp reloads app + refreshes the editor.
-        (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = (name: string) => editorLayer.switchApp(name);
-        (window as unknown as { engine: unknown }).engine = host.engine;
         (window as unknown as { host: unknown }).host = host;
 
-        console.log('[ShaderLab] editor mode initialized');
-        console.log('[ShaderLab] scene:', JSON.stringify(host.engine.exportScene(), null, 2));
+        console.log('[ShaderLab] player mode initialized');
     } catch (err) {
         console.error(err);
         errorEl.style.display = 'block';

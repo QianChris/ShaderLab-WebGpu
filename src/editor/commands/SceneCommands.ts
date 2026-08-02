@@ -1,4 +1,5 @@
 import { schemaRegistry } from '../../core/ecs/SchemaRegistry';
+import type { SceneData } from '../../core/ecs/Scene';
 import type { Command, CommandContext } from './Command';
 
 export class SetFieldCommand implements Command {
@@ -80,5 +81,76 @@ export class RemoveEntityCommand implements Command {
             }
         }
         return result;
+    }
+}
+
+/** Replace the whole scene (clear + load entity data), e.g. editor "Load JSON"
+ *  of a plain scene-entities file. Snapshot is the previous scene data. */
+export class LoadSceneDataCommand implements Command {
+    readonly type = 'loadSceneData';
+    readonly description = 'loadSceneData';
+    private prevData: string;
+    constructor(private data: SceneData, prevData?: string) {
+        this.prevData = prevData ?? JSON.stringify(data);
+    }
+
+    execute(ctx: CommandContext): boolean {
+        this.replaceScene(ctx, this.data);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        this.replaceScene(ctx, JSON.parse(this.prevData) as SceneData);
+        return true;
+    }
+
+    private replaceScene(ctx: CommandContext, data: SceneData): void {
+        const scene = ctx.engine.scene;
+        for (const k of [...scene.entityKeyMap.keys()]) scene.removeEntity(k);
+        ctx.engine.loadSceneData(data);
+    }
+}
+
+/** Add/remove a component on an entity (undo restores prior field values when
+ *  the component was removed). Used by the editor's component checkboxes. */
+export class ToggleComponentCommand implements Command {
+    readonly type = 'toggleComponent';
+    get description(): string { return `toggleComponent ${this.compName}`; }
+    private backup: Record<string, Record<string, unknown>> | null = null;
+    private added = false;
+    constructor(
+        private entityKey: string,
+        private compName: string,
+        private enabled: boolean,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        const wasEnabled = ctx.engine.scene.hasComponent(eid, this.compName);
+        if (wasEnabled === this.enabled) return false;
+        if (!this.enabled) {
+            const comp = schemaRegistry.get(this.compName);
+            if (comp) {
+                this.backup = { [this.compName]: schemaRegistry.readAllFields(this.compName, comp, eid) };
+            }
+        }
+        ctx.engine.scene.toggleComponent(eid, this.compName, this.enabled);
+        this.added = this.enabled;
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.entityKey);
+        if (eid == null) return false;
+        if (this.added) {
+            ctx.engine.scene.toggleComponent(eid, this.compName, false);
+        } else if (this.backup) {
+            ctx.engine.scene.toggleComponent(eid, this.compName, true);
+            for (const [field, value] of Object.entries(this.backup[this.compName] ?? {})) {
+                ctx.engine.scene.setField(eid, this.compName, field, value);
+            }
+        }
+        return true;
     }
 }

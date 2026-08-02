@@ -1,12 +1,29 @@
 import type { Engine } from '../core/Engine';
-import type { RenderGraphData } from '../core/render/types';
 import type { Command, CommandContext } from './commands/Command';
-import { SetFieldCommand, CreateEntityCommand, RemoveEntityCommand } from './commands/SceneCommands';
-import { MutateRenderGraphCommand } from './commands/RenderGraphCommands';
+import {
+    SetFieldCommand,
+    CreateEntityCommand,
+    RemoveEntityCommand,
+    LoadSceneDataCommand,
+    ToggleComponentCommand,
+} from './commands/SceneCommands';
+import {
+    MutateRenderGraphCommand,
+    PatchRenderGraphCommand,
+    MutatePipelineConfigCommand,
+} from './commands/RenderGraphCommands';
+import type { SceneData } from '../core/ecs/Scene';
+import type { RenderGraphData } from '../core/render/types';
 
 export type EditMode = 'edit' | 'play' | 'pause';
 
-export class EditorHost {
+/**
+ * Editor command channel: the ONLY path by which editor UI state changes reach
+ * the engine. Dispatches execute commands with undo/redo + edit-mode gating,
+ * then broadcast `editor:changed` for panels to refresh. UI never touches the
+ * engine registries/scene/render-graph write methods directly.
+ */
+export class EditorCommandBus {
     private mode: EditMode = 'edit';
     private undoStack: Command[] = [];
     private redoStack: Command[] = [];
@@ -41,7 +58,7 @@ export class EditorHost {
         this.mode = 'edit';
         if (this.editSnapshot) {
             const s = this.editSnapshot as { scene: unknown; renderGraph: unknown };
-            this._engine.loadSceneData(s.scene as Record<string, Record<string, Record<string, unknown>>>);
+            this._engine.loadSceneData(s.scene as SceneData);
             this._engine.renderGraph.fromData(s.renderGraph as RenderGraphData);
         }
         this._engine.eventBus.emit('editor:stop');
@@ -49,7 +66,7 @@ export class EditorHost {
 
     dispatch(cmd: Command): boolean {
         if (this.mode !== 'edit') {
-            console.warn(`[EditorHost] Blocked ${cmd.type} while in ${this.mode} mode`);
+            console.warn(`[EditorCommandBus] Blocked ${cmd.type} while in ${this.mode} mode`);
             return false;
         }
         const ctx: CommandContext = { engine: this._engine };
@@ -90,7 +107,23 @@ export class EditorHost {
         return this.dispatch(new RemoveEntityCommand(key));
     }
 
+    loadSceneData(data: SceneData, prevData?: string): boolean {
+        return this.dispatch(new LoadSceneDataCommand(data, prevData));
+    }
+
+    toggleComponent(entityKey: string, compName: string, enabled: boolean): boolean {
+        return this.dispatch(new ToggleComponentCommand(entityKey, compName, enabled));
+    }
+
     mutateRenderGraph(data: object): boolean {
         return this.dispatch(new MutateRenderGraphCommand(data));
+    }
+
+    patchRenderGraph(data: RenderGraphData, prevData?: string): boolean {
+        return this.dispatch(new PatchRenderGraphCommand(data, prevData));
+    }
+
+    mutatePipelineConfig(pipeline: string, nextJson: string, prevJson?: string): boolean {
+        return this.dispatch(new MutatePipelineConfigCommand(pipeline, nextJson, prevJson));
     }
 }
