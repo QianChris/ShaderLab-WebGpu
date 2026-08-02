@@ -291,15 +291,7 @@ export class ShaderGraphExecutor {
 
     /** Execute a chain of node ids (a control body) in order. */
     private execChain(ids: string[], frame: ShaderGraphFrame, vctx: ValueContext): void {
-        for (const id of ids) {
-            if (this.bodyOf.has(id) || this.nextOf.has(id)) {
-                // A control node's body chain: handle recursion by dispatching
-                // the sub-chain, then follow its `next` continuation.
-                this.execNode(id, frame, vctx);
-                continue;
-            }
-            this.execNode(id, frame, vctx);
-        }
+        for (const id of ids) this.execNode(id, frame, vctx);
     }
 
     private resolveData(node: ShaderGraphDataNode, frame: ShaderGraphFrame): void {

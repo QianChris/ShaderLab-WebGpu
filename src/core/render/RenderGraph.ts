@@ -165,12 +165,13 @@ export class RenderGraph implements System, IRenderer {
         encoder: GPUCommandEncoder, scene: Scene, time: number, dt: number, device: GPUDevice,
     ): void {
         for (const executor of shaderGraphRegistry.all()) {
+            const allEids = [...scene.entityKeyMap.values()];
             let entities: readonly number[] = [];
             if (executor.query && executor.query.length > 0) {
-                entities = scene.entityKeyMap.values().toArray().filter(eid =>
+                entities = allEids.filter(eid =>
                     executor.query!.every(c => scene.hasComponent(eid, c)));
             } else {
-                entities = scene.entityKeyMap.values().toArray();
+                entities = allEids;
             }
             for (const eid of entities) {
                 executor.run({ scene, eid, device, encoder, time, dt });
