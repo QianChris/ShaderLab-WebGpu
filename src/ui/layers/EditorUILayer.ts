@@ -5,6 +5,11 @@ import { EditorCommandBus } from '../../editor/EditorCommandBus';
 import { EditorInputManager } from '../../editor/input/EditorInputManager';
 import { EditorPanel } from '../../editor/EditorPanel';
 import { PipelinePanel } from '../../editor/PipelinePanel';
+import { mountVuePanel, type VuePanelDef } from '../vue';
+import AssetViewPanel from '../vue/panels/AssetViewPanel.vue';
+import ScriptEditorPanel from '../vue/panels/ScriptEditorPanel.vue';
+import WgslEditorPanel from '../vue/panels/WgslEditorPanel.vue';
+import PipelineNodeEditor from '../vue/panels/PipelineNodeEditor.vue';
 
 /**
  * Editor UI layer: owns the whole editor experience (top toolbar, tab shell,
@@ -18,17 +23,27 @@ export class EditorUILayer implements UILayer {
     private commandBus?: EditorCommandBus;
     private inputManager?: EditorInputManager;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
+    /** Vue panel definitions mounted as tabs (mixed with the native DOM tabs). */
+    private readonly vuePanels: VuePanelDef[] = [
+        { id: 'assets', label: 'Assets', component: AssetViewPanel },
+        { id: 'scripts', label: 'Scripts', component: ScriptEditorPanel },
+        { id: 'shaders', label: 'Shaders', component: WgslEditorPanel },
+        { id: 'nodes', label: 'Nodes', component: PipelineNodeEditor },
+    ];
+    private vueUnmounts: (() => void)[] = [];
     private host?: AppHost;
     private unsubscribePick?: () => void;
     private unsubscribeChanged?: () => void;
     private undoBtn?: HTMLButtonElement;
     private redoBtn?: HTMLButtonElement;
     private resizer?: HTMLElement;
+    private sidebar?: HTMLElement;
 
     async mount(container: HTMLElement, host: AppHost) {
         this.host = host;
         const toolbar = this.findOrCreate(container, 'toolbar');
         const sidebar = this.findOrCreate(container, 'sidebar');
+        this.sidebar = sidebar;
         this.attachSidebarResizer(sidebar);
 
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
@@ -50,20 +65,26 @@ export class EditorUILayer implements UILayer {
         playerBtn.onclick = () => this.openPlayer();
 
         // ── 3. Sidebar tab shell (was static markup in index.html) ──
+        const tabButtons = [
+            '<button class="tab-btn active" data-tab="scene">Scene</button>',
+            '<button class="tab-btn" data-tab="pipeline">Pipeline</button>',
+            ...this.vuePanels.map(p => `<button class="tab-btn" data-tab="${p.id}">${p.label}</button>`),
+        ];
         sidebar.innerHTML = `
-            <div id="tabs">
-                <button class="tab-btn active" data-tab="scene">Scene</button>
-                <button class="tab-btn" data-tab="pipeline">Pipeline</button>
-            </div>
+            <div id="tabs">${tabButtons.join('')}</div>
             <div id="tab-scene" class="tab-panel" style="display:flex;">
                 <div id="editor"></div>
             </div>
             <div id="tab-pipeline" class="tab-panel" style="display:none;">
                 <div id="pipeline-panel"></div>
             </div>
+            ${this.vuePanels.map(p => `<div id="tab-${p.id}" class="tab-panel" style="display:none;"></div>`).join('')}
         `;
         const sceneContainer = sidebar.querySelector('#tab-scene') as HTMLElement;
         const pipelineContainer = sidebar.querySelector('#tab-pipeline') as HTMLElement;
+
+        // ── 3b. Mount the Vue panels into their tab containers ──
+        this.mountVuePanels(sidebar);
 
         // ── 4. Input manager (tools/picking) — editor-only concern ──
         this.inputManager = new EditorInputManager(
@@ -83,13 +104,16 @@ export class EditorUILayer implements UILayer {
         this.panels = { editor: editorPanel, pipeline: pipelinePanel };
 
         // ── 6. Tab switching ──
+        const tabIds = ['scene', 'pipeline', ...this.vuePanels.map(p => p.id)];
         const buttons = sidebar.querySelectorAll<HTMLButtonElement>('.tab-btn');
         buttons.forEach(btn => {
             btn.onclick = () => {
                 const tab = btn.dataset.tab;
                 buttons.forEach(b => b.classList.toggle('active', b === btn));
-                sceneContainer.style.display = tab === 'scene' ? 'flex' : 'none';
-                pipelineContainer.style.display = tab === 'pipeline' ? 'flex' : 'none';
+                for (const id of tabIds) {
+                    const panel = sidebar.querySelector<HTMLElement>(`#tab-${id}`);
+                    if (panel) panel.style.display = tab === id ? 'flex' : 'none';
+                }
             };
         });
 
@@ -144,6 +168,24 @@ export class EditorUILayer implements UILayer {
         resizer.addEventListener('pointerdown', onPointerDown);
     }
 
+    /** Mount every Vue panel into its tab container, providing the AppHost. */
+    private mountVuePanels(sidebar: HTMLElement): void {
+        if (!this.host) return;
+        for (const def of this.vuePanels) {
+            const el = sidebar.querySelector<HTMLElement>(`#tab-${def.id}`);
+            if (!el) continue;
+            this.vueUnmounts.push(mountVuePanel(el, def.component, this.host));
+        }
+    }
+
+    /** Re-mount Vue panels after an app switch. The engine clears the event bus
+     *  on unload, so each panel's subscriptions must be recreated. */
+    private remountVuePanels(sidebar: HTMLElement): void {
+        for (const un of this.vueUnmounts) un();
+        this.vueUnmounts = [];
+        this.mountVuePanels(sidebar);
+    }
+
     /** Refresh undo/redo button enabled state (stack emptiness). */
     private refreshToolbar(): void {
         if (!this.undoBtn || !this.redoBtn || !this.commandBus) return;
@@ -194,6 +236,7 @@ export class EditorUILayer implements UILayer {
             this.panels.editor?.attach(this.commandBus);
             this.panels.pipeline?.attach(this.commandBus);
         }
+        this.remountVuePanels(this.sidebar!);
         this.unsubscribeChanged?.();
         this.unsubscribeChanged = this.host.eventBus.on('editor:changed', () => this.refreshToolbar());
         this.panels.editor?.render();
@@ -222,6 +265,8 @@ export class EditorUILayer implements UILayer {
         this.inputManager?.dispose();
         this.unsubscribePick?.();
         this.unsubscribeChanged?.();
+        for (const un of this.vueUnmounts) un();
+        this.vueUnmounts = [];
         this.commandBus = undefined;
         this.inputManager = undefined;
         this.panels = {};
@@ -229,6 +274,7 @@ export class EditorUILayer implements UILayer {
         this.undoBtn = undefined;
         this.redoBtn = undefined;
         this.resizer = undefined;
+        this.sidebar = undefined;
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */
