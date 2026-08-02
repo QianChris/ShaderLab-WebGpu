@@ -114,6 +114,23 @@ export class RenderGraph implements System, IRenderer {
         }
     }
 
+    /** Hot-reload a render escape-hatch script by file name with in-memory source.
+     *  Re-registers each exported function under `<baseName>.<name>` in all three
+     *  hook registries (value / geometry / compute) so existing pipelines pick
+     *  the new implementation on the next frame. */
+    async reloadRenderScript(file: string, source: string): Promise<void> {
+        const loader = new RenderScriptLoader(this.dataBase, this.scriptsSubdir);
+        const exports = await loader.loadFromText(file, source);
+        const baseName = file.replace(/^[^/]+\//, '').replace(/\.js$/, '');
+        for (const [name, fn] of Object.entries(exports)) {
+            if (typeof fn !== 'function') continue;
+            const key = `${baseName}.${name}`;
+            this.registerValueScript(key, fn as never, 'app');
+            this.registerGeometryHook(key, fn as never, 'app');
+            this.registerComputeHook(key, fn as never, 'app');
+        }
+    }
+
     setRenderTargets(targets: RenderTargetDecls): void {
         this.targets = { ...this.targets, ...targets };
     }
@@ -142,6 +159,11 @@ export class RenderGraph implements System, IRenderer {
     /** Names of render escape-hatch scripts to load at compile (e.g. "render/pbr.js"). */
     setScriptFiles(files: string[]): void {
         this.scriptFiles = files;
+    }
+
+    /** Render escape-hatch script files declared for the current app (read-only). */
+    getScriptFiles(): string[] {
+        return [...this.scriptFiles];
     }
 
     /** Set the scripts subdirectory (from engine-config.json). */

@@ -181,6 +181,48 @@ class SystemRegistry {
         return this.defs.get(name) ?? this.injectedDefs.get(name)?.def;
     }
 
+    /** Hot-reload a script-loaded system by its entry name with new source code.
+     *  The previous adapter is disposed (so its event handlers / GPU buffers
+     *  release) and replaced with a fresh adapter wrapping the new module.
+     *  `init()` is re-invoked lazily on the next update(). Throws for builtins. */
+    async reloadScriptByEntry(entryName: string, sourceCode: string): Promise<void> {
+        const def = this.getDef(entryName);
+        if (!def?.source || def.source.startsWith('builtin:')) {
+            throw new Error(`System '${entryName}' is not a script-loaded system`);
+        }
+        const old = this.scripts.get(def.source);
+        old?.dispose?.();
+        this.scripts.set(def.source, await this.loadScriptSystemFromText(def.source, sourceCode));
+    }
+
+    /** Get the script source path for a system entry (for display / fetch). */
+    getScriptSource(entryName: string): string | undefined {
+        const def = this.getDef(entryName);
+        return def?.source && !def.source.startsWith('builtin:') ? def.source : undefined;
+    }
+
+    /** List all script-loaded system entries (the ones editable in the editor). */
+    getScriptSystemEntries(): string[] {
+        return [...this.defs.values(), ...[...this.injectedDefs.values()].map(e => e.def)]
+            .filter(d => d.source && !d.source.startsWith('builtin:'))
+            .map(d => d.name);
+    }
+
+    /** Build a ScriptSystemAdapter from in-memory source (editor hot-reload). */
+    private async loadScriptSystemFromText(source: string, text: string): Promise<ScriptSystemAdapter> {
+        const blob = new Blob([text], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+            const mod = await import(/* @vite-ignore */ blobUrl);
+            const systemMod = (mod.default ?? mod) as SystemScriptModule;
+            return new ScriptSystemAdapter(systemMod);
+        } catch (err) {
+            throw new Error(`System script '${source}' failed to import: ${err}`);
+        } finally {
+            URL.revokeObjectURL(blobUrl);
+        }
+    }
+
     /** Inject a system def programmatically (plugins). Cross-owner duplicates throw. */
     addDef(def: SystemDef, owner: string): void {
         const existing = this.injectedDefs.get(def.name);

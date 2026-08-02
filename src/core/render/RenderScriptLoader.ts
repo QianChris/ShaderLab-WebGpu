@@ -47,6 +47,21 @@ export class RenderScriptLoader {
         }
     }
 
+    /** Load a render script from in-memory text instead of fetching.
+     *  Used by the editor for hot-reload (same blob import path as load()). */
+    async loadFromText(file: string, text: string): Promise<Record<string, AnyFn>> {
+        const blob = new Blob([text], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        try {
+            const mod = await import(/* @vite-ignore */ blobUrl);
+            const exports = (mod.default ?? mod) as Record<string, AnyFn>;
+            this.loaded.set(file, exports);
+            return exports;
+        } finally {
+            URL.revokeObjectURL(blobUrl);
+        }
+    }
+
     /** Load a set of files and return flat name→fn maps keyed as `<baseName>.<export>`. */
     async loadAll(files: string[]): Promise<{
         value: Map<string, (ctx: ValueContext) => number[] | number>;

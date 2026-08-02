@@ -72,6 +72,32 @@ export class ScriptSystem implements System {
         this.loading.clear();
     }
 
+    /** Hot-reload a gameplay script (ScriptComponent.script path) with in-memory
+     *  source. Replaces the cached module so the next frame picks up the new
+     *  implementation; per-entity init() is re-run lazily. Throws on bad import. */
+    reloadScript(path: string, source: string): void {
+        this.modules.delete(path);
+        for (const key of [...this.initialized]) {
+            if (key.startsWith(`${path}#`)) this.initialized.delete(key);
+        }
+        const blob = new Blob([source], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        import(/* @vite-ignore */ blobUrl)
+            .then(mod => {
+                this.modules.set(path, (mod.default ?? mod) as ScriptModule);
+            })
+            .catch(err => {
+                console.error(`[ScriptSystem] failed to hot-reload '${path}':`, err);
+            })
+            .finally(() => URL.revokeObjectURL(blobUrl));
+    }
+
+    /** All currently-loaded gameplay script paths (ScriptComponent.script).
+     *  Read-only enumeration for the editor's Scripts tab. */
+    getScriptPaths(): string[] {
+        return [...this.modules.keys()];
+    }
+
     update(ctx: FrameContext): void {
         const time = ctx.time;
         const dt = ctx.dt;
