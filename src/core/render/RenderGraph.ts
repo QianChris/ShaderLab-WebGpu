@@ -392,13 +392,18 @@ export class RenderGraph implements System, IRenderer {
             return await resp.json() as import('./shaderGraph').ShaderGraph;
         };
         let graph: import('./shaderGraph').ShaderGraph;
+        let graphBase = commonBase;
         try {
             graph = await fetchGraph(commonBase);
         } catch {
             if (!appBase) throw new Error(`Shader graph '${path}' not found in ${commonBase}`);
             graph = await fetchGraph(appBase);
+            graphBase = appBase;
         }
-        const executor = new ShaderGraphExecutor(graph, commonBase);
+        // Shader refs in the graph resolve relative to the graph file's own
+        // directory (common OR app) — using /common for an app-level graph
+        // would hit the Vite SPA fallback (index.html) and fail to parse WGSL.
+        const executor = new ShaderGraphExecutor(graph, graphBase);
         await executor.compile(device);
         return executor;
     }

@@ -21,6 +21,9 @@ const flowNodes = ref<Node[]>([]);
 const flowEdges = ref<Edge[]>([]);
 const statusMsg = ref('');
 const nodeParamError = ref('');
+/** True once the <VueFlow> viewport has mounted (its `ready` event). fitView()
+ *  is only safe after that — calling it earlier warns "Viewport not initialized". */
+const flowReady = ref(false);
 
 // Node template registry for the "Add node" menu.
 const NODE_TYPES = ['data', 'shader', 'if', 'foreach', 'loop'] as const;
@@ -63,7 +66,22 @@ function loadGraph(): void {
         target: e.target,
         targetHandle: e.targetHandle,
     })) as Edge[];
-    requestAnimationFrame(() => fitView({ padding: 0.3, maxZoom: 1.2 }));
+    // fitView is only valid once the viewport exists (flowReady). The panel is
+    // mounted into a display:none tab, so re-fit when it becomes visible too.
+    if (flowReady.value) {
+        nextTickFit();
+    }
+}
+
+function nextTickFit(): void {
+    requestAnimationFrame(() => {
+        if (flowReady.value) fitView({ padding: 0.3, maxZoom: 1.2 });
+    });
+}
+
+function onFlowReady(): void {
+    flowReady.value = true;
+    nextTickFit();
 }
 
 useEditorEvent('editor:changed', refreshList);
@@ -166,6 +184,7 @@ function selectNode(id: string): void {
                 :edges="flowEdges"
                 :node-types="{}"
                 fit-view-on-init
+                @ready="onFlowReady"
                 @node-click="({ node }) => selectNode(node.id)"
                 @node-double-click="({ node }) => removeNode(node.id)">
                 <template #node-data="{ data }">
