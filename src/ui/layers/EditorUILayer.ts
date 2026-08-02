@@ -45,6 +45,9 @@ export class EditorUILayer implements UILayer {
     /** Document-level delegated tab handler (registered once in the ctor). Works
      *  even if mount() throws before wiring per-button handlers. */
     private docTabHandler: (ev: MouseEvent) => void;
+    /** Capture-phase probe (DIAGNOSTIC): logs any click that happens anywhere
+     *  near the sidebar so we can tell whether the event bubbles to document. */
+    private docCaptureProbe: (ev: MouseEvent) => void;
 
     constructor() {
         // Document-level delegation is the LAST line of defense: as long as the
@@ -54,6 +57,20 @@ export class EditorUILayer implements UILayer {
         this.docTabHandler = (ev: MouseEvent) => {
             if (!this.sidebar) return;
             const target = ev.target as HTMLElement | null;
+            // DIAGNOSTIC: log what actually received the click so a covering
+            // overlay can be identified (remove after root cause is fixed).
+            if (target) {
+                const rect = this.sidebar.getBoundingClientRect();
+                const insideSidebar = ev.clientX >= rect.left && ev.clientX <= rect.right
+                    && ev.clientY >= rect.top && ev.clientY <= rect.bottom;
+                if (insideSidebar) {
+                    const hit = document.elementFromPoint(ev.clientX, ev.clientY);
+                    console.log('[EditorUILayer] click in sidebar region → target=',
+                        `${target.tagName}#${target.id}.${target.className}`, '| hit=',
+                        hit ? `${hit.tagName}#${hit.id}.${hit.className}` : 'null',
+                        `@(${ev.clientX},${ev.clientY})`);
+                }
+            }
             const btn = target?.closest?.('.tab-btn') as HTMLButtonElement | null;
             if (!btn) return;
             const tab = btn.dataset.tab;
@@ -61,6 +78,15 @@ export class EditorUILayer implements UILayer {
             console.log('[EditorUILayer] tab click (document delegate):', tab);
             this.activateTab(tab);
         };
+        // DIAGNOSTIC capture probe: if the event is stopped before bubbling to
+        // document, this capture handler on window still sees it.
+        this.docCaptureProbe = (ev: MouseEvent) => {
+            const t = ev.target as HTMLElement | null;
+            if (t?.closest?.('.tab-btn')) {
+                console.log('[EditorUILayer] (capture) click on a .tab-btn:', t.className);
+            }
+        };
+        window.addEventListener('click', this.docCaptureProbe, true);
         document.addEventListener('click', this.docTabHandler);
     }
 
