@@ -1,4 +1,4 @@
-import { schemaRegistry } from '../../ecs/SchemaRegistry';
+import { schemaRegistry } from '../../core/ecs/SchemaRegistry';
 import type { Command, CommandContext } from './Command';
 
 export class SetFieldCommand implements Command {

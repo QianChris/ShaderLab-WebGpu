@@ -1,4 +1,4 @@
-import type { Engine } from '../../Engine';
+import type { Engine } from '../../core/Engine';
 
 export interface Command {
     readonly type: string;

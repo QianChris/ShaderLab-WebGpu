@@ -1,5 +1,5 @@
 import type { Command, CommandContext } from './Command';
-import type { RenderGraphData } from '../../render/types';
+import type { RenderGraphData } from '../../core/render/types';
 
 export class MutateRenderGraphCommand implements Command {
     readonly type = 'mutateRenderGraph';

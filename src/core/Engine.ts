@@ -1,5 +1,5 @@
 import { Scene, type SceneData } from './ecs/Scene';
-import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem';
+import { registerToolType } from './tools/ToolRegistry';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
@@ -93,7 +93,6 @@ export class Engine {
     format!: GPUTextureFormat;
     scene!: Scene;
     renderGraph!: RenderGraph;
-    toolSystem!: ToolSystem;
     eventBus!: EventBus;
     /** Engine-level config (paths, default app) loaded from engine-config.json. */
     engineConfig: EngineConfig = DEFAULT_ENGINE_CONFIG;
@@ -118,7 +117,7 @@ export class Engine {
     private pluginHost!: PluginHostHelper;
 
     private dpr: number;
-    private canvas: HTMLCanvasElement;
+    private _canvas: HTMLCanvasElement;
     private startTime = 0;
     private lastTime = 0;
     /** True while loadApp is in flight — frame() skips system updates. */
@@ -133,8 +132,21 @@ export class Engine {
     private pendingComputePass: GPUComputePassEncoder | null = null;
 
     constructor(canvas: HTMLCanvasElement) {
-        this.canvas = canvas;
+        this._canvas = canvas;
         this.dpr = window.devicePixelRatio || 1;
+    }
+
+    /* ── Read-only accessors (UI layer may query these; writes must go
+     *    through the AppHost command channel) ──────────────────────── */
+    get schemaRegistry() { return schemaRegistry; }
+    get systemRegistry() { return systemRegistry; }
+    get uniformLayouts() { return uniformLayouts; }
+    get resourceManager() { return resourceManager; }
+    get canvas(): HTMLCanvasElement { return this._canvas; }
+
+    /** Render canvas aspect ratio (width/height). */
+    aspect(): number {
+        return this._canvas.width / Math.max(1, this._canvas.height);
     }
 
     async init(): Promise<void> {
@@ -166,7 +178,7 @@ export class Engine {
         if (!adapter) throw new Error('No GPU adapter');
         this.device = await adapter.requestDevice();
         this.format = navigator.gpu.getPreferredCanvasFormat();
-        this.context = this.canvas.getContext('webgpu')!;
+        this.context = this._canvas.getContext('webgpu')!;
 
         this.resize();
         this.context.configure({ device: this.device, format: this.format, alphaMode: this.engineConfig.alphaMode });
@@ -189,8 +201,6 @@ export class Engine {
         this.scene = new Scene();
         this.renderGraph = new RenderGraph();
         this.eventBus = new EventBus();
-        const getSystem = <T,>(name: string): T | null => systemRegistry.resolve({ name }) as T | null;
-        this.toolSystem = new ToolSystem(this.scene, this.eventBus, getSystem, () => this.aspect());
 
         // Engine-level plugins (session lifetime). The engine has no compile-time
         // knowledge of any plugin: ids come from engine-config.json, invocation
@@ -235,7 +245,7 @@ export class Engine {
             scene: this.scene,
             eventBus: this.eventBus,
             engineConfig: this.engineConfig,
-            canvas: this.canvas,
+            canvas: this._canvas,
             baseUrl,
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
@@ -278,10 +288,6 @@ export class Engine {
     /** The active renderer: a plugin replacement when installed, else the built-in graph. */
     get renderer(): IRenderer {
         return this.customRenderer ?? this.renderGraph;
-    }
-
-    private aspect(): number {
-        return this.canvas.width / Math.max(1, this.canvas.height);
     }
 
     /** Publish an opaque object under `name` (owner-tagged for sweeps). */
@@ -415,10 +421,8 @@ export class Engine {
             resourceManager.enterApp(name);
         }
 
-        if (manifest.tools) {
-            this.toolSystem.setBase(base);
-            await this.toolSystem.loadFromFile(this.resolveAsset(base, manifest.tools));
-        }
+        // Interaction tools (tools.json) are an editor concern — the editor's
+        // input manager loads them after the app is up (EditorUILayer.mount).
         for (const glb of manifest.gltf ?? []) {
             await this.loadGltf(this.resolveAsset(base, glb));
         }
@@ -452,7 +456,6 @@ export class Engine {
         if (!this.currentApp) return;
         const appId = this.currentApp;
         pluginManager.broadcastAppUnloading();
-        this.toolSystem.dispose();
         this.eventBus.clear();
         systemRegistry.clearScripts();
         bufferRegistry.exitApp(appId);
@@ -490,8 +493,8 @@ export class Engine {
     }
 
     resize(): void {
-        this.canvas.width = this.canvas.clientWidth * this.dpr;
-        this.canvas.height = this.canvas.clientHeight * this.dpr;
+        this._canvas.width = this._canvas.clientWidth * this.dpr;
+        this._canvas.height = this._canvas.clientHeight * this.dpr;
     }
 
     /** Build the reusable FrameContext: stable references + closures that
@@ -502,9 +505,9 @@ export class Engine {
             scene: this.scene,
             time: 0, dt: 0,
             aspect: this.aspect(),
-            cw: this.canvas.width,
-            ch: this.canvas.height,
-            canvas: this.canvas,
+            cw: this._canvas.width,
+            ch: this._canvas.height,
+            canvas: this._canvas,
             device: this.device,
             context: this.context,
             format: this.format,
@@ -538,8 +541,8 @@ export class Engine {
         ctx.time = time;
         ctx.dt = dt;
         ctx.aspect = this.aspect();
-        ctx.cw = this.canvas.width;
-        ctx.ch = this.canvas.height;
+        ctx.cw = this._canvas.width;
+        ctx.ch = this._canvas.height;
 
         for (const sys of this.activeSystems) {
             const impl = systemRegistry.resolve(sys);

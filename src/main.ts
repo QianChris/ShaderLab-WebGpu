@@ -1,4 +1,4 @@
-import { Engine } from './Engine';
+import { Engine } from './core/Engine';
 import { EditorHost } from './editor/EditorHost';
 import { EditorPanel } from './editor/EditorPanel';
 import { PipelinePanel } from './editor/PipelinePanel';

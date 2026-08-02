@@ -26,6 +26,9 @@ export interface SceneTool {
     detach(): void;
 }
 
+/** Factory for a builtin tool type (TOOL_REGISTRY value). */
+export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
+
 /** Lifecycle hooks a script tool may export. All optional; missing hooks are skipped. */
 export interface ToolScriptModule {
     attach?: (ctx: ToolContext) => void;

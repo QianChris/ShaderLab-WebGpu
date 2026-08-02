@@ -1,4 +1,5 @@
-import type { Engine } from '../Engine';
+import type { Engine } from '../core/Engine';
+import type { RenderGraphData } from '../core/render/types';
 import type { Command, CommandContext } from './commands/Command';
 import { SetFieldCommand, CreateEntityCommand, RemoveEntityCommand } from './commands/SceneCommands';
 import { MutateRenderGraphCommand } from './commands/RenderGraphCommands';
@@ -41,7 +42,7 @@ export class EditorHost {
         if (this.editSnapshot) {
             const s = this.editSnapshot as { scene: unknown; renderGraph: unknown };
             this._engine.loadSceneData(s.scene as Record<string, Record<string, Record<string, unknown>>>);
-            this._engine.renderGraph.fromData(s.renderGraph as import('../render/types').RenderGraphData);
+            this._engine.renderGraph.fromData(s.renderGraph as RenderGraphData);
         }
         this._engine.eventBus.emit('editor:stop');
     }

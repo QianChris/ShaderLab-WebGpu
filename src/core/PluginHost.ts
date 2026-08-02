@@ -9,7 +9,7 @@ import {
     meshGenerators, isPbrMeshData,
     registerMeshGenerator, unregisterMeshGenerator,
 } from './render/Primitives';
-import { registerToolType, unregisterToolType } from './tools/ToolSystem';
+import { registerToolType, unregisterToolType } from './tools/ToolRegistry';
 import { atomNamespaces } from './render/valueResolver';
 import type { RenderGraph } from './render/RenderGraph';
 import type { EnginePlugin, MeshCatalogEntry } from './plugins/Plugin';

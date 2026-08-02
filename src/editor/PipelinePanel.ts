@@ -1,6 +1,6 @@
 import type { EditorHost } from './EditorHost';
-import { type PipelineEntry, type PipelineConfig } from '../render/types';
-import { PipelineLoader } from '../render/PipelineLoader';
+import { type PipelineEntry, type PipelineConfig } from '../core/render/types';
+import { PipelineLoader } from '../core/render/PipelineLoader';
 import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
 
 const TOPOLOGY_OPTIONS: string[] = [

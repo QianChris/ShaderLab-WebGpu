@@ -1,5 +1,6 @@
 import type { EditorHost } from './EditorHost';
-import { schemaRegistry } from '../ecs/SchemaRegistry';
+import { schemaRegistry } from '../core/ecs/SchemaRegistry';
+import type { SceneData } from '../core/ecs/Scene';
 import { ce, makeFloatField, makeSelect } from './dom';
 
 export class EditorPanel {
@@ -280,7 +281,7 @@ export class EditorPanel {
                 for (const k of [...this.host.scene.entityKeyMap.keys()]) {
                     this.host.scene.removeEntity(k);
                 }
-                this.host.engine.loadSceneData((json.entities ?? json) as import('../ecs/Scene').SceneData);
+                this.host.engine.loadSceneData((json.entities ?? json) as SceneData);
             }
             this.selected = '';
             this.render();

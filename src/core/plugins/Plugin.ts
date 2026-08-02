@@ -19,7 +19,7 @@ import type { RenderTargetDecls } from '../render/rendererDecl';
 import type { GeometryHook, ComputeHook } from '../render/PipelineDriver';
 import type { ValueContext, AtomResolver } from '../render/valueResolver';
 import type { MeshGenerator } from '../render/Primitives';
-import type { ToolFactory } from '../tools/ToolSystem';
+import type { ToolFactory } from '../tools/ToolRegistry';
 
 /** Identity + dependency declaration of a plugin. `id` must equal the plugin's
  *  folder name under the plugins root (fail-loud checked at load). */

@@ -1,23 +1,9 @@
 import type { Scene } from '../ecs/Scene';
 import type { EventBus } from '../events/EventBus';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
+import { TOOL_REGISTRY } from './ToolRegistry';
 
-export type ToolFactory = (config: ToolConfig, ctx: ToolContext) => SceneTool;
-
-/** Registry of tool factories, keyed by config `type`. Populated entirely by
- *  plugins (ctx.registerToolType) — the engine ships no built-in tools. */
-const TOOL_REGISTRY: Record<string, ToolFactory> = {};
-
-/** Register a tool type (plugins). Duplicate names throw (fail-loud). */
-export function registerToolType(type: string, factory: ToolFactory): void {
-    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
-    TOOL_REGISTRY[type] = factory;
-}
-
-/** Remove a tool type (plugin unload). */
-export function unregisterToolType(type: string): void {
-    delete TOOL_REGISTRY[type];
-}
+export type { ToolFactory } from './SceneTool';
 
 /** Wraps a script-loaded tool module in the SceneTool interface. */
 class ScriptToolAdapter implements SceneTool {
