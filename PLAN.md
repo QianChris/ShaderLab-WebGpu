@@ -1,699 +1,1229 @@
-# 架构重构执行计划（最终修正版）：Engine Core ↔ AppHost ↔ UI Layers
+# 编辑器 Vue 面板扩展计划（资源视图 / 脚本编辑器 / WGSL 编辑器 / Pipeline 节点编辑器）
 
-**目标**：将引擎核心与编辑器 UI 彻底解耦，引入 AppHost 作为统一宿主。编辑器交互逻辑（拾取/选中）作为编辑器专属模块，运行时入口完全不包含任何编辑器代码。本次重构仅夯实架构地基，不涉及脚本编辑器、节点编辑器等复杂工具。
+**目标**：在现有 `EditorUILayer` 中渐进式引入 4 个 Vue 3 面板，使用 CodeMirror 6 作为统一代码编辑器，所有状态变更通过 `AppHost.dispatch(new Command())` 派发，Vue 组件对 `EditorCommandBus` 零感知。
 
 **执行原则**：
-- 严格遵循单向依赖：`UI Layer → AppHost → Engine Core`
-- 命令走 `host.dispatch()` 同步通道，事件走 `host.eventBus.emit()` 广播通道
-- UI 层允许只读导入 Core 单例，禁止直接执行写入操作
+- Vue 组件 **禁止** 直接调用 `scene.setField()`、`renderGraph.fromData()` 等写入方法
+- Vue 组件 **禁止** 直接访问 `EditorCommandBus` 实例，统一走 `host.dispatch(cmd)`
+- CodeMirror 6 统一处理 JS 与 WGSL，不引入 Monaco
+- 新面板与旧原生 DOM 面板（Scene / Pipeline）在 Tab 系统中混合共存
+- `PatchRenderGraphCommand` 仅限字段级微改（enabled/params）；结构性变更（增删节点、改 phase）使用独立命令
 
 ---
 
-## 一、架构铁律（“宪法”）
+## 一、前置依赖与安装
 
-### 1. 依赖方向（单向向下）
+在工程根目录执行：
 
+```bash
+npm install vue@next @vitejs/plugin-vue
+npm install codemirror @codemirror/lang-javascript @codemirror/language @codemirror/state @codemirror/view @codemirror/commands
+npm install @vue-flow/core @vue-flow/background @vue-flow/controls
 ```
-UI Layer → AppHost → Engine Core
+
+修改 `vite.config.ts`（若尚未配置 Vue 插件）：
+
+```ts
+import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+
+export default defineConfig({
+  plugins: [vue()],
+});
 ```
-
-- `src/ui/` 可 import `src/host/` 和 `src/core/` 的**只读内容**
-- `src/host/` 可 import `src/core/`
-- `src/core/` **禁止** import 任何 `src/host/` 或 `src/ui/`
-
-### 2. 只读导入白名单
-
-UI 层可直接导入以下单例进行**只读查询**：
-
-| 单例 | 允许的操作 |
-|------|-----------|
-| `schemaRegistry` | `getDef()`, `get()`, `mandatory.has()`, `isRenderTag()` |
-| `systemRegistry` | `resolve()`（只读查询） |
-| `uniformLayouts` | `get()`, `has()`, `byteSize` |
-| `Scene` | 所有 getter（`getField`, `hasComponent`, `getActiveCameras` 等） |
-| `RenderGraph` | `getPhaseNames()`, `toData()`, `getComputePipeline()`（只读） |
-| `PipelineLoader` | `getConfig()`, `blendPresetNames`（只读） |
-
-**禁止**：UI 层直接调用 `register*`, `load*`, `setField`, `createEntity`, `fromData`, `writeBuffer` 等写入方法。
-
-### 3. 双通道通信
-
-| 通道 | API | 语义 | 返回值 | Undo |
-|------|-----|------|--------|------|
-| **命令通道** | `host.dispatch(new Command())` | 请求变更 | `boolean` | ✅ 入栈 |
-| **事件通道** | `host.eventBus.emit('evt', payload)` | 广播通知 | `void` | ❌ 不入栈 |
-
-**核心原则**：状态变更走 `dispatch`，状态变更的结果通知走 `eventBus.emit`。
-
-### 4. 双入口隔离
-
-| 入口 | 编辑器 UI | 编辑器输入 | Undo/Redo | App UI |
-|------|-----------|------------|-----------|--------|
-| `main.ts`（编辑器） | ✅ 加载 | ✅ 加载 | ✅ 可用 | ✅ 加载 |
-| `player.ts`（运行时） | ❌ 不加载 | ❌ 不加载 | ❌ 不存在 | ✅ 加载 |
 
 ---
 
-## 二、重构后目录结构
+## 二、文件结构总览
 
 ```
 src/
-├── core/                          # Engine Core（移除所有 UI 依赖）
-│   ├── ecs/
-│   ├── render/
-│   ├── events/
-│   ├── math/
-│   ├── plugins/
-│   ├── tools/                     # 模块级工具注册表（供 Core 和插件使用）
-│   │   └── ToolRegistry.ts        # registerToolType / TOOL_REGISTRY（无 DOM 依赖）
-│   └── Engine.ts                  # 移除 toolSystem，增加只读 accessors
-│
-├── host/                          # 统一宿主层
-│   └── AppHost.ts
-│
-├── ui/                            # UI 层（平级、可插拔）
-│   ├── UILayer.ts
+├── ui/
+│   ├── vue/
+│   │   ├── index.ts                    # Vue 面板挂载工厂
+│   │   ├── composables/
+│   │   │   ├── useHost.ts              # inject(AppHost)
+│   │   │   ├── useSceneCommands.ts     # 基于 host.dispatch 的命令工厂
+│   │   │   ├── useEditorEvent.ts     # 订阅 eventBus
+│   │   │   └── useResourceStats.ts   # 轮询资源统计
+│   │   ├── components/
+│   │   │   ├── CodeEditor.vue          # CodeMirror 6 封装（JS/WGSL 切换）
+│   │   │   └── AssetTree.vue           # 资源分类树
+│   │   ├── panels/
+│   │   │   ├── AssetViewPanel.vue
+│   │   │   ├── ScriptEditorPanel.vue
+│   │   │   ├── WgslEditorPanel.vue
+│   │   │   └── PipelineNodeEditor.vue
+│   │   └── nodeGraph/
+│   │       ├── types.ts
+│   │       ├── graphAdapter.ts
+│   │       └── layout.ts
 │   └── layers/
-│       └── EditorUILayer.ts       # 整合编辑器面板、命令总线、输入管理器
-│
-├── editor/                        # 编辑器核心逻辑（非 UI，但非 Core）
-│   ├── EditorCommandBus.ts        # 原 EditorHost 重命名
-│   ├── EditorPanel.ts             # 场景/属性面板（修改依赖方向）
-│   ├── PipelinePanel.ts           # 管线面板（修改依赖方向）
-│   ├── input/
-│   │   ├── EditorInputManager.ts  # 封装 ToolSystem 生命周期
-│   │   ├── ToolSystem.ts          # 原 src/tools/ToolSystem.ts 移入
-│   │   └── SceneTool.ts           # 原 src/tools/SceneTool.ts 移入
-│   └── commands/
-│       ├── Command.ts
-│       ├── SceneCommands.ts
-│       └── RenderGraphCommands.ts
-│
-├── main.ts                        # 编辑器入口
-├── player.ts                      # 运行时入口
-└── types/
+│       └── EditorUILayer.ts            # 修改：增加 Vue 面板 Tab 与挂载逻辑
+├── core/
+│   ├── ecs/SystemRegistry.ts           # 修改：增加脚本热重载接口
+│   ├── render/
+│   │   ├── PipelineLoader.ts           # 修改：增加 shader 热重载与反向索引
+│   │   ├── RenderScriptLoader.ts       # 修改：增加内存文本加载接口
+│   │   ├── RenderGraph.ts              # 修改：增加 pipeline entry 增删接口
+│   │   └── ResourceManager.ts          # 修改：增加只读资源枚举接口
+└── editor/commands/
+    ├── ScriptCommands.ts               # 新增：ReloadSystemScriptCommand / ReloadRenderScriptCommand
+    ├── ShaderCommands.ts               # 新增：HotReloadShaderCommand
+    └── RenderGraphCommands.ts          # 修改：新增 Add/Remove/Move PipelineEntry 命令
 ```
 
 ---
 
-## 三、执行任务清单（分 7 个 Phase）
+## 三、Phase 0：Vue 基础设施（4-6 小时）
 
-### Phase 0：环境准备（10 分钟）
+### 3.1 核心 Composables
 
-1. 安装 Vue 3（为后续新 UI 组件做准备，本次不迁移现有面板）：
-   ```bash
-   npm install vue@next @vitejs/plugin-vue
-   ```
+**`src/ui/vue/composables/useHost.ts`**：
 
-2. 修改 `vite.config.ts`，注册 Vue 插件并配置**多入口打包**：
-   ```typescript
-   import { defineConfig } from 'vite';
-   import vue from '@vitejs/plugin-vue';
+```ts
+import { inject } from 'vue';
+import type { AppHost } from '../../../host/AppHost';
 
-   export default defineConfig({
-     plugins: [vue()],
-     build: {
-       rollupOptions: {
-         input: {
-           main: 'index.html',
-           player: 'player.html',
-         },
-       },
-     },
-   });
-   ```
+export const HOST_KEY = Symbol('host');
 
-3. 新建 `player.html`（复制 `index.html`，将 `<script type="module" src="/src/main.ts"></script>` 改为 `/src/player.ts`）。
+export function useHost(): AppHost {
+    const host = inject<AppHost>(HOST_KEY);
+    if (!host) throw new Error('useHost() must be called inside a Vue editor panel');
+    return host;
+}
+```
 
-4. 在项目根目录创建 `docs/ARCHITECTURE.md`，将上述“架构铁律”完整粘贴进去。
+**`src/ui/vue/composables/useSceneCommands.ts`**（替代原 `useCommandBus`，对 `EditorCommandBus` 零感知）：
 
----
+```ts
+import { useHost } from './useHost';
+import { SetFieldCommand } from '../../../editor/commands/SceneCommands';
+import { ReloadSystemScriptCommand } from '../../../editor/commands/ScriptCommands';
+import { HotReloadShaderCommand } from '../../../editor/commands/ShaderCommands';
+import type { Command } from '../../../editor/commands/Command';
 
-### Phase 1：Engine Core 清理 + AppHost 创建（30 分钟）
+export function useSceneCommands() {
+    const host = useHost();
+    const dispatch = (cmd: Command) => host.dispatch(cmd);
 
-#### 1.1 Engine.ts 清理
+    return {
+        dispatch,
+        setField(entityKey: string, comp: string, field: string, value: unknown) {
+            return dispatch(new SetFieldCommand(entityKey, comp, field, value));
+        },
+        reloadSystemScript(entryName: string, nextSource: string, prevSource: string) {
+            return dispatch(new ReloadSystemScriptCommand(entryName, nextSource, prevSource));
+        },
+        hotReloadShader(shaderKey: string, nextSource: string, prevSource: string) {
+            return dispatch(new HotReloadShaderCommand(shaderKey, nextSource, prevSource));
+        },
+        // 后续根据面板需求扩展
+    };
+}
+```
 
-- **删除**以下代码：
-  - `import { ToolSystem, registerToolType, unregisterToolType } from './tools/ToolSystem'`
-  - `toolSystem!: ToolSystem` 属性
-  - 构造函数中的 `this.toolSystem = new ToolSystem(...)`
-  - `loadAppInner` 中的 tools 加载逻辑（`if (manifest.tools) { ... }`）
-  - `unloadCurrentApp` 中的 `this.toolSystem.dispose()`
+**`src/ui/vue/composables/useEditorEvent.ts`**：
 
-- **新增**以下公共只读属性（供 UI 层只读访问）：
-  ```typescript
-  export class Engine {
-    // ... 现有属性
+```ts
+import { onMounted, onUnmounted } from 'vue';
+import { useHost } from './useHost';
 
-    get schemaRegistry() { return schemaRegistry; }
-    get systemRegistry() { return systemRegistry; }
-    get uniformLayouts() { return uniformLayouts; }
-    get resourceManager() { return resourceManager; }
-    get canvas() { return this._canvas; }  // 将 private canvas 改为 _canvas，暴露 getter
+export function useEditorEvent(type: string, handler: (payload: unknown) => void) {
+    const host = useHost();
+    let unsub: (() => void) | undefined;
+    onMounted(() => { unsub = host.eventBus.on(type, handler); });
+    onUnmounted(() => unsub?.());
+}
+```
 
-    /** 供外部计算宽高比（原为 private） */
-    aspect(): number {
-      return this._canvas.width / Math.max(1, this._canvas.height);
-    }
-  }
-  ```
+### 3.2 CodeEditor.vue 封装
 
-- **修正** `makePluginContext` 中的 `registerToolType`：
-  ```typescript
-  // 改为从 core/tools/ToolRegistry 导入，确保 player.ts 下也存在
-  import { registerToolType } from '../tools/ToolRegistry';
-  
-  registerToolType: (name, factory) => {
-    registerToolType(name, factory);
-    ledger.tools.push(name);
-  },
-  ```
+**`src/ui/vue/components/CodeEditor.vue`**：
 
-#### 1.2 提取 ToolRegistry
+```vue
+<script setup lang="ts">
+import { ref, shallowRef, watch, onMounted, onUnmounted, computed } from 'vue';
+import { EditorView, basicSetup } from 'codemirror';
+import { javascript } from '@codemirror/lang-javascript';
+import { StreamLanguage } from '@codemirror/language';
+import type { StreamParser } from '@codemirror/language';
 
-- 新建 `src/core/tools/ToolRegistry.ts`：
-  ```typescript
-  import type { ToolFactory } from '../../editor/input/SceneTool'; // 类型仅编译期
+const props = defineProps<{
+    modelValue: string;
+    language: 'js' | 'wgsl';
+}>();
+const emit = defineEmits<{ (e: 'update:modelValue', v: string): void; (e: 'save', v: string): void }>();
 
-  export const TOOL_REGISTRY: Record<string, ToolFactory> = {};
+const containerRef = ref<HTMLElement>();
+const view = shallowRef<EditorView>();
 
-  export function registerToolType(type: string, factory: ToolFactory): void {
-    if (TOOL_REGISTRY[type]) throw new Error(`Tool type '${type}' already registered`);
-    TOOL_REGISTRY[type] = factory;
-  }
+const wgslParser: StreamParser<unknown> = {
+    token(stream) {
+        if (stream.match(/^(fn|struct|var|let|const|if|else|for|while|return|switch|case|default|break|continue)\b/)) return 'keyword';
+        if (stream.match(/^@(?:builtin|location|group|binding|workgroup_size|stage|vertex|fragment|compute)\b/)) return 'attribute';
+        if (stream.match(/^(f32|i32|u32|bool|vec2|vec3|vec4|mat2x2|mat3x3|mat4x4|array|ptr|texture_2d|sampler|texture_depth_2d)\b/)) return 'typeName';
+        if (stream.match(/^[0-9]+(?:\.[0-9]+)?(?:f|i|u)?\b/)) return 'number';
+        if (stream.match(/^\/\/.*/)) return 'comment';
+        if (stream.match(/^\/\*.*?\*\//)) return 'comment';
+        if (stream.eat(/[+\-*/=<>!&|]/)) return 'operator';
+        if (stream.eat('"')) { while (!stream.eol() && stream.next() !== '"') {} return 'string'; }
+        stream.next();
+        return null;
+    },
+    startState() { return null; },
+};
+const wgslLang = StreamLanguage.define(wgslParser);
 
-  export function unregisterToolType(type: string): void {
-    delete TOOL_REGISTRY[type];
-  }
-  ```
-
-- 修改原 `src/tools/ToolSystem.ts`（后续将移入 `src/editor/input/`）：
-  - 移除模块级的 `TOOL_REGISTRY`、`registerToolType`、`unregisterToolType`
-  - 改为 `import { TOOL_REGISTRY, registerToolType } from '../../core/tools/ToolRegistry'`
-
-#### 1.3 创建 AppHost
-
-- 新建 `src/host/AppHost.ts`：
-  ```typescript
-  import { Engine } from '../core/Engine';
-  import { EventBus } from '../core/events/EventBus';
-  import type { Command, CommandContext } from '../editor/commands/Command';
-  import type { UILayer } from '../ui/UILayer';
-
-  export class AppHost {
-    public engine: Engine;
-    public eventBus: EventBus;
-    private uiLayers: UILayer[] = [];
-    private uiContainer: HTMLElement;
-    private editorLayer?: { dispatch(cmd: Command): boolean };
-
-    constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
-      this.engine = new Engine(canvas);
-      this.eventBus = this.engine.eventBus;
-      this.uiContainer = uiContainer;
-    }
-
-    async init() { await this.engine.init(); }
-    async loadApp(name: string) { await this.engine.loadApp(name); }
-    startLoop() { this.engine.startLoop(); }
-    resize() { this.engine.resize(); }
-    get engineConfig() { return this.engine.engineConfig; }
-
-    // 只读代理
-    get scene() { return this.engine.scene; }
-    get renderGraph() { return this.engine.renderGraph; }
-
-    mountLayer(layer: UILayer) {
-      layer.mount(this.uiContainer, this);
-      this.uiLayers.push(layer);
-      if (layer.id === 'editor') {
-        this.editorLayer = layer as unknown as { dispatch(cmd: Command): boolean };
-      }
-    }
-
-    unmountAll() {
-      for (const layer of this.uiLayers) layer.unmount();
-      this.uiLayers = [];
-      this.editorLayer = undefined;
-    }
-
-    dispatch(cmd: Command): boolean {
-      if (this.editorLayer) {
-        return this.editorLayer.dispatch(cmd);
-      }
-      // 运行时无编辑器：直接执行，不入栈
-      const ctx: CommandContext = { engine: this.engine };
-      return cmd.execute(ctx);
-    }
-
-    async loadAppUI(appBase: string) { /* Phase 5 实现 */ }
-  }
-  ```
-
-#### 1.4 创建 UILayer 接口
-
-- 新建 `src/ui/UILayer.ts`：
-  ```typescript
-  import type { AppHost } from '../host/AppHost';
-
-  export interface UILayer {
-    id: string;
-    mount(container: HTMLElement, host: AppHost): void | Promise<void>;
-    unmount(): void;
-  }
-  ```
-
----
-
-### Phase 2：迁移 ToolSystem 为编辑器内置模块（40 分钟）
-
-#### 2.1 移动文件
-
-- 将 `src/tools/` 下所有文件移动到 `src/editor/input/`
-- 更新这些文件内部的 import 路径（如 `../ecs/Scene` → `../../core/ecs/Scene`）
-
-#### 2.2 新建 EditorInputManager
-
-- 新建 `src/editor/input/EditorInputManager.ts`：
-  ```typescript
-  import { ToolSystem } from './ToolSystem';
-  import type { Scene } from '../../core/ecs/Scene';
-  import type { EventBus } from '../../core/events/EventBus';
-
-  export class EditorInputManager {
-    private toolSystem: ToolSystem;
-
-    constructor(
-      scene: Scene,
-      eventBus: EventBus,
-      getSystem: <T>(name: string) => T | null,
-      getAspect: () => number,
-    ) {
-      this.toolSystem = new ToolSystem(scene, eventBus, getSystem, getAspect);
-    }
-
-    /** 加载当前 App 的 tools.json */
-    async loadTools(appBase: string, toolsPath: string): Promise<void> {
-      this.toolSystem.setBase(appBase);
-      await this.toolSystem.loadFromFile(`${appBase}/${toolsPath}`);
-    }
-
-    dispose(): void {
-      this.toolSystem.dispose();
-    }
-  }
-  ```
-
-**注意**：`ToolSystem` 本身没有 `attach(canvas)` / `detach()` 方法，它通过 `load()` 在内部管理 `SceneTool.attach/detach`。`EditorInputManager` 封装的是 `loadTools` 和 `dispose`，不要调用不存在的 `attach/detach`。
-
----
-
-### Phase 3：重构编辑器 UI 层（EditorUILayer）（70 分钟）
-
-#### 3.1 重命名 EditorHost → EditorCommandBus
-
-- 移动 `src/editor/EditorHost.ts` → `src/editor/EditorCommandBus.ts`
-- 类名改为 `EditorCommandBus`
-- 保留所有原有逻辑（`dispatch`, `undo`, `redo`, `play`, `pause`, `stop`, `setField`, `createEntity`, `removeEntity`, `mutateRenderGraph`）
-- 保持 `Command` 相关实现完全不变
-
-#### 3.2 修改 EditorPanel 和 PipelinePanel
-
-- **移除**对 Core 单例的**写入**依赖，保留**只读** import：
-  - 保留 `import { schemaRegistry } from '../ecs/SchemaRegistry'`（只读查询）
-  - 保留 `import { PipelineLoader } from '../render/PipelineLoader'`（只读查询）
-  - 移除任何直接调用 `scene.setField`、`renderGraph.fromData` 的代码，改为通过 `commandBus.dispatch()` 执行
-
-- **修改构造函数/attach 签名**：
-  - 原 `EditorPanel` 接收 `container: HTMLElement`，内部通过固定 ID 查找子元素
-  - 改为接收 `host: AppHost` 或 `commandBus: EditorCommandBus`，不再直接操作 Engine
-
-#### 3.3 新建 EditorUILayer
-
-- 新建 `src/ui/layers/EditorUILayer.ts`：
-  ```typescript
-  import type { AppHost } from '../../host/AppHost';
-  import type { UILayer } from '../UILayer';
-  import type { Command } from '../../editor/commands/Command';
-  import { EditorCommandBus } from '../../editor/EditorCommandBus';
-  import { EditorInputManager } from '../../editor/input/EditorInputManager';
-  import { EditorPanel } from '../../editor/EditorPanel';
-  import { PipelinePanel } from '../../editor/PipelinePanel';
-
-  export class EditorUILayer implements UILayer {
-    id = 'editor';
-    private commandBus?: EditorCommandBus;
-    private inputManager?: EditorInputManager;
-    private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
-
-    async mount(container: HTMLElement, host: AppHost) {
-      // ── 1. 构建编辑器 DOM 结构 ──
-      // 原 main.ts 中的 tab 结构移入此处
-      container.innerHTML = `
-        <div class="editor-head">
-          <span class="ed-title">Scene Editor</span>
-          <div class="editor-btn-row">
-            <button class="editor-btn" id="btn-save">Save JSON</button>
-            <button class="editor-btn" id="btn-load">Load JSON</button>
-          </div>
-        </div>
-        <div class="tab-bar">
-          <button class="tab-btn active" data-tab="scene">Scene</button>
-          <button class="tab-btn" data-tab="pipeline">Pipeline</button>
-        </div>
-        <div id="tab-scene" style="display:flex"></div>
-        <div id="tab-pipeline" style="display:none"></div>
-      `;
-
-      const sceneContainer = container.querySelector('#tab-scene') as HTMLElement;
-      const pipelineContainer = container.querySelector('#tab-pipeline') as HTMLElement;
-
-      // ── 2. 初始化命令总线 ──
-      this.commandBus = new EditorCommandBus(host.engine);
-
-      // ── 3. 初始化输入管理器（拾取/工具）──
-      this.inputManager = new EditorInputManager(
-        host.engine.scene,
-        host.eventBus,
-        (name) => host.engine.systemRegistry.resolve({ name }),
-        () => host.engine.aspect(),
-      );
-
-      // 加载当前 App 的 tools.json（关键：补全原 Engine 中的加载逻辑）
-      const appName = host.engine.currentApp;
-      if (appName) {
-        const base = `${host.engineConfig.appsRoot}/${appName}`;
-        try {
-          const manifestResp = await fetch(`${base}/app.json`);
-          if (manifestResp.ok) {
-            const manifest = await manifestResp.json();
-            if (manifest.tools) {
-              await this.inputManager.loadTools(base, manifest.tools);
+const extensions = computed(() => [
+    basicSetup,
+    props.language === 'js' ? javascript() : wgslLang,
+    EditorView.updateListener.of((upd) => {
+        if (upd.docChanged) emit('update:modelValue', upd.state.doc.toString());
+    }),
+    EditorView.domEventHandlers({
+        keydown: (event) => {
+            if (event.ctrlKey && event.key === 's') {
+                event.preventDefault();
+                emit('save', view.value?.state.doc.toString() ?? '');
+                return true;
             }
-          }
-        } catch (e) {
-          console.warn('[EditorUILayer] failed to load tools:', e);
+        },
+    }),
+]);
+
+onMounted(() => {
+    if (!containerRef.value) return;
+    view.value = new EditorView({
+        doc: props.modelValue,
+        extensions: extensions.value,
+        parent: containerRef.value,
+    });
+});
+
+watch(() => props.modelValue, (next) => {
+    const cur = view.value?.state.doc.toString();
+    if (view.value && cur !== next) {
+        view.value.dispatch({ changes: { from: 0, to: cur!.length, insert: next } });
+    }
+});
+
+watch(() => props.language, () => {
+    view.value?.destroy();
+    if (containerRef.value) {
+        view.value = new EditorView({
+            doc: props.modelValue,
+            extensions: extensions.value,
+            parent: containerRef.value,
+        });
+    }
+});
+
+onUnmounted(() => view.value?.destroy());
+</script>
+
+<template>
+    <div ref="containerRef" class="code-editor" />
+</template>
+
+<style>
+.code-editor { height: 100%; overflow: auto; }
+.cm-editor { height: 100%; }
+</style>
+```
+
+### 3.3 EditorUILayer 改造
+
+修改 `src/ui/layers/EditorUILayer.ts`，在 `mount()` 中新增 Vue 面板 Tab 与挂载逻辑：
+
+```ts
+// 在 container.innerHTML 中追加：
+/*
+<button class="tab-btn" data-tab="assets">Assets</button>
+<button class="tab-btn" data-tab="scripts">Scripts</button>
+<button class="tab-btn" data-tab="shaders">Shaders</button>
+<button class="tab-btn" data-tab="nodes">Nodes</button>
+...
+<div id="tab-assets"   class="tab-panel" style="display:none;"></div>
+<div id="tab-scripts"  class="tab-panel" style="display:none;"></div>
+<div id="tab-shaders"  class="tab-panel" style="display:none;"></div>
+<div id="tab-nodes"    class="tab-panel" style="display:none;"></div>
+*/
+
+// 在 mount() 末尾，初始化 Vue 面板：
+import { createApp } from 'vue';
+import { HOST_KEY } from '../vue/composables/useHost';
+import AssetViewPanel from '../vue/panels/AssetViewPanel.vue';
+import ScriptEditorPanel from '../vue/panels/ScriptEditorPanel.vue';
+import WgslEditorPanel from '../vue/panels/WgslEditorPanel.vue';
+import PipelineNodeEditor from '../vue/panels/PipelineNodeEditor.vue';
+
+const vuePanels = [
+    { id: 'tab-assets', comp: AssetViewPanel },
+    { id: 'tab-scripts', comp: ScriptEditorPanel },
+    { id: 'tab-shaders', comp: WgslEditorPanel },
+    { id: 'tab-nodes', comp: PipelineNodeEditor },
+];
+
+const apps: ReturnType<typeof createApp>[] = [];
+for (const { id, comp } of vuePanels) {
+    const el = container.querySelector(`#${id}`) as HTMLElement;
+    if (!el) continue;
+    const app = createApp(comp);
+    app.provide(HOST_KEY, host);
+    app.mount(el);
+    apps.push(app);
+}
+
+// unmount() 中追加：
+for (const app of apps) app.unmount();
+```
+
+**验收标准**：
+- [ ] 新增 4 个 Tab 可正常切换
+- [ ] Vue 面板内 `useHost()` 能正确获取 `AppHost`
+- [ ] CodeEditor.vue 输入文本能正确 emit `update:modelValue` 和 `save`
+- [ ] Vue 面板内无 `useCommandBus` 或 `editorLayer.commandBus` 的直接引用
+
+---
+
+## 四、Phase 1：资源视图（Asset View）（3-4 小时）
+
+### 4.1 Core 侧：ResourceManager 新增只读接口
+
+修改 `src/core/render/ResourceManager.ts`，新增以下方法（只读，无副作用）：
+
+```ts
+getMeshNames(): string[] { return [...this.meshGpu.keys()]; }
+getTextureNames(): string[] { return [...this.textures.keys()]; }
+getColorTargetNames(): string[] { return [...this.colorTargets.keys()]; }
+getDepthTargetNames(): string[] { return [...this.depthTargets.keys()]; }
+getUniformNames(): string[] { return [...this.uniformBuffers.keys()]; }
+getStorageNames(): string[] { return [...this.storageBuffers.keys()]; }
+```
+
+修改 `src/core/render/RenderGraph.ts`，新增：
+
+```ts
+/** 获取当前已加载的所有 pipeline entry（只读） */
+getPipelineEntries(): Array<{ name: string; pipeline: string; phase: string; enabled: boolean }> {
+    const out: Array<{ name: string; pipeline: string; phase: string; enabled: boolean }> = [];
+    for (const phase of this.phaseList) {
+        for (const entry of this.phases[phase.name] ?? []) {
+            out.push({ name: entry.name, pipeline: entry.pipeline, phase: phase.name, enabled: entry.enabled });
         }
-      }
+    }
+    return out;
+}
+```
 
-      // ── 4. 初始化面板 ──
-      const editorPanel = new EditorPanel(sceneContainer);
-      const pipelinePanel = new PipelinePanel(pipelineContainer);
+### 4.2 Vue 面板：AssetViewPanel.vue
 
-      editorPanel.attach(this.commandBus);
-      pipelinePanel.attach(this.commandBus);
-      editorPanel.render();
-      pipelinePanel.render();
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue';
+import { useHost } from '../composables/useHost';
+import { useEditorEvent } from '../composables/useEditorEvent';
 
-      // 绑定 tab 切换
-      const buttons = container.querySelectorAll<HTMLButtonElement>('.tab-btn');
-      buttons.forEach(btn => {
-        btn.onclick = () => {
-          const tab = btn.dataset.tab;
-          buttons.forEach(b => b.classList.toggle('active', b === btn));
-          sceneContainer.style.display = tab === 'scene' ? 'flex' : 'none';
-          pipelineContainer.style.display = tab === 'pipeline' ? 'flex' : 'none';
-        };
-      });
+const host = useHost();
+const rm = host.engine.resourceManager;
+const rg = host.engine.renderGraph;
 
-      // 绑定 app 切换回调（原 main.ts 中的 switchToApp）
-      editorPanel.onAppSwitch = async (name: string) => {
-        await host.loadApp(name);
-        editorPanel.render();
-        pipelinePanel.render();
-      };
+const categories = computed(() => [
+    { name: 'Meshes', items: rm.getMeshNames() },
+    { name: 'Textures', items: rm.getTextureNames() },
+    { name: 'Color Targets', items: rm.getColorTargetNames() },
+    { name: 'Depth Targets', items: rm.getDepthTargetNames() },
+    { name: 'Uniform Buffers', items: rm.getUniformNames() },
+    { name: 'Storage Buffers', items: rm.getStorageNames() },
+    { name: 'Pipelines', items: rg.getPipelineEntries().map(e => `${e.name} (${e.pipeline})`) },
+]);
 
-      this.panels = { editor: editorPanel, pipeline: pipelinePanel };
+const selected = ref<{ cat: string; name: string } | null>(null);
 
-      // 监听引擎事件刷新面板
-      host.eventBus.on('editor:changed', () => {
-        editorPanel.render();
-        pipelinePanel.render();
-      });
+useEditorEvent('editor:changed', () => {
+    selected.value = null;
+});
+
+function select(cat: string, name: string) {
+    selected.value = { cat, name };
+    host.eventBus.emit('asset:selected', { type: cat, name });
+}
+</script>
+
+<template>
+    <div class="asset-panel">
+        <div class="asset-tree">
+            <div v-for="cat in categories" :key="cat.name" class="cat">
+                <div class="cat-name">{{ cat.name }} ({{ cat.items.length }})</div>
+                <div v-for="item in cat.items" :key="item" 
+                     :class="['item', { active: selected?.cat === cat.name && selected?.name === item }]"
+                     @click="select(cat.name, item)">
+                    {{ item }}
+                </div>
+            </div>
+        </div>
+        <div class="asset-detail">
+            <div v-if="selected">
+                <h4>{{ selected.cat }} — {{ selected.name }}</h4>
+                <p>（后续可扩展展示 GPU 资源详情）</p>
+            </div>
+            <div v-else class="empty">Select an asset</div>
+        </div>
+    </div>
+</template>
+
+<style>
+.asset-panel { display: flex; height: 100%; }
+.asset-tree { width: 240px; overflow-y: auto; border-right: 1px solid #333; }
+.cat-name { padding: 4px 8px; font-weight: bold; background: #222; color: #aaa; }
+.item { padding: 3px 12px; cursor: pointer; color: #ccc; font-size: 12px; }
+.item:hover { background: #333; }
+.item.active { background: #1a4d8f; color: #fff; }
+.asset-detail { flex: 1; padding: 12px; color: #ccc; }
+.empty { opacity: 0.5; }
+</style>
+```
+
+**验收标准**：
+- [ ] 资源分类列表正确展示当前 App 的所有资源
+- [ ] 切换 App 后列表自动刷新（通过 `editor:changed` 事件）
+- [ ] 点击资源项 emit `asset:selected` 事件
+
+---
+
+## 五、Phase 2：脚本编辑器（Script Editor）（6-8 小时）
+
+### 5.1 Core 侧：SystemRegistry 热重载
+
+修改 `src/core/ecs/SystemRegistry.ts`，新增：
+
+```ts
+/** Hot-reload a script system by its entry name with new source code.
+ *  The adapter's init() will be re-invoked lazily on the next update(). */
+async reloadScriptByEntry(entryName: string, sourceCode: string): Promise<void> {
+    const def = this.defs.get(entryName);
+    if (!def?.source || def.source.startsWith('builtin:')) {
+        throw new Error(`System '${entryName}' is not a script-loaded system`);
+    }
+    const old = this.scripts.get(def.source);
+    old?.dispose?.();
+
+    const blob = new Blob([sourceCode], { type: 'text/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+        const mod = await import(/* @vite-ignore */ blobUrl);
+        const systemMod = (mod.default ?? mod) as SystemScriptModule;
+        this.scripts.set(def.source, new ScriptSystemAdapter(systemMod));
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
+}
+
+/** Get the script source path for a system entry (for display). */
+getScriptSource(entryName: string): string | undefined {
+    const def = this.defs.get(entryName);
+    return def?.source && !def.source.startsWith('builtin:') ? def.source : undefined;
+}
+
+/** List all script-loaded system entries. */
+getScriptSystemEntries(): string[] {
+    return [...this.defs.entries()]
+        .filter(([, d]) => d.source && !d.source.startsWith('builtin:'))
+        .map(([name]) => name);
+}
+```
+
+修改 `src/core/render/RenderScriptLoader.ts`，新增：
+
+```ts
+/** Load a render script from in-memory text instead of fetching.
+ *  Used by the editor for hot-reload. */
+async loadFromText(file: string, text: string): Promise<Record<string, AnyFn>> {
+    const blob = new Blob([text], { type: 'text/javascript' });
+    const blobUrl = URL.createObjectURL(blob);
+    try {
+        const mod = await import(/* @vite-ignore */ blobUrl);
+        const exports = (mod.default ?? mod) as Record<string, AnyFn>;
+        this.loaded.set(file, exports);
+        return exports;
+    } finally {
+        URL.revokeObjectURL(blobUrl);
+    }
+}
+```
+
+在 `src/core/render/RenderGraph.ts` 中新增代理：
+
+```ts
+private scriptLoader?: RenderScriptLoader;
+
+async compile(...): Promise<void> {
+    // ... 原有逻辑 ...
+    if (this.scriptFiles.length > 0) {
+        this.scriptLoader = new RenderScriptLoader(dataBase, this.scriptsSubdir);
+        // ...
+    }
+}
+
+async reloadRenderScript(file: string, source: string): Promise<void> {
+    if (!this.scriptLoader) throw new Error('RenderScriptLoader not initialized');
+    const exports = await this.scriptLoader.loadFromText(file, source);
+    const baseName = file.replace(/^[^/]+\//, '').replace(/\.js$/, '');
+    for (const [name, fn] of Object.entries(exports)) {
+        if (typeof fn !== 'function') continue;
+        const key = `${baseName}.${name}`;
+        this.registerValueScript(key, fn as never, 'app');
+        this.registerGeometryHook(key, fn as never, 'app');
+        this.registerComputeHook(key, fn as never, 'app');
+    }
+}
+```
+
+### 5.2 新增命令
+
+**`src/editor/commands/ScriptCommands.ts`**：
+
+```ts
+import type { Command, CommandContext } from './Command';
+
+export class ReloadSystemScriptCommand implements Command {
+    readonly type = 'reloadSystemScript';
+    readonly description = 'reloadSystemScript';
+    constructor(
+        private entryName: string,
+        private nextSource: string,
+        private prevSource: string,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.systemRegistry.reloadScriptByEntry(this.entryName, this.nextSource);
+        return true;
     }
 
-    unmount() {
-      this.inputManager?.dispose();
-      this.commandBus = undefined;
-      this.panels = {};
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.systemRegistry.reloadScriptByEntry(this.entryName, this.prevSource);
+        return true;
+    }
+}
+
+export class ReloadRenderScriptCommand implements Command {
+    readonly type = 'reloadRenderScript';
+    readonly description = 'reloadRenderScript';
+    constructor(
+        private file: string,
+        private nextSource: string,
+        private prevSource: string,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.reloadRenderScript(this.file, this.nextSource);
+        return true;
     }
 
-    dispatch(cmd: Command): boolean {
-      return this.commandBus?.dispatch(cmd) ?? false;
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.reloadRenderScript(this.file, this.prevSource);
+        return true;
     }
-  }
-  ```
-
-**关键修正**：
-- `EditorUILayer` 负责构建原 `index.html` 中的 tab DOM 结构
-- `EditorPanel` 和 `PipelinePanel` 分别挂载到 `#tab-scene` 和 `#tab-pipeline` 子容器
-- 在 `mount()` 中**补全** `tools.json` 的加载（原由 Engine 执行）
-- `onAppSwitch` 逻辑从 `main.ts` 移入 `EditorUILayer`
-
----
-
-### Phase 4：创建双入口（main.ts / player.ts）（20 分钟）
-
-#### 4.1 重构 main.ts（编辑器入口）
-
-```typescript
-import { AppHost } from './host/AppHost';
-import { EditorUILayer } from './ui/layers/EditorUILayer';
-
-const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-const uiContainer = document.getElementById('ui-container')!;
-
-async function main() {
-  if (!navigator.gpu) {
-    document.getElementById('error')!.textContent = 'WebGPU is not supported.';
-    return;
-  }
-
-  try {
-    const host = new AppHost(canvas, uiContainer);
-    await host.init();
-
-    const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
-    await host.loadApp(appName);
-
-    // 挂载编辑器层（含命令总线、输入管理器、面板）
-    host.mountLayer(new EditorUILayer());
-
-    // 加载 App 自定义 UI
-    await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
-
-    window.addEventListener('resize', () => host.resize());
-    host.startLoop();
-
-    (window as any).host = host;
-    console.log('[ShaderLab] editor mode initialized');
-  } catch (err) {
-    console.error(err);
-    document.getElementById('error')!.textContent = `Error: ${err}`;
-  }
-}
-
-main();
-```
-
-#### 4.2 新建 player.ts（运行时入口）
-
-```typescript
-import { AppHost } from './host/AppHost';
-
-const canvas = document.getElementById('canvas') as HTMLCanvasElement;
-const uiContainer = document.getElementById('ui-container')!;
-
-async function main() {
-  if (!navigator.gpu) {
-    document.getElementById('error')!.textContent = 'WebGPU is not supported.';
-    return;
-  }
-
-  try {
-    const host = new AppHost(canvas, uiContainer);
-    await host.init();
-
-    const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
-    await host.loadApp(appName);
-
-    // ❌ 不挂载 EditorUILayer
-    // ❌ 不加载 EditorInputManager
-
-    // ✅ 仅加载 App 自定义 UI
-    await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
-
-    window.addEventListener('resize', () => host.resize());
-    host.startLoop();
-
-    (window as any).host = host;
-    console.log('[ShaderLab] player mode initialized');
-  } catch (err) {
-    console.error(err);
-    document.getElementById('error')!.textContent = `Error: ${err}`;
-  }
-}
-
-main();
-```
-
----
-
-### Phase 5：实现 App 自定义 UI 数据驱动加载（30 分钟）
-
-在 `AppHost` 中实现：
-
-```typescript
-private appUILayers: Array<{ id: string; unmount: () => void }> = [];
-
-async loadAppUI(appBase: string) {
-  // 清理旧的 App UI
-  for (const layer of this.appUILayers) layer.unmount();
-  this.appUILayers = [];
-
-  const manifestResp = await fetch(`${appBase}/app.json`);
-  if (!manifestResp.ok) return;
-  const manifest = await manifestResp.json();
-  if (!manifest.ui) return;
-
-  const configs = await fetch(`${appBase}/${manifest.ui}`).then(r => r.json());
-  for (const cfg of configs) {
-    const container = document.querySelector(cfg.container) ?? this.createContainer(cfg.id);
-    const mod = await this.loadUIScript(`${appBase}/${cfg.source}`);
-    const unmount = mod.mount(container, this);
-    this.appUILayers.push({ id: cfg.id, unmount });
-  }
-}
-
-private createContainer(id: string): HTMLElement {
-  const el = document.createElement('div');
-  el.id = `ui-${id}`;
-  this.uiContainer.appendChild(el);
-  return el;
-}
-
-private async loadUIScript(url: string): Promise<{ mount: Function; unmount?: Function }> {
-  const resp = await fetch(`${url}?t=${Date.now()}`);
-  if (!resp.ok) throw new Error(`UI script not found: ${url}`);
-  const src = await resp.text();
-  const blob = new Blob([src], { type: 'text/javascript' });
-  const blobUrl = URL.createObjectURL(blob);
-  try {
-    const mod = await import(/* @vite-ignore */ blobUrl);
-    return mod.default ?? mod;
-  } finally {
-    URL.revokeObjectURL(blobUrl);
-  }
 }
 ```
 
-在 `apps/demo1/app.json` 中添加：
-```json
-{
-  "name": "demo1",
-  "ui": "ui-config.json"
+### 5.3 Vue 面板：ScriptEditorPanel.vue
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue';
+import { useHost } from '../composables/useHost';
+import { useSceneCommands } from '../composables/useSceneCommands';
+import CodeEditor from '../components/CodeEditor.vue';
+import { ReloadSystemScriptCommand, ReloadRenderScriptCommand } from '../../../editor/commands/ScriptCommands';
+
+const host = useHost();
+const cmds = useSceneCommands();
+
+const systemEntries = computed(() => host.engine.systemRegistry.getScriptSystemEntries());
+const renderScriptFiles = computed(() => host.engine.renderGraph.scriptFiles); // 需暴露
+
+const selectedEntry = ref<string>('');
+const selectedFile = ref<string>('');
+const activeTab = ref<'system' | 'render'>('system');
+
+const sourceCache = ref<Record<string, string>>({});
+
+async function selectSystem(name: string) {
+    selectedEntry.value = name;
+    activeTab.value = 'system';
+    if (!sourceCache.value[name]) {
+        const srcPath = host.engine.systemRegistry.getScriptSource(name);
+        if (srcPath) {
+            const url = srcPath.startsWith('/') ? srcPath : `${host.engine.engineConfig.appsRoot}/${host.engine.currentApp}/${srcPath}`;
+            const resp = await fetch(url);
+            sourceCache.value[name] = resp.ok ? await resp.text() : '// failed to load';
+        }
+    }
+}
+
+async function selectRender(file: string) {
+    selectedFile.value = file;
+    activeTab.value = 'render';
+    if (!sourceCache.value[file]) {
+        const url = `${host.engine.engineConfig.dataRoot}/${host.engine.renderGraph.scriptsSubdir}/${file}`;
+        const resp = await fetch(url);
+        sourceCache.value[file] = resp.ok ? await resp.text() : '// failed to load';
+    }
+}
+
+function onSave(code: string) {
+    if (activeTab.value === 'system' && selectedEntry.value) {
+        const prev = sourceCache.value[selectedEntry.value] ?? '';
+        sourceCache.value[selectedEntry.value] = code;
+        cmds.dispatch(new ReloadSystemScriptCommand(selectedEntry.value, code, prev));
+    } else if (activeTab.value === 'render' && selectedFile.value) {
+        const prev = sourceCache.value[selectedFile.value] ?? '';
+        sourceCache.value[selectedFile.value] = code;
+        cmds.dispatch(new ReloadRenderScriptCommand(selectedFile.value, code, prev));
+    }
+}
+</script>
+
+<template>
+    <div class="script-panel">
+        <div class="file-tree">
+            <div class="tree-title">System Scripts</div>
+            <div v-for="e in systemEntries" :key="e" 
+                 :class="['tree-item', { active: activeTab === 'system' && selectedEntry === e }]"
+                 @click="selectSystem(e)">{{ e }}</div>
+            <div class="tree-title" style="margin-top:12px">Render Scripts</div>
+            <div v-for="f in renderScriptFiles" :key="f"
+                 :class="['tree-item', { active: activeTab === 'render' && selectedFile === f }]"
+                 @click="selectRender(f)">{{ f }}</div>
+        </div>
+        <div class="editor-wrap">
+            <CodeEditor v-if="activeTab === 'system' && selectedEntry" 
+                        :modelValue="sourceCache[selectedEntry] ?? ''" 
+                        language="js"
+                        @save="onSave" />
+            <CodeEditor v-else-if="activeTab === 'render' && selectedFile"
+                        :modelValue="sourceCache[selectedFile] ?? ''"
+                        language="js"
+                        @save="onSave" />
+            <div v-else class="empty">Select a script</div>
+        </div>
+    </div>
+</template>
+
+<style>
+.script-panel { display: flex; height: 100%; }
+.file-tree { width: 200px; overflow-y: auto; border-right: 1px solid #333; }
+.tree-title { padding: 6px; font-weight: bold; color: #888; background: #1a1a1a; }
+.tree-item { padding: 4px 10px; cursor: pointer; color: #ccc; font-size: 12px; }
+.tree-item:hover { background: #2a2a2a; }
+.tree-item.active { background: #1a4d8f; color: #fff; }
+.editor-wrap { flex: 1; display: flex; flex-direction: column; }
+.empty { padding: 20px; color: #666; }
+</style>
+```
+
+**验收标准**：
+- [ ] 列出所有 script-loaded system entries 和 render script files
+- [ ] 点击 entry 加载源码到 CodeEditor
+- [ ] Ctrl+S 保存后，3D 场景行为立即变化（验证热重载）
+- [ ] Undo 可恢复旧脚本行为
+- [ ] Vue 面板内无 `commandBus` 直接引用，全部通过 `useSceneCommands` 走 `host.dispatch`
+
+---
+
+## 六、Phase 3：WGSL 编辑器（4-6 小时）
+
+### 6.1 约束声明
+
+WGSL 热重载**仅限算法修改**（函数体、数值常量、分支逻辑），**禁止修改接口结构**：
+- 不得新增/删除 `@group`、`@binding`
+- 不得修改 `fn` 的 entry point 名称（如 `vs_main`、`fs_main`）
+- 不得修改 vertex buffer 的 `@location` 布局
+
+保存时通过简单正则检查，若发现接口变更则拒绝热重载并提示用户：*"Interface change detected. Please modify pipeline.json and reload the app."*
+
+### 6.2 Core 侧：PipelineLoader Shader 热重载
+
+修改 `src/core/render/PipelineLoader.ts`，新增：
+
+```ts
+/** Reverse index: shader ref -> list of pipeline paths that use it. */
+private static shaderToPipelines = new Map<string, string[]>();
+
+/** List all shader refs currently loaded, with their referencing pipelines. */
+static listShaderRefs(): Array<{ ref: string; pipelines: string[] }> {
+    return [...this.shaderToPipelines.entries()].map(([ref, pipelines]) => ({ ref, pipelines }));
+}
+
+/** Hot-reload a shader module by its internal key. Returns affected pipeline paths.
+ *  Throws if the new source fails shader module creation. */
+static hotReloadShader(device: GPUDevice, shaderKey: string, newSrc: string): string[] {
+    if (!this.shaderModules.has(shaderKey)) {
+        throw new Error(`Shader '${shaderKey}' not loaded`);
+    }
+    // 预创建 module 验证语法（若失败会抛出，不会污染缓存）
+    const newModule = device.createShaderModule({ label: shaderKey, code: newSrc });
+    this.shaderModules.set(shaderKey, newModule);
+    return this.shaderToPipelines.get(shaderKey) ?? [];
+}
+
+// 在 buildRender() / loadCompute() 中，编译 shader 后记录反向索引：
+// this.shaderToPipelines.set(vsKey, [...(this.shaderToPipelines.get(vsKey) ?? []), configPath]);
+```
+
+修改 `src/core/render/RenderGraph.ts`，新增代理：
+
+```ts
+/** Rebuild all pipelines that reference the given shader key.
+ *  If any rebuild fails (e.g. interface mismatch), the error is caught and
+ *  logged, but other pipelines continue. The shader module itself is already
+ *  replaced in PipelineLoader; if rebuild fails the old pipeline stays bound
+ *  until the error is fixed. */
+rebuildPipelineByShader(device: GPUDevice, shaderKey: string, newSrc: string): void {
+    try {
+        const affected = PipelineLoader.hotReloadShader(device, shaderKey, newSrc);
+        for (const path of affected) {
+            try {
+                this.rebuildPipeline(device, path);
+            } catch (e) {
+                console.error(`[RenderGraph] rebuild pipeline '${path}' failed after shader reload:`, e);
+            }
+        }
+    } catch (e) {
+        console.error(`[RenderGraph] shader hot reload failed for '${shaderKey}':`, e);
+        throw e; // 让命令层知道失败，不执行
+    }
 }
 ```
 
-创建 `apps/demo1/ui-config.json`：
-```json
-[
-  {
-    "id": "demo-hud",
-    "source": "ui/demoHUD.js",
-    "container": "#hud-container"
-  }
-]
-```
+### 6.3 新增命令
 
-创建 `apps/demo1/ui/demoHUD.js`：
-```javascript
-export function mount(container, host) {
-  const btn = document.createElement('button');
-  btn.textContent = 'Click Me';
-  btn.onclick = () => {
-    host.eventBus.emit('toast:show', 'Hello from App UI!');
-  };
-  container.appendChild(btn);
-  return () => { btn.remove(); };
+**`src/editor/commands/ShaderCommands.ts`**：
+
+```ts
+import type { Command, CommandContext } from './Command';
+
+export class HotReloadShaderCommand implements Command {
+    readonly type = 'hotReloadShader';
+    readonly description = 'hotReloadShader';
+    constructor(
+        private shaderKey: string,
+        private nextSource: string,
+        private prevSource: string,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.rebuildPipelineByShader(ctx.engine.device, this.shaderKey, this.nextSource);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        ctx.engine.renderGraph.rebuildPipelineByShader(ctx.engine.device, this.shaderKey, this.prevSource);
+        return true;
+    }
 }
 ```
 
+### 6.4 Vue 面板：WgslEditorPanel.vue
+
+```vue
+<script setup lang="ts">
+import { ref, computed } from 'vue';
+import { useHost } from '../composables/useHost';
+import { useSceneCommands } from '../composables/useSceneCommands';
+import CodeEditor from '../components/CodeEditor.vue';
+import { HotReloadShaderCommand } from '../../../editor/commands/ShaderCommands';
+import { PipelineLoader } from '../../../core/render/PipelineLoader';
+
+const host = useHost();
+const cmds = useSceneCommands();
+
+const shaderList = computed(() => PipelineLoader.listShaderRefs());
+const selectedShader = ref<string>('');
+
+const sourceCache = ref<Record<string, string>>({});
+
+// 接口变更检测正则
+const INTERFACE_RE = /@(group|binding|location|builtin)\b|^\s*fn\s+(vs_main|fs_main|cs_main|main)\s*\(/m;
+
+async function selectShader(ref: string) {
+    selectedShader.value = ref;
+    if (!sourceCache.value[ref]) {
+        // 从 PipelineLoader 获取原始 source（需新增缓存）
+        // 若未缓存，从 fetch 回读原始文件
+        sourceCache.value[ref] = '// TODO: load original source';
+    }
+}
+
+function onSave(code: string) {
+    const key = selectedShader.value;
+    // 简单接口变更检测：比较新旧代码中接口声明的数量和位置
+    const prev = sourceCache.value[key] ?? '';
+    const prevInterfaces = (prev.match(INTERFACE_RE) || []).sort().join(',');
+    const nextInterfaces = (code.match(INTERFACE_RE) || []).sort().join(',');
+    if (prevInterfaces !== nextInterfaces) {
+        alert('Interface change detected. Please modify pipeline.json and reload the app.');
+        return;
+    }
+    sourceCache.value[key] = code;
+    cmds.dispatch(new HotReloadShaderCommand(key, code, prev));
+}
+</script>
+
+<template>
+    <div class="shader-panel">
+        <div class="file-tree">
+            <div class="tree-title">Shaders</div>
+            <div v-for="s in shaderList" :key="s.ref"
+                 :class="['tree-item', { active: selectedShader === s.ref }]"
+                 @click="selectShader(s.ref)">
+                <div class="ref">{{ s.ref }}</div>
+                <div class="meta">{{ s.pipelines.length }} pipeline(s)</div>
+            </div>
+        </div>
+        <div class="editor-wrap">
+            <CodeEditor v-if="selectedShader"
+                        :modelValue="sourceCache[selectedShader] ?? ''"
+                        language="wgsl"
+                        @save="onSave" />
+            <div v-else class="empty">Select a shader</div>
+        </div>
+    </div>
+</template>
+
+<style>
+.shader-panel { display: flex; height: 100%; }
+.file-tree { width: 240px; overflow-y: auto; border-right: 1px solid #333; }
+.ref { font-size: 12px; color: #ccc; }
+.meta { font-size: 10px; color: #888; }
+/* 复用 script-panel 样式 */
+</style>
+```
+
+**注意**：WGSL 原始源码获取需要 `PipelineLoader` 缓存原始文本。在 `ensureShaderModule` 中增加：
+
+```ts
+private static shaderSourceCache = new Map<string, string>();
+
+static getShaderSource(key: string): string | undefined {
+    return this.shaderSourceCache.get(key);
+}
+
+private static async shaderSource(base: ShaderBase, shaderRef: string): Promise<string> {
+    // ... 原有逻辑 ...
+    const src = await this.shaderSource(base, shaderRef);
+    this.shaderSourceCache.set(key, src); // 缓存原始文本
+    return src;
+}
+```
+
+**验收标准**：
+- [ ] 列出所有被 pipeline 引用的 shader
+- [ ] 修改 WGSL 算法后保存，关联 pipeline 自动重建，渲染效果变化
+- [ ] 若修改 `@binding` / entry point 等接口，保存被拒绝并提示
+- [ ] Undo 恢复旧 shader
+- [ ] 单个 pipeline 重建失败不影响其他 pipeline
+
 ---
 
-### Phase 6：清理遗留文件与验证（20 分钟）
+## 七、Phase 4：Pipeline 节点编辑器（Pipeline Node Editor）（16-24 小时）
 
-1. **删除以下旧文件**（内容已迁移）：
-   - `src/editor/EditorHost.ts`（已重命名为 EditorCommandBus）
-   - `src/tools/`（已移动到 `src/editor/input/`）
+### 7.1 设计约束
 
-2. **验证编译**：
-   ```bash
-   npx tsc --noEmit
-   ```
-   确保无 import 路径错误。
+- **4A 只读**：先把当前 Render Graph 可视化出来，不可编辑，验证双向转换器
+- **4B 编辑**：仅支持以下操作，**禁止**直接整体替换 `RenderGraphData`
+  - 修改节点 `enabled` / `params` → 走 `PatchRenderGraphCommand`
+  - 新增 PipelineEntry → 走 `AddPipelineEntryCommand`
+  - 删除 PipelineEntry → 走 `RemovePipelineEntryCommand`
+  - 移动节点到另一 phase → 走 `MovePipelineEntryCommand`
 
-3. **验证构建**：
-   ```bash
-   npm run build
-   ```
-   确保 `dist/` 下同时存在 `index.html` 和 `player.html` 的入口。
+### 7.2 Core 侧：RenderGraph 增删接口
+
+修改 `src/core/render/RenderGraph.ts`，新增安全入口：
+
+```ts
+/** Add a new pipeline entry to a phase. The pipeline must already be compiled.
+ *  Returns the newly created PipelineDriver. */
+addPipelineEntry(phaseName: string, entry: PipelineEntry): PipelineDriver {
+    const phase = this.phases[phaseName];
+    if (!phase) throw new Error(`Phase '${phaseName}' not found`);
+    if (phase.some(e => e.name === entry.name)) {
+        throw new Error(`Pipeline entry '${entry.name}' already exists in phase '${phaseName}'`);
+    }
+    phase.push(entry);
+    
+    // 若 pipeline 已编译，创建 driver
+    const pipeline = this.pipelines.get(entry.pipeline);
+    const config = PipelineLoader.getConfig(entry.pipeline);
+    const decl = config?.renderer;
+    if (!decl) throw new Error(`Pipeline '${entry.pipeline}' has no renderer decl`);
+    
+    const driver = new PipelineDriver(entry.pipeline, decl, entry, this.valueScripts, this.geometryHooks, this.computeHooks);
+    driver.dataBase = this.dataBase;
+    driver.aux = decl.aux ?? {};
+    if (decl.query) {
+        driver.query = defineQuery(decl.query.map(name => {
+            const comp = schemaRegistry.get(name);
+            if (!comp) throw new Error(`...`);
+            return comp;
+        }));
+    }
+    this.drivers.push(driver);
+    return driver;
+}
+
+/** Remove a pipeline entry by name from all phases. */
+removePipelineEntry(name: string): void {
+    for (const phase of this.phaseList) {
+        const list = this.phases[phase.name] ?? [];
+        const idx = list.findIndex(e => e.name === name);
+        if (idx >= 0) {
+            list.splice(idx, 1);
+            break;
+        }
+    }
+    const dIdx = this.drivers.findIndex(d => d.entry.name === name);
+    if (dIdx >= 0) {
+        this.drivers[dIdx].dispose();
+        this.drivers.splice(dIdx, 1);
+    }
+}
+
+/** Move an entry from one phase to another. */
+movePipelineEntry(name: string, toPhase: string): void {
+    let entry: PipelineEntry | undefined;
+    for (const phase of this.phaseList) {
+        const list = this.phases[phase.name] ?? [];
+        const idx = list.findIndex(e => e.name === name);
+        if (idx >= 0) {
+            entry = list.splice(idx, 1)[0];
+            break;
+        }
+    }
+    if (!entry) throw new Error(`Pipeline entry '${name}' not found`);
+    const targetList = this.phases[toPhase] ?? [];
+    targetList.push({ ...entry, phase: toPhase } as PipelineEntry);
+}
+```
+
+### 7.3 新增命令
+
+修改/扩展 `src/editor/commands/RenderGraphCommands.ts`：
+
+```ts
+export class PatchRenderGraphCommand implements Command {
+    // ... 保持原有逻辑，但明确限制：
+    // 仅更新 enabled 和 params，不处理增删改 phase ...
+}
+
+export class AddPipelineEntryCommand implements Command {
+    readonly type = 'addPipelineEntry';
+    readonly description = 'addPipelineEntry';
+    private prevDriversJson?: string;
+    constructor(
+        private phaseName: string,
+        private entry: PipelineEntry,
+    ) {}
+
+    execute(ctx: CommandContext): boolean {
+        this.prevDriversJson = JSON.stringify(ctx.engine.renderGraph.toData());
+        ctx.engine.renderGraph.addPipelineEntry(this.phaseName, this.entry);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        if (!this.prevDriversJson) return false;
+        ctx.engine.renderGraph.removePipelineEntry(this.entry.name);
+        return true;
+    }
+}
+
+export class RemovePipelineEntryCommand implements Command {
+    readonly type = 'removePipelineEntry';
+    readonly description = 'removePipelineEntry';
+    private backupEntry?: PipelineEntry;
+    private backupPhase?: string;
+    constructor(private name: string) {}
+
+    execute(ctx: CommandContext): boolean {
+        for (const phase of ctx.engine.renderGraph.getPhaseNames()) {
+            const list = ctx.engine.renderGraph.phases[phase] ?? [];
+            const target = list.find(e => e.name === this.name);
+            if (target) {
+                this.backupPhase = phase;
+                this.backupEntry = { ...target };
+                ctx.engine.renderGraph.removePipelineEntry(this.name);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        if (!this.backupEntry || !this.backupPhase) return false;
+        ctx.engine.renderGraph.addPipelineEntry(this.backupPhase, this.backupEntry);
+        return true;
+    }
+}
+
+export class MovePipelineEntryCommand implements Command {
+    readonly type = 'movePipelineEntry';
+    readonly description = 'movePipelineEntry';
+    private fromPhase?: string;
+    constructor(private name: string, private toPhase: string) {}
+
+    execute(ctx: CommandContext): boolean {
+        for (const phase of ctx.engine.renderGraph.getPhaseNames()) {
+            const list = ctx.engine.renderGraph.phases[phase] ?? [];
+            if (list.some(e => e.name === this.name)) {
+                this.fromPhase = phase;
+                ctx.engine.renderGraph.movePipelineEntry(this.name, this.toPhase);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        if (!this.fromPhase) return false;
+        ctx.engine.renderGraph.movePipelineEntry(this.name, this.fromPhase);
+        return true;
+    }
+}
+```
+
+### 7.4 节点图数据模型与转换器
+
+**`src/ui/vue/nodeGraph/types.ts`**：
+
+```ts
+export type NodeType = 'renderPass' | 'computePass' | 'resource';
+
+export interface GraphNode {
+    id: string;
+    type: NodeType;
+    label: string;
+    data: {
+        pipeline?: string;
+        phase?: string;
+        enabled?: boolean;
+        targetColor?: string[];
+        targetDepth?: string;
+    };
+    position: { x: number; y: number };
+}
+
+export interface GraphEdge {
+    id: string;
+    source: string;
+    sourceHandle: string;
+    target: string;
+    targetHandle: string;
+}
+```
+
+**`src/ui/vue/nodeGraph/graphAdapter.ts`**：
+
+```ts
+import type { RenderGraphData, PipelineConfig } from '../../../core/render/types';
+import type { GraphNode, GraphEdge } from './types';
+
+export function renderGraphToNodes(
+    data: RenderGraphData,
+    configs: Map<string, PipelineConfig>,
+): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    const nodes: GraphNode[] = [];
+    const edges: GraphEdge[] = [];
+    let y = 0;
+
+    for (const phaseName of Object.keys(data.phases)) {
+        const entries = data.phases[phaseName] ?? [];
+        for (const entry of entries) {
+            const config = configs.get(entry.pipeline);
+            const decl = config?.renderer;
+            const node: GraphNode = {
+                id: `${phaseName}_${entry.name}`,
+                type: entry.kind === 'compute' ? 'computePass' : 'renderPass',
+                label: entry.name,
+                data: {
+                    pipeline: entry.pipeline,
+                    phase: phaseName,
+                    enabled: entry.enabled,
+                    targetColor: typeof decl?.target?.color === 'string' 
+                        ? [decl.target.color] 
+                        : decl?.target?.color,
+                    targetDepth: decl?.target?.depth,
+                },
+                position: { x: 200, y: y * 100 },
+            };
+            nodes.push(node);
+            y++;
+        }
+    }
+
+    // 资源节点
+    const resourceNodes = new Map<string, GraphNode>();
+    for (const n of nodes) {
+        for (const c of n.data.targetColor ?? []) {
+            if (c !== 'screen' && c !== 'scene' && !resourceNodes.has(c)) {
+                const rn: GraphNode = { id: `res_${c}`, type: 'resource', label: c, data: {}, position: { x: 500, y: resourceNodes.size * 80 } };
+                resourceNodes.set(c, rn);
+            }
+        }
+    }
+    nodes.push(...resourceNodes.values());
+
+    for (const n of nodes) {
+        if (n.type === 'renderPass' || n.type === 'computePass') {
+            for (const c of n.data.targetColor ?? []) {
+                edges.push({ id: `${n.id}_to_${c}`, source: n.id, sourceHandle: 'out', target: `res_${c}`, targetHandle: 'in' });
+            }
+        }
+    }
+
+    return { nodes, edges };
+}
+```
+
+### 7.5 Vue Flow 面板
+
+**`src/ui/vue/panels/PipelineNodeEditor.vue`**：
+
+```vue
+<script setup lang="ts">
+import { ref, computed, watch } from 'vue';
+import { VueFlow, useVueFlow } from '@vue-flow/core';
+import { Background } from '@vue-flow/background';
+import { Controls } from '@vue-flow/controls';
+import '@vue-flow/core/dist/style.css';
+
+import { useHost } from '../composables/useHost';
+import { useSceneCommands } from '../composables/useSceneCommands';
+import { renderGraphToNodes } from '../nodeGraph/graphAdapter';
+import { PatchRenderGraphCommand, AddPipelineEntryCommand, RemovePipelineEntryCommand } from '../../../editor/commands/RenderGraphCommands';
+import { PipelineLoader } from '../../../core/render/PipelineLoader';
+
+const host = useHost();
+const cmds = useSceneCommands();
+const { addNodes, addEdges } = useVueFlow();
+
+const nodes = ref<any[]>([]);
+const edges = ref<any[]>([]);
+
+function loadGraph() {
+    const data = host.engine.renderGraph.toData();
+    const configs = new Map<string, any>();
+    for (const phase of host.engine.renderGraph.getPhaseNames()) {
+        for (const entry of host.engine.renderGraph.phases[phase] ?? []) {
+            const c = PipelineLoader.getConfig(entry.pipeline);
+            if (c) configs.set(entry.pipeline, c);
+        }
+    }
+    const graph = renderGraphToNodes(data, configs);
+    nodes.value = graph.nodes.map(n => ({
+        id: n.id,
+        type: 'default',
+        label: n.label,
+        position: n.position,
+        data: n.data,
+    }));
+    edges.value = graph.edges.map(e => ({
+        id: e.id,
+        source: e.source,
+        target: e.target,
+    }));
+}
+
+loadGraph();
+
+import { useEditorEvent } from '../composables/useEditorEvent';
+useEditorEvent('editor:changed', () => loadGraph());
+
+// 4B：应用字段级变更（enabled/params）
+function applyParams() {
+    const prev = JSON.stringify(host.engine.renderGraph.toData());
+    const nextData = host.engine.renderGraph.toData();
+    // 将 nodes 中的 enabled 同步回 nextData
+    for (const n of nodes.value) {
+        if (n.data?.phase && n.data?.enabled !== undefined) {
+            const list = nextData.phases[n.data.phase] ?? [];
+            const target = list.find((e: any) => e.name === n.label);
+            if (target) target.enabled = n.data.enabled;
+        }
+    }
+    cmds.dispatch(new PatchRenderGraphCommand(nextData, prev));
+}
+
+// 4B：删除节点
+function removeNode(nodeId: string) {
+    const name = nodeId.split('_').slice(1).join('_'); // 从 id 还原 name
+    cmds.dispatch(new RemovePipelineEntryCommand(name));
+}
+</script>
+
+<template>
+    <div class="node-editor">
+        <div class="toolbar">
+            <button @click="loadGraph">Reset View</button>
+            <button @click="applyParams">Apply Params</button>
+        </div>
+        <VueFlow v-model:nodes="nodes" v-model:edges="edges" fit-view-on-init @nodeDoubleClick="(e) => removeNode(e.node.id)">
+            <Background pattern-color="#333" gap="16" />
+            <Controls />
+        </VueFlow>
+    </div>
+</template>
+
+<style>
+.node-editor { height: 100%; display: flex; flex-direction: column; }
+.toolbar { padding: 6px; background: #1a1a1a; border-bottom: 1px solid #333; }
+.toolbar button { margin-right: 8px; }
+.vue-flow { flex: 1; background: #111; }
+</style>
+```
+
+**验收标准（分阶段）**：
+
+**阶段 A（只读）**：
+- [ ] 节点图正确展示当前所有 Render Pass / Compute Pass / Resource
+- [ ] 边正确连接 Pass 与 Target
+- [ ] 切换 App 后节点图自动刷新
+
+**阶段 B（可编辑）**：
+- [ ] 修改节点 `enabled` 后 Apply，通过 `PatchRenderGraphCommand` 生效
+- [ ] 双击节点删除，通过 `RemovePipelineEntryCommand` 生效，可 Undo
+- [ ] 新增节点通过 `AddPipelineEntryCommand` 生效（需 UI 设计添加对话框）
+- [ ] 无 `renderGraph.fromData()` 的整体替换调用
 
 ---
 
-## 四、验收检查清单
+## 八、总体验收清单
 
-### 1. 编辑器模式（`npm run dev` → 访问 `index.html`）
-
-- [ ] 场景树显示所有实体，点击实体高亮
-- [ ] 属性面板修改字段，3D 场景实时更新
-- [ ] 管线面板修改拓扑/混合模式，渲染效果变化
-- [ ] 点击 3D 视口内的模型，场景树自动高亮（验证 `EditorInputManager` + `tools.json` 加载）
-- [ ] `Ctrl+Z` / `Ctrl+Y` 撤销/重做正常工作
-- [ ] 切换 App（如 `?app=demo2`）后编辑器面板正确刷新
-
-### 2. 运行时模式（`npm run dev` → 访问 `player.html`）
-
-- [ ] 页面仅显示 3D 画布和 App UI（无场景树/管线面板）
-- [ ] 点击 3D 视口无拾取反应（无 `editor:select` 事件）
-- [ ] 控制台无报错
-- [ ] 插件系统正常加载（验证 `registerToolType` 在 player 模式下不崩溃）
-
-### 3. App 自定义 UI
-
-- [ ] `apps/demo1/ui/demoHUD.js` 成功加载，按钮显示
-- [ ] 点击按钮，`toast:show` 事件被触发
-
-### 4. 架构规则验证
-
-- [ ] `src/core/` 下无任何文件 import `src/host/` 或 `src/ui/`
-- [ ] `src/ui/` 下无文件直接调用 `scene.setField`（必须通过 `host.dispatch`）
+| 检查项 | 标准 |
+|--------|------|
+| 架构铁律 | `src/ui/vue/` 下无任何文件直接调用 `scene.setField` 或 `renderGraph.fromData` |
+| 命令闭环 | 所有保存/应用操作都产生可 Undo 的 Command，通过 `host.dispatch()` 下发 |
+| 零感知 | Vue 组件不直接引用 `EditorCommandBus`，只通过 `useSceneCommands` 访问 |
+| 热重载 | Script / WGSL 修改后无需刷新页面，3D 场景立即响应 |
+| 接口保护 | WGSL 热重载拒绝接口变更，提示用户修改 pipeline.json |
+| 结构隔离 | `PatchRenderGraphCommand` 仅处理 enabled/params；增删节点走独立命令 |
+| 共存 | 原生 Scene / Pipeline 面板与 Vue 面板可正常切换，互不干扰 |
+| 卸载 | `EditorUILayer.unmount()` 时所有 Vue app 正确 `unmount()` |
 
 ---
 
-## 五、回滚策略
+## 九、工作量汇总
 
-如果上述验收项任意 **2 项失败**：
+| Phase | 内容 | 预计时间 |
+|-------|------|---------|
+| 0 | Vue 基础设施 + CodeEditor + EditorUILayer 改造 | 1 天 |
+| 1 | 资源视图（只读） | 0.5 天 |
+| 2 | 脚本编辑器（System/Render Script 热重载） | 1-1.5 天 |
+| 3 | WGSL 编辑器（Shader 热重载 + 接口保护） | 0.5-1 天 |
+| 4A | Pipeline 节点编辑器（只读可视化） | 1 天 |
+| 4B | Pipeline 节点编辑器（可编辑 + 独立命令） | 1-2 天 |
+| **总计** | | **4.5-7 天** |
 
-1. 立即停止修改，不要强行修复
-2. 执行 `git reset --hard HEAD` 回退到重构前的 commit
-3. 记录失败的验收项及错误日志，分析根因后重新执行
-
----
-
-## 六、风险与注意事项
-
-| 风险 | 缓解措施 |
-|------|---------|
-| `ToolSystem` 迁移后事件绑定失效 | `EditorInputManager` 封装的是 `loadTools` 和 `dispose`，不虚构 `attach/detach` API |
-| `player.ts` 下插件调用 `registerToolType` 崩溃 | 将模块级 `TOOL_REGISTRY` 保留在 `src/core/tools/ToolRegistry.ts`，与 `ToolSystem` 类解耦 |
-| `EditorPanel` / `PipelinePanel` 找不到挂载点 | `EditorUILayer.mount()` 负责构建 tab DOM 结构，面板挂载到子容器 |
-| `tools.json` 加载时机丢失 | `EditorUILayer.mount()` 中主动 fetch `app.json` 并加载 `tools.json` |
-| Vite 不打包 `player.html` | Phase 0 中已在 `vite.config.ts` 配置 `rollupOptions.input` |
-| Vue 引入导致构建问题 | 本次仅安装插件，不迁移现有面板，不影响现有构建 |
-
----
-
-**预估总时间**：约 3.5 小时（含验收）。
-
-**执行开始**：从 Phase 0 依次向下执行，每个 Phase 完成后执行一次 `git commit -m "phase N: ..."`，方便回滚。
+**建议执行顺序**：0 → 1 → 2 → 3 → 4A → 4B。每个 Phase 完成后运行 `npx tsc --noEmit` 确保类型安全。

@@ -23,11 +23,13 @@ export class EditorUILayer implements UILayer {
     private unsubscribeChanged?: () => void;
     private undoBtn?: HTMLButtonElement;
     private redoBtn?: HTMLButtonElement;
+    private resizer?: HTMLElement;
 
     async mount(container: HTMLElement, host: AppHost) {
         this.host = host;
         const toolbar = this.findOrCreate(container, 'toolbar');
         const sidebar = this.findOrCreate(container, 'sidebar');
+        this.attachSidebarResizer(sidebar);
 
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
         this.commandBus = new EditorCommandBus(host.engine);
@@ -104,6 +106,42 @@ export class EditorUILayer implements UILayer {
         // ── 10. Toolbar button states follow the command bus ──
         this.unsubscribeChanged = host.eventBus.on('editor:changed', () => this.refreshToolbar());
         this.refreshToolbar();
+    }
+
+    /** Wire the sidebar drag handle (in #main) so the right panel width can be
+     *  dragged between its min/max CSS bounds. Pointer events + setPointerCapture
+     *  keep the drag running outside the handle; body cursor/user-select are
+     *  toggled so text selection doesn't fight the resize. */
+    private attachSidebarResizer(sidebar: HTMLElement): void {
+        const main = sidebar.parentElement;
+        if (!main) return;
+        const resizer = main.querySelector<HTMLElement>('#sidebar-resizer');
+        if (!resizer) return;
+        this.resizer = resizer;
+
+        const onPointerDown = (e: PointerEvent) => {
+            e.preventDefault();
+            resizer.setPointerCapture(e.pointerId);
+            resizer.classList.add('dragging');
+            document.body.classList.add('sidebar-resizing');
+            const startX = e.clientX;
+            const startWidth = sidebar.getBoundingClientRect().width;
+
+            const onMove = (ev: PointerEvent) => {
+                const next = startWidth + (ev.clientX - startX);
+                sidebar.style.width = `${Math.max(240, Math.min(640, next))}px`;
+            };
+            const onUp = (ev: PointerEvent) => {
+                resizer.releasePointerCapture(ev.pointerId);
+                resizer.classList.remove('dragging');
+                document.body.classList.remove('sidebar-resizing');
+                resizer.removeEventListener('pointermove', onMove);
+                resizer.removeEventListener('pointerup', onUp);
+            };
+            resizer.addEventListener('pointermove', onMove);
+            resizer.addEventListener('pointerup', onUp);
+        };
+        resizer.addEventListener('pointerdown', onPointerDown);
     }
 
     /** Refresh undo/redo button enabled state (stack emptiness). */
@@ -190,6 +228,7 @@ export class EditorUILayer implements UILayer {
         this.host = undefined;
         this.undoBtn = undefined;
         this.redoBtn = undefined;
+        this.resizer = undefined;
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */
