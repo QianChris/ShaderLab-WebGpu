@@ -91,7 +91,7 @@ export { EVENT_TYPES } from './core/events/eventTypes';
 export type { EventType } from './core/events/eventTypes';
 
 /* ── Tools ─────────────────────────────────────────────────────── */
-export type { ToolConfig, ToolContext, SceneTool } from './core/tools/SceneTool';
+export type { ToolConfig, ToolContext, SceneTool } from './editor/input/SceneTool';
 
 /* ── Math ──────────────────────────────────────────────────────── */
 export {

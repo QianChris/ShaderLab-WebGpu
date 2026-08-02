@@ -1,6 +1,6 @@
-import type { ToolFactory } from './SceneTool';
+import type { ToolFactory } from '../../editor/input/SceneTool';
 
-export type { ToolFactory } from './SceneTool';
+export type { ToolFactory } from '../../editor/input/SceneTool';
 
 /** Module-level registry of tool factories, keyed by config `type`. Populated
  *  entirely by plugins (ctx.registerToolType) — the engine ships no built-in

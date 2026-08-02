@@ -1,7 +1,7 @@
-import type { Scene } from '../ecs/Scene';
-import type { EventBus } from '../events/EventBus';
+import type { Scene } from '../../core/ecs/Scene';
+import type { EventBus } from '../../core/events/EventBus';
 import type { SceneTool, ToolConfig, ToolContext, ToolScriptModule } from './SceneTool';
-import { TOOL_REGISTRY } from './ToolRegistry';
+import { TOOL_REGISTRY } from '../../core/tools/ToolRegistry';
 
 export type { ToolFactory } from './SceneTool';
 

@@ -1,5 +1,5 @@
-import type { Scene } from '../ecs/Scene';
-import type { EventBus } from '../events/EventBus';
+import type { Scene } from '../../core/ecs/Scene';
+import type { EventBus } from '../../core/events/EventBus';
 
 export interface ToolConfig {
     /** Builtin tool name (e.g., "pick"). Mutually exclusive with `source`. */
