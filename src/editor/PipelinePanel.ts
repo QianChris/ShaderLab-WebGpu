@@ -58,13 +58,15 @@ export class PipelinePanel {
         this.render();
     }
 
-    /** Dispatch a pipeline config edit (topology/blend/cull/depth) + rebuild. */
+    /** Dispatch a pipeline config edit (topology/blend/cull/depth) + rebuild.
+     *  The panel mutates a deep copy; the command applies it to the live config. */
     private patchConfig(entry: PipelineEntry, mutate: (config: PipelineConfig) => void): void {
         const config = PipelineLoader.getConfig(entry.pipeline);
         if (!config) return;
         const prev = JSON.stringify(config);
-        mutate(config);
-        this.bus.mutatePipelineConfig(entry.pipeline, JSON.stringify(config), prev);
+        const next = JSON.parse(prev) as PipelineConfig;
+        mutate(next);
+        this.bus.mutatePipelineConfig(entry.pipeline, JSON.stringify(next), prev);
         this.render();
     }
 
