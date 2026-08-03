@@ -105,6 +105,10 @@ export class Engine {
     gltfMapping: GltfMapping | null = null;
     /** Currently loaded app id, or null before first load / after unload. */
     currentApp: string | null = null;
+    /** Scene file path (relative to the app base) for the current app — from
+     *  app.json's `scene` field, default "scene.json". Lets the editor write
+     *  scene edits back to the exact loaded file. */
+    sceneFile = 'scene.json';
     /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
     attachments = new Map<string, { obj: unknown; owner: string }>();
     /** Plain-object view of attachments handed to FrameContext / hooks. */
@@ -371,6 +375,7 @@ export class Engine {
             throw new Error(`App not found at ${base}/app.json. If you renamed the folder, update the "name" field in app.json to match.`);
         }
         const manifest = await manifestResp.json() as AppManifest;
+        this.sceneFile = manifest.scene ?? 'scene.json';
 
         // App-scoped plugins (unloaded on app switch). Loaded before systems.json
         // so plugin-registered systems are resolvable in the app's system order.
@@ -471,6 +476,7 @@ export class Engine {
         // registered under their own owner tag (swept via sweepPluginOwner).
         pluginManager.unloadAppPlugins();
         this.currentApp = null;
+        this.sceneFile = 'scene.json';
     }
 
     /** Resource counts for diagnostics / stress testing (delegates to ResourceManager). */

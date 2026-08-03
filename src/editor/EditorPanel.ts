@@ -310,7 +310,7 @@ export class EditorPanel {
         if (fs && fs.backend !== 'none') {
             try {
                 const appName = this.bus.engine.currentApp ?? 'scene';
-                await fs.writeFile(`apps/${appName}/scene.json`, text);
+                await fs.writeFile(`apps/${appName}/${this.bus.engine.sceneFile}`, text);
                 this.bus.clearDirty();
                 return;
             } catch (e) {
