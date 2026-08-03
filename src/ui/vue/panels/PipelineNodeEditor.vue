@@ -98,11 +98,8 @@ function applyGraph(mutate: (g: ShaderGraph) => void): void {
     loadGraph();
 }
 
-function addNode(): void {
-    const type = (window as unknown as { prompt: (m: string) => string | null }).prompt(
-        `Node type (${NODE_TYPES.join(' / ')}):`,
-    ) as string | null;
-    if (!type || !(NODE_TYPES as readonly string[]).includes(type)) {
+function addNode(type: string): void {
+    if (!(NODE_TYPES as readonly string[]).includes(type)) {
         statusMsg.value = 'Invalid node type';
         return;
     }
@@ -198,8 +195,7 @@ function selectNode(id: string): void {
             <select v-model="selectedName" @change="loadGraph">
                 <option v-for="g in graphNames" :key="g" :value="g">{{ g }}</option>
             </select>
-            <button @click="addNode">+ Node</button>
-            <button @click="commitParams">Apply Params</button>
+            <button @click="commitParams">Apply</button>
             <span class="status">{{ statusMsg }}</span>
         </div>
 
@@ -208,7 +204,14 @@ function selectNode(id: string): void {
             (or register one via RegisterShaderGraphCommand).
         </div>
 
-        <div v-else class="flow-wrap">
+        <div v-else class="flow-area">
+            <!-- Palette: click a node template to add it -->
+            <div class="palette">
+                <div class="palette-title">Add</div>
+                <button v-for="t in NODE_TYPES" :key="t" :class="['palette-item', `node-${t}`]"
+                        :title="`Add ${t} node`" @click="addNode(t)">{{ t }}</button>
+            </div>
+            <div class="flow-wrap">
             <VueFlow
                 :nodes="flowNodes"
                 :edges="flowEdges"
@@ -263,6 +266,7 @@ function selectNode(id: string): void {
                 <Background pattern-color="#333" :gap="16" />
                 <Controls />
             </VueFlow>
+            </div>
         </div>
 
         <!-- Node inspector: edit params sourced from component fields -->
@@ -309,6 +313,21 @@ function selectNode(id: string): void {
 .toolbar { padding: 6px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .toolbar select, .toolbar button { font-size: 11px; background: #2a3a5c; color: #ccc; border: 1px solid #3a4a6c; border-radius: 3px; padding: 2px 6px; }
 .status { color: #7fd8a8; font-size: 10px; margin-left: auto; }
+.flow-area { flex: 1; display: flex; min-height: 0; }
+.palette {
+    width: 80px; flex-shrink: 0; background: #1a1a1a; border-right: 1px solid #333;
+    display: flex; flex-direction: column; gap: 4px; padding: 6px;
+}
+.palette-title { color: #8899aa; font-size: 9px; text-transform: uppercase; font-weight: 600; }
+.palette-item {
+    font-size: 10px; padding: 4px 6px; border-radius: 3px; cursor: pointer;
+    border: 1px solid #3a4a6c; color: #ccc; background: #0d1b33; text-align: left;
+}
+.palette-item:hover { background: #1e2d44; border-color: #4a8fc7; }
+.palette-item.node-data { border-left: 3px solid #4a8fc7; }
+.palette-item.node-shader { border-left: 3px solid #2f7a58; }
+.palette-item.node-if { border-left: 3px solid #c77f4a; }
+.palette-item.node-foreach, .palette-item.node-loop { border-left: 3px solid #7a4ac7; }
 .flow-wrap { flex: 1; min-height: 0; position: relative; }
 .empty { padding: 20px; color: #667; }
 .vue-flow { flex: 1; background: #111; }
