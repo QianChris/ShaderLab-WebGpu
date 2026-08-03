@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue';
-import { VueFlow, useVueFlow, type Node, type Edge } from '@vue-flow/core';
+import { VueFlow, useVueFlow, Handle, Position, type Node, type Edge, type Connection } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import '@vue-flow/core/dist/style.css';
@@ -135,6 +135,21 @@ function removeNode(nodeId: string): void {
     });
 }
 
+/** Draw a new edge (vue-flow @connect). Constructs a ShaderGraphEdge from the
+ *  connection's source/target + handle ids and dispatches via applyGraph so
+ *  it enters the undo stack (same mechanism as commitParams). */
+function onConnect(conn: Connection): void {
+    if (!conn.source || !conn.target) return;
+    const edge: ShaderGraphEdge = {
+        id: `e${Date.now()}`,
+        source: conn.source,
+        sourceHandle: (conn.sourceHandle ?? 'out') as ShaderGraphEdge['sourceHandle'],
+        target: conn.target,
+        targetHandle: conn.targetHandle ?? 'in:0',
+    };
+    applyGraph(g => { g.edges.push(edge); });
+}
+
 /** Re-serialize the flow node data back into the graph. Fields edited in the
  *  inspector (see selectedNodeParams) mutate node.data.node, so we push the
  *  live node objects back into the graph and dispatch. */
@@ -185,34 +200,46 @@ function selectNode(id: string): void {
                 :node-types="{}"
                 fit-view-on-init
                 @ready="onFlowReady"
+                @connect="onConnect"
                 @node-click="({ node }) => selectNode(node.id)"
                 @node-double-click="({ node }) => removeNode(node.id)">
                 <template #node-data="{ data }">
                     <div class="gf-node node-data">
+                        <Handle type="source" :position="Position.Right" id="out" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">BufferHandle source</div>
                     </div>
                 </template>
                 <template #node-shader="{ data }">
                     <div class="gf-node node-shader">
+                        <Handle type="target" :position="Position.Left" id="in:0" />
+                        <Handle type="target" :position="Position.Left" id="in:1" style="top:60%" />
+                        <Handle type="target" :position="Position.Left" id="in:2" style="top:80%" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Compute shader</div>
                     </div>
                 </template>
                 <template #node-if="{ data }">
                     <div class="gf-node node-if">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Conditional</div>
                     </div>
                 </template>
                 <template #node-foreach="{ data }">
                     <div class="gf-node node-loop">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Iterate</div>
                     </div>
                 </template>
                 <template #node-loop="{ data }">
                     <div class="gf-node node-loop">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Loop</div>
                     </div>
