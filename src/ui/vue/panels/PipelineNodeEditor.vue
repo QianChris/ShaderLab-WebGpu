@@ -134,9 +134,22 @@ function removeNode(nodeId: string): void {
 
 /** Draw a new edge (vue-flow @connect). Constructs a ShaderGraphEdge from the
  *  connection's source/target + handle ids and dispatches via applyGraph so
- *  it enters the undo stack (same mechanism as commitParams). */
+ *  it enters the undo stack (same mechanism as commitParams). Connection
+ *  constraints are enforced by isValidConnection first. */
 function onConnect(conn: Connection): void {
+    if (!isValidConnection(conn)) {
+        statusMsg.value = 'invalid connection — data.out→shader.in:N only; body/next from control nodes';
+        return;
+    }
     if (!conn.source || !conn.target) return;
+    // Block duplicate edges (same source/handle → target/handle).
+    const graph = currentGraph();
+    if (graph?.edges.some(e =>
+        e.source === conn.source && e.sourceHandle === (conn.sourceHandle ?? 'out')
+        && e.target === conn.target && e.targetHandle === (conn.targetHandle ?? 'in:0'))) {
+        statusMsg.value = 'connection already exists';
+        return;
+    }
     const edge: ShaderGraphEdge = {
         id: `e${Date.now()}`,
         source: conn.source,
@@ -145,6 +158,29 @@ function onConnect(conn: Connection): void {
         targetHandle: conn.targetHandle ?? 'in:0',
     };
     applyGraph(g => { g.edges.push(edge); });
+    statusMsg.value = '';
+}
+
+/** Connection constraints:
+ *  - data.out → shader.in:N only (buffer binding)
+ *  - body/next from control nodes (if/foreach/loop) → any target (the
+ *    executor determines role by sourceHandle, so the target handle is free)
+ *  - no self-loops, no other handle combinations */
+function isValidConnection(conn: Connection): boolean {
+    if (!conn.source || !conn.target || conn.source === conn.target) return false;
+    const srcNode = flowNodes.value.find(n => n.id === conn.source);
+    const tgtNode = flowNodes.value.find(n => n.id === conn.target);
+    if (!srcNode || !tgtNode) return false;
+    const sh = conn.sourceHandle ?? '';
+    const th = conn.targetHandle ?? '';
+    if (sh === 'out') {
+        // data output → shader binding slot only
+        return srcNode.type === 'data' && tgtNode.type === 'shader' && /^in:\d+$/.test(th);
+    }
+    if (sh === 'body' || sh === 'next') {
+        return srcNode.type === 'if' || srcNode.type === 'foreach' || srcNode.type === 'loop';
+    }
+    return false;
 }
 
 /** Re-serialize the flow node data back into the graph. Fields edited in the
