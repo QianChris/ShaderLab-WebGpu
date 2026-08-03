@@ -26,6 +26,14 @@ export class EditorPanel {
 
     attach(bus: EditorCommandBus): void {
         this.bus = bus;
+        this.panel.tabIndex = 0;
+        // Ctrl+S saves the scene (to projectFS if connected, else download).
+        this.panel.onkeydown = (e: KeyboardEvent) => {
+            if (e.ctrlKey && (e.key === 's' || e.key === 'S')) {
+                e.preventDefault();
+                void this.saveJSON();
+            }
+        };
         // Idempotent: app switch clears the event bus, so re-attaching must not
         // double-subscribe.
         this.unsubscribe?.();

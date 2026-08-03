@@ -64,6 +64,11 @@ export class EditorUILayer implements UILayer {
         return this.orchestrator?.dispatch(cmd) ?? false;
     }
 
+    /** Undo the last editor command (keyboard Ctrl+Z from any panel). */
+    undo(): void { this.orchestrator?.undo(); }
+    /** Redo the last undone editor command (Ctrl+Y). */
+    redo(): void { this.orchestrator?.redo(); }
+
     /** Reload the editor for a different app (devtools / Load-JSON path). */
     async switchApp(name: string): Promise<void> {
         await this.orchestrator?.switchApp(name);

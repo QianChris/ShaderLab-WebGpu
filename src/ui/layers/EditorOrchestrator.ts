@@ -134,6 +134,10 @@ export class EditorOrchestrator {
         return this.commandBus?.dispatch(cmd) ?? false;
     }
 
+    /** Undo/redo — exposed so any panel can wire Ctrl+Z/Y via host.undo(). */
+    undo(): void { this.commandBus?.undo(); }
+    redo(): void { this.commandBus?.redo(); }
+
     /** Open the current app in player mode (no editor UI) in a new tab. */
     private openPlayer(): void {
         const appName = this.host.engine.currentApp;

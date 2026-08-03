@@ -23,7 +23,7 @@ export class AppHost {
     private uiLayers: UILayer[] = [];
     private uiContainer: HTMLElement;
     private uiManager: UIManager;
-    private editorLayer?: { dispatch(cmd: Command): boolean };
+    private editorLayer?: { dispatch(cmd: Command): boolean; undo?(): void; redo?(): void };
     /** Project file-system backend for editor persistence (scripts/shaders/
      *  scene). Defaults to IndexedDBFS (refresh-safe, no permission); can be
      *  switched to FileSystemAccessFS via connectProjectFolder(). */
@@ -88,4 +88,10 @@ export class AppHost {
     async loadAppUI(appBase: string): Promise<void> {
         await this.uiManager.loadAppUI(appBase, this);
     }
+
+    /** Undo the last editor command (routes through the editor layer's command
+     *  bus). No-op in player mode (no editor layer). */
+    undo(): void { this.editorLayer?.undo?.(); }
+    /** Redo the last undone editor command. No-op in player mode. */
+    redo(): void { this.editorLayer?.redo?.(); }
 }

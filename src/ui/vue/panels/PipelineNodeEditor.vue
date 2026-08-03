@@ -87,6 +87,21 @@ function onFlowReady(): void {
 useEditorEvent('editor:changed', refreshList);
 onMounted(refreshList);
 
+// ── Keyboard: Delete removes the selected node; Ctrl+Z/Y undo/redo. ──
+function onKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Delete' && selectedNodeId.value) {
+        e.preventDefault();
+        removeNode(selectedNodeId.value);
+        selectedNodeId.value = '';
+    } else if (e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        host.undo();
+    } else if (e.ctrlKey && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+        e.preventDefault();
+        host.redo();
+    }
+}
+
 // ── Edits ──────────────────────────────────────────────
 
 function applyGraph(mutate: (g: ShaderGraph) => void): void {
@@ -226,7 +241,7 @@ function selectNode(id: string): void {
 </script>
 
 <template>
-    <div class="node-editor vue-panel">
+    <div class="node-editor vue-panel" tabindex="0" @keydown="onKeydown">
         <div class="toolbar">
             <select v-model="selectedName" @change="loadGraph">
                 <option v-for="g in graphNames" :key="g" :value="g">{{ g }}</option>
