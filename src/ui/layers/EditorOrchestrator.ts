@@ -51,6 +51,13 @@ export class EditorOrchestrator {
         playerBtn.onclick = () => this.openPlayer();
         const connectBtn = handles.toolbar.querySelector('#btn-connect') as HTMLButtonElement;
         connectBtn.onclick = () => this.connectFolder();
+        const themeBtn = handles.toolbar.querySelector('#btn-theme') as HTMLButtonElement;
+        themeBtn.onclick = () => this.toggleTheme();
+        // Restore persisted theme.
+        if (localStorage.getItem('shaderlab-theme') === 'light') {
+            document.body.classList.add('theme-light');
+            themeBtn.textContent = '☀';
+        }
 
         // ── 3. Mount Vue sidebar tabs + the asset view below the viewport. ──
         this.mountVuePanels(handles.sidebar);
@@ -112,6 +119,14 @@ export class EditorOrchestrator {
         const ok = await this.host.connectProjectFolder();
         if (ok && this.commandBus) this.commandBus.projectFS = this.host.projectFS;
         if (ok) console.log('[EditorOrchestrator] project folder connected');
+    }
+
+    /** Toggle the light/dark chrome theme. Persisted to localStorage. */
+    private toggleTheme(): void {
+        const btn = this.handles.toolbar.querySelector('#btn-theme') as HTMLButtonElement | null;
+        const isLight = document.body.classList.toggle('theme-light');
+        localStorage.setItem('shaderlab-theme', isLight ? 'light' : 'dark');
+        if (btn) btn.textContent = isLight ? '☀' : '🌙';
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */

@@ -246,6 +246,23 @@
             padding: 20px; color: #667; font-size: 12px; text-align: center;
         }
         .vue-panel { display:flex; flex-direction:column; height:100%; min-height:0; }
+
+        /* Light theme — toggled by body.theme-light (toolbar #btn-theme).
+           Overrides the chrome surfaces; inner panel content stays readable. */
+        body.theme-light { background: #d8dce4; }
+        body.theme-light #toolbar { background: #c8ccd4; border-color: #aab0bc; }
+        body.theme-light .tb-btn { background: #d0d4dc; color: #333; border-color: #b0b4bc; }
+        body.theme-light .tb-btn:hover:not(:disabled) { background: #c0c4cc; color: #000; }
+        body.theme-light .tb-title { color: #445; }
+        body.theme-light #sidebar { background: #e0e3ea; }
+        body.theme-light .editor-head { background: #c8ccd4; color: #222; }
+        body.theme-light .ed-detail { background: #eef0f4; }
+        body.theme-light .ed-comp { background: #eef0f4; border-color: #aab0bc; }
+        body.theme-light .ed-input, body.theme-light .ed-select, body.theme-light .ed-float-wrap, body.theme-light .ed-asset-ref {
+            background: #fff; color: #222; border-color: #aab0bc;
+        }
+        body.theme-light .ed-field-label, body.theme-light .ed-comp-head { color: #445; }
+        body.theme-light #asset-bottom { background: #c8ccd4; border-color: #aab0bc; }
     </style>
 </head>
 <body>
