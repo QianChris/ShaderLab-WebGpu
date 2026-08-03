@@ -1,9 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { RenderGraph } from '../../src/render/RenderGraph';
-import { resourceManager } from '../../src/render/ResourceManager';
+import { RenderGraph } from '../../src/core/render/RenderGraph';
+import { resourceManager } from '../../src/core/render/ResourceManager';
 import { createMockDevice } from '../mocks/gpu';
 import { resetRegistries } from '../helpers/reset';
-import type { RenderGraphData } from '../../src/render/types';
+import type { RenderGraphData } from '../../src/core/render/types';
 
 const PHASE_LIST = [
     { name: 'opaque', order: 10, behavior: 'normal' },

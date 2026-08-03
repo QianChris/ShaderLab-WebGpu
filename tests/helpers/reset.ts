@@ -1,9 +1,9 @@
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
-import { uniformLayouts } from '../../src/render/UniformLayout';
-import { systemRegistry } from '../../src/ecs/SystemRegistry';
-import { PipelineLoader } from '../../src/render/PipelineLoader';
-import { resourceManager } from '../../src/render/ResourceManager';
-import { atomNamespaces } from '../../src/render/valueResolver';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
+import { uniformLayouts } from '../../src/core/render/UniformLayout';
+import { systemRegistry } from '../../src/core/ecs/SystemRegistry';
+import { PipelineLoader } from '../../src/core/render/PipelineLoader';
+import { resourceManager } from '../../src/core/render/ResourceManager';
+import { atomNamespaces } from '../../src/core/render/valueResolver';
 
 /**
  * Reset module singletons to a clean state between tests.

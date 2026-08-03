@@ -1,16 +1,16 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { PluginHostHelper, type PluginLedger } from '../../src/PluginHost';
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
-import { uniformLayouts } from '../../src/render/UniformLayout';
-import { systemRegistry } from '../../src/ecs/SystemRegistry';
-import { PipelineLoader } from '../../src/render/PipelineLoader';
-import { resourceManager } from '../../src/render/ResourceManager';
-import { atomNamespaces } from '../../src/render/valueResolver';
-import { RenderGraph } from '../../src/render/RenderGraph';
+import { PluginHostHelper, type PluginLedger } from '../../src/core/PluginHost';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
+import { uniformLayouts } from '../../src/core/render/UniformLayout';
+import { systemRegistry } from '../../src/core/ecs/SystemRegistry';
+import { PipelineLoader } from '../../src/core/render/PipelineLoader';
+import { resourceManager } from '../../src/core/render/ResourceManager';
+import { atomNamespaces } from '../../src/core/render/valueResolver';
+import { RenderGraph } from '../../src/core/render/RenderGraph';
 import { createMockDevice } from '../mocks/gpu';
 import { resetRegistries } from '../helpers/reset';
-import type { EnginePlugin } from '../../src/plugins/Plugin';
-import type { IRenderer } from '../../src/render/types';
+import type { EnginePlugin } from '../../src/core/plugins/Plugin';
+import type { IRenderer } from '../../src/core/render/types';
 
 function createMockDeps() {
     const attachments = new Map<string, { obj: unknown; owner: string }>();

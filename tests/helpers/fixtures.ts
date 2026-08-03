@@ -1,5 +1,5 @@
-import type { RendererDecl } from '../../src/render/rendererDecl';
-import type { RenderGraphData } from '../../src/render/types';
+import type { RendererDecl } from '../../src/core/render/rendererDecl';
+import type { RenderGraphData } from '../../src/core/render/types';
 
 /** A minimal RendererDecl with a query, one bind group (object uniform), and one draw step. */
 export const SIMPLE_RENDERER_DECL: RendererDecl = {

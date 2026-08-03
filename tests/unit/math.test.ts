@@ -3,7 +3,7 @@ import {
     mat4Mul, mat4MulInto, mat4Inverse, mat4InverseInto,
     mat4FromTRS, mat4FromTRSInto, mat4Perspective, mat4PerspectiveInto,
     normalMatrix, normalMatrixInto, buildCameraMatrices, buildCameraMatricesInto,
-} from '../../src/math';
+} from '../../src/core/math';
 
 const EPS = 1e-5;
 

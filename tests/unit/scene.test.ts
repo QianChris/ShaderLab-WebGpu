@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { Scene } from '../../src/ecs/Scene';
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
+import { Scene } from '../../src/core/ecs/Scene';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
 import { resetRegistries } from '../helpers/reset';
 
 const COMPONENTS = [

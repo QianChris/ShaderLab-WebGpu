@@ -1,16 +1,16 @@
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
-import { PluginManager, pluginOwner } from '../../src/plugins/PluginManager';
-import { PluginHostHelper, type PluginLedger } from '../../src/PluginHost';
-import { EnginePlugin, type PluginContext } from '../../src/plugins/Plugin';
-import { RenderGraph } from '../../src/render/RenderGraph';
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
-import { uniformLayouts } from '../../src/render/UniformLayout';
-import { resourceManager } from '../../src/render/ResourceManager';
-import { PipelineLoader } from '../../src/render/PipelineLoader';
-import { atomNamespaces } from '../../src/render/valueResolver';
+import { PluginManager, pluginOwner } from '../../src/core/plugins/PluginManager';
+import { PluginHostHelper, type PluginLedger } from '../../src/core/PluginHost';
+import { EnginePlugin, type PluginContext } from '../../src/core/plugins/Plugin';
+import { RenderGraph } from '../../src/core/render/RenderGraph';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
+import { uniformLayouts } from '../../src/core/render/UniformLayout';
+import { resourceManager } from '../../src/core/render/ResourceManager';
+import { PipelineLoader } from '../../src/core/render/PipelineLoader';
+import { atomNamespaces } from '../../src/core/render/valueResolver';
 import { createMockDevice } from '../mocks/gpu';
 import { resetRegistries } from '../helpers/reset';
-import type { IRenderer } from '../../src/render/types';
+import type { IRenderer } from '../../src/core/render/types';
 
 class PluginA extends EnginePlugin {
     readonly meta = { id: 'a', dependencies: [] };

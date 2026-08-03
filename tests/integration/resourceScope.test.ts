@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { resourceManager } from '../../src/render/ResourceManager';
+import { resourceManager } from '../../src/core/render/ResourceManager';
 import { createMockDevice, type MockBuffer } from '../mocks/gpu';
 import { resetRegistries } from '../helpers/reset';
-import type { MeshData } from '../../src/render/Primitives';
+import type { MeshData } from '../../src/core/render/Primitives';
 
 const MESH: MeshData = {
     positions: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1],

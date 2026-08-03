@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { UniformLayout } from '../../src/render/UniformLayout';
+import { UniformLayout } from '../../src/core/render/UniformLayout';
 
 describe('UniformLayout std140 alignment', () => {
     it('single f32 → byteSize = 16 (minimum block)', () => {

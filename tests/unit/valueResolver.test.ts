@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { compileValue, compileString, resolveValue, resolveHandle, type ValueContext } from '../../src/render/valueResolver';
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
-import type { Scene } from '../../src/ecs/Scene';
+import { compileValue, compileString, resolveValue, resolveHandle, type ValueContext } from '../../src/core/render/valueResolver';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
+import type { Scene } from '../../src/core/ecs/Scene';
 
 // ── Mock ValueContext ──
 const scratchModel = new Float32Array(16);

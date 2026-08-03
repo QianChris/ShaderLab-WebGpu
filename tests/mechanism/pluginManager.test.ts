@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { PluginManager } from '../../src/plugins/PluginManager';
-import { EnginePlugin, type PluginContext } from '../../src/plugins/Plugin';
+import { PluginManager } from '../../src/core/plugins/PluginManager';
+import { EnginePlugin, type PluginContext } from '../../src/core/plugins/Plugin';
 import { createMockHost } from '../mocks/pluginHost';
 
 // ── Test plugin classes ──

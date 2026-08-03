@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { systemRegistry, type System, type FrameContext, type SystemEntry } from '../../src/ecs/SystemRegistry';
+import { systemRegistry, type System, type FrameContext, type SystemEntry } from '../../src/core/ecs/SystemRegistry';
 
 class StubSystem implements System {
     update(_ctx: FrameContext): void {}

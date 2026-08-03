@@ -1,14 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { defineQuery } from 'bitecs/legacy';
-import { PipelineDriver } from '../../src/render/PipelineDriver';
+import { PipelineDriver } from '../../src/core/render/PipelineDriver';
 import { MockRenderPassEncoder, createMockDevice } from '../mocks/gpu';
-import { resourceManager } from '../../src/render/ResourceManager';
-import { schemaRegistry } from '../../src/ecs/SchemaRegistry';
-import { Scene } from '../../src/ecs/Scene';
+import { resourceManager } from '../../src/core/render/ResourceManager';
+import { schemaRegistry } from '../../src/core/ecs/SchemaRegistry';
+import { Scene } from '../../src/core/ecs/Scene';
 import { resetRegistries } from '../helpers/reset';
-import type { RendererDecl } from '../../src/render/rendererDecl';
-import type { PipelineEntry } from '../../src/render/types';
-import type { ValueContext } from '../../src/render/valueResolver';
+import type { RendererDecl } from '../../src/core/render/rendererDecl';
+import type { PipelineEntry } from '../../src/core/render/types';
+import type { ValueContext } from '../../src/core/render/valueResolver';
 
 const COMPONENTS = [
     { name: 'NameComponent', mandatory: true, fields: { name: { type: 'string', default: '' } } },

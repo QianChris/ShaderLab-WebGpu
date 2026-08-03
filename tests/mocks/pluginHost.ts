@@ -1,4 +1,4 @@
-import type { EnginePlugin, PluginContext } from '../../src/plugins/Plugin';
+import type { EnginePlugin, PluginContext } from '../../src/core/plugins/Plugin';
 
 interface MockHostRecord {
     declarations: Array<{ id: string; plugin: EnginePlugin }>;
