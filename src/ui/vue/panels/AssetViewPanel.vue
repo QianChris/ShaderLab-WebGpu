@@ -4,6 +4,7 @@ import { useHost } from '../composables/useHost';
 import { useEditorEvent } from '../composables/useEditorEvent';
 import { PipelineLoader } from '../../../core/render/PipelineLoader';
 import { PreviewManager, type PreviewResult } from '../../../core/render/PreviewManager';
+import { MIME_MESH, MIME_TEXTURE, MIME_SHADER } from '../../../editor/dom';
 
 const host = useHost();
 const rm = host.engine.resourceManager;
@@ -141,6 +142,22 @@ function toggleView(mode: 'list' | 'icon'): void {
     }
 }
 
+/** Drag source: set the resource MIME carrying the resource NAME (the drop
+ *  target in EditorPanel.makeAssetRef converts the name to the field's
+ *  storage form — string for mesh, u32 handle for texture). Only categories
+ *  with a preview kind are draggable; render targets/buffers are not. */
+function onDragStart(e: DragEvent, entry: string): void {
+    const kind = selectedKind.value;
+    if (!kind) { e.preventDefault(); return; }
+    const mime = kind === 'mesh' ? MIME_MESH
+        : kind === 'texture' ? MIME_TEXTURE
+        : kind === 'shader' ? MIME_SHADER
+        : '';
+    if (!mime) { e.preventDefault(); return; }
+    e.dataTransfer!.setData(mime, entry);
+    e.dataTransfer!.effectAllowed = 'copy';
+}
+
 // Re-fetch the preview when the app remounts the panel (PreviewManager is new).
 watch(selectedEntry, () => { if (selectedEntry.value) loadPreview(); });
 </script>
@@ -176,8 +193,10 @@ watch(selectedEntry, () => { if (selectedEntry.value) loadPreview(); });
                     <!-- List view -->
                     <template v-if="viewMode === 'list'">
                         <div v-for="item in entriesOfSelectedType" :key="item"
-                             :class="['asset-item', { active: selectedType && selectedEntry === item }]"
-                             @click="selectEntry(item)">
+                             :class="['asset-item', 'draggable', { active: selectedType && selectedEntry === item }]"
+                             :draggable="selectedKind != null"
+                             @click="selectEntry(item)"
+                             @dragstart="onDragStart($event, item)">
                             <span class="it-name" :title="item">{{ item }}</span>
                         </div>
                     </template>
@@ -186,7 +205,9 @@ watch(selectedEntry, () => { if (selectedEntry.value) loadPreview(); });
                         <div class="icon-grid">
                             <div v-for="item in entriesOfSelectedType" :key="item"
                                  :class="['icon-card', { active: selectedEntry === item }]"
-                                 @click="selectEntry(item)">
+                                 :draggable="selectedKind != null"
+                                 @click="selectEntry(item)"
+                                 @dragstart="onDragStart($event, item)">
                                 <div class="icon-thumb">
                                     <img v-if="iconPreviews[item]?.kind === 'image'"
                                          :src="iconPreviews[item]!.url" alt="" />
@@ -258,6 +279,13 @@ watch(selectedEntry, () => { if (selectedEntry.value) loadPreview(); });
     border-radius: 8px; padding: 0 5px; line-height: 14px;
 }
 .asset-item.active .it-count { background: #2f63a8; color: #fff; }
+
+/* Draggable items (mesh/texture/shader only) */
+.asset-item.draggable { cursor: grab; }
+.asset-item.draggable:active { cursor: grabbing; }
+.icon-card[draggable="true"] { cursor: grab; }
+.icon-card[draggable="true"]:active { cursor: grabbing; }
+.icon-card[draggable="false"] { opacity: 0.6; }
 
 .view-toggle { display: flex; gap: 2px; }
 .view-toggle button {
