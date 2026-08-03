@@ -41,6 +41,10 @@ export class EditorPanel {
     }
 
     render(): void {
+        try { this.renderInner(); }
+        catch (e) { console.error('[EditorPanel] render failed:', e); this.panel.innerHTML = '<div class="ed-error">Render failed — see console</div>'; }
+    }
+    private renderInner(): void {
         this.panel.innerHTML = '';
         this.syncers = [];
         const scene = this.bus.scene;
