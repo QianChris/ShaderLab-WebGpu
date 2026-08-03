@@ -1,0 +1,10 @@
+[
+    {
+        "name": "GraphDemoComponent",
+        "fields": {
+            "count": { "type": "u32", "default": 64 },
+            "iterations": { "type": "u32", "default": 3 },
+            "enabled": { "type": "bool", "default": true }
+        }
+    }
+]

@@ -12,7 +12,7 @@
  * Phase C) is complete, after which this file is the frozen contract.
  *
  * What belongs here:
- *   - the plugin base class + lifecycle/context types (src/plugins/Plugin.ts)
+ *   - the plugin base class + lifecycle/context types (src/core/plugins/Plugin.ts)
  *   - engine mechanism singletons (usage surface: scene field access, uniform
  *     layouts, GPU resources, buffers, events, math)
  *   - declaration types consumed by plugin declaration fields
@@ -23,7 +23,7 @@
  */
 
 /* ── Plugin system ─────────────────────────────────────────────── */
-export { EnginePlugin } from './plugins/Plugin';
+export { EnginePlugin } from './core/plugins/Plugin';
 export type {
     PluginMeta,
     PluginContext,
@@ -31,34 +31,34 @@ export type {
     MeshCatalogEntry,
     FallbackTextureDecls,
     VboPresetDecls,
-} from './plugins/Plugin';
-export type { ToolFactory } from './tools/ToolSystem';
+} from './core/plugins/Plugin';
+export type { ToolFactory } from './core/tools/ToolRegistry';
 
 /* ── ECS mechanisms ────────────────────────────────────────────── */
-export { Scene } from './ecs/Scene';
-export type { SceneData, CameraView } from './ecs/Scene';
-export { schemaRegistry, SchemaRegistry } from './ecs/SchemaRegistry';
-export type { ComponentDef, FieldDef } from './ecs/SchemaRegistry';
-export { systemRegistry } from './ecs/SystemRegistry';
+export { Scene } from './core/ecs/Scene';
+export type { SceneData, CameraView } from './core/ecs/Scene';
+export { schemaRegistry, SchemaRegistry } from './core/ecs/SchemaRegistry';
+export type { ComponentDef, FieldDef } from './core/ecs/SchemaRegistry';
+export { systemRegistry } from './core/ecs/SystemRegistry';
 export type {
     System,
     FrameContext,
     SystemDef,
     SystemBufferDecl,
-} from './ecs/SystemRegistry';
+} from './core/ecs/SystemRegistry';
 
 /* ── Render mechanisms (usage surface) ─────────────────────────── */
-export { resourceManager } from './render/ResourceManager';
-export { bufferRegistry } from './render/BufferRegistry';
-export { uniformLayouts, UniformLayout } from './render/UniformLayout';
-export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './render/UniformLayout';
-export { PipelineLoader } from './render/PipelineLoader';
-export { VERTEX_SLOTS, SLOT_ORDER, isSlotName } from './render/vertexSlots';
-export type { SlotName, SlotDef, VertexSlotDecls } from './render/vertexSlots';
-export { meshEdges, isPbrMeshData } from './render/Primitives';
-export type { MeshData, PbrMeshData, MeshGenerator } from './render/Primitives';
-export { resolveValue, resolveString, resolveHandle } from './render/valueResolver';
-export type { ValueContext, AtomResolver } from './render/valueResolver';
+export { resourceManager } from './core/render/ResourceManager';
+export { bufferRegistry } from './core/render/BufferRegistry';
+export { uniformLayouts, UniformLayout } from './core/render/UniformLayout';
+export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './core/render/UniformLayout';
+export { PipelineLoader } from './core/render/PipelineLoader';
+export { VERTEX_SLOTS, SLOT_ORDER, isSlotName } from './core/render/vertexSlots';
+export type { SlotName, SlotDef, VertexSlotDecls } from './core/render/vertexSlots';
+export { meshEdges, isPbrMeshData } from './core/render/Primitives';
+export type { MeshData, PbrMeshData, MeshGenerator } from './core/render/Primitives';
+export { resolveValue, resolveString, resolveHandle } from './core/render/valueResolver';
+export type { ValueContext, AtomResolver } from './core/render/valueResolver';
 export type {
     PipelineConfig,
     ComputePipelineConfig,
@@ -75,23 +75,23 @@ export type {
     BindLayoutDecls,
     BindEntryDecl,
     SamplerDecls,
-} from './render/types';
-export type { RendererDecl, RenderTargetDecls, RenderTargetSize } from './render/rendererDecl';
+} from './core/render/types';
+export type { RendererDecl, RenderTargetDecls, RenderTargetSize } from './core/render/rendererDecl';
 export type {
     GeometryHook,
     ComputeHook,
     GeometryHookContext,
     ComputeHookContext,
-} from './render/PipelineDriver';
+} from './core/render/PipelineDriver';
 
 /* ── Events ────────────────────────────────────────────────────── */
-export { EventBus } from './events/EventBus';
-export type { EventHandler } from './events/EventBus';
-export { EVENT_TYPES } from './events/eventTypes';
-export type { EventType } from './events/eventTypes';
+export { EventBus } from './core/events/EventBus';
+export type { EventHandler } from './core/events/EventBus';
+export { EVENT_TYPES } from './core/events/eventTypes';
+export type { EventType } from './core/events/eventTypes';
 
 /* ── Tools ─────────────────────────────────────────────────────── */
-export type { ToolConfig, ToolContext, SceneTool } from './tools/SceneTool';
+export type { ToolConfig, ToolContext, SceneTool } from './editor/input/SceneTool';
 
 /* ── Math ──────────────────────────────────────────────────────── */
 export {
@@ -113,11 +113,11 @@ export {
     quatRotateVec3,
     normalMatrix,
     normalMatrixInto,
-} from './math';
-export type { TRS } from './math';
+} from './core/math';
+export type { TRS } from './core/math';
 
 /* ── Engine config type (read-only view for plugins) ──────────── */
-export type { EngineConfig, SystemEntry, AppManifest } from './Engine';
+export type { EngineConfig, SystemEntry, AppManifest } from './core/Engine';
 
 /* ── Third-party re-exports (the only non-relative imports allowed
  *    in plugins go through here so the engine controls the version) ── */

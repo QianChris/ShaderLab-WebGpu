@@ -1,13 +1,14 @@
-import type { Engine } from '../Engine';
-import { schemaRegistry } from '../ecs/SchemaRegistry';
+import type { EditorCommandBus } from './EditorCommandBus';
+import { schemaRegistry } from '../core/ecs/SchemaRegistry';
+import type { SceneData } from '../core/ecs/Scene';
 import { ce, makeFloatField, makeSelect } from './dom';
 
 export class EditorPanel {
     private panel: HTMLElement;
-    private engine!: Engine;
+    private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
     private selected = '';
     private syncers: (() => void)[] = [];
-    private syncTimer = 0;
     private lastEntityCount = -1;
     /** Scroll position of the entity list (preserved across re-renders). */
     private entityScrollTop = 0;
@@ -15,35 +16,34 @@ export class EditorPanel {
     private readonly ROW_H = 28;
     /** Maximum visible rows in the entity list viewport. */
     private readonly VISIBLE_ROWS = 18;
-    /** Called when loadJSON receives an app.json manifest; main.ts wires this to
-     *  engine.loadApp + panel refresh so glTF / render graph / tools all reload. */
+    /** Called when loadJSON receives an app.json manifest; the host layer wires
+     *  this to engine.loadApp + panel refresh so glTF / render graph reload. */
     onAppSwitch?: (name: string) => Promise<void>;
 
     constructor(container: HTMLElement) {
         this.panel = container;
     }
 
-    attach(engine: Engine): void {
-        this.engine = engine;
-        if (this.syncTimer === 0) {
-            this.syncTimer = window.setInterval(() => {
-                // Rebuild entity list when entities are added/removed by scripts
-                // (e.g. demo2's ball spawner) — syncers alone only update field values.
-                const count = this.engine.scene.entityKeyMap.size;
-                if (count !== this.lastEntityCount) {
-                    this.lastEntityCount = count;
-                    this.render();
-                    return;
-                }
-                for (const sync of this.syncers) sync();
-            }, 100);
-        }
+    attach(bus: EditorCommandBus): void {
+        this.bus = bus;
+        // Idempotent: app switch clears the event bus, so re-attaching must not
+        // double-subscribe.
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => {
+            const count = bus.scene.entityKeyMap.size;
+            if (count !== this.lastEntityCount) {
+                this.lastEntityCount = count;
+                this.render();
+                return;
+            }
+            for (const sync of this.syncers) sync();
+        });
     }
 
     render(): void {
         this.panel.innerHTML = '';
         this.syncers = [];
-        const scene = this.engine.scene;
+        const scene = this.bus.scene;
         this.lastEntityCount = scene.entityKeyMap.size;
 
         // ── Header ──
@@ -61,7 +61,7 @@ export class EditorPanel {
         listHead.appendChild(ce('span', '', 'Entities'));
         const ab = ce('div', 'ed-ent-list-actions');
         ab.appendChild(this.btn('+', () => this.addEntity()));
-        ab.appendChild(this.btn('✕', () => { if (this.selected) { scene.removeEntity(this.selected); this.selected = ''; this.render(); } }));
+        ab.appendChild(this.btn('✕', () => { if (this.selected) { this.bus.removeEntity(this.selected); this.selected = ''; this.render(); } }));
         listHead.appendChild(ab);
         list.appendChild(listHead);
 
@@ -117,9 +117,9 @@ export class EditorPanel {
             row.style.height = `${this.ROW_H}px`;
             row.style.width = '100%';
             row.style.boxSizing = 'border-box';
-            const eid = this.engine.scene.entityKeyMap.get(key);
+            const eid = this.bus.scene.entityKeyMap.get(key);
             const name = eid != null
-                ? (this.engine.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
+                ? (this.bus.scene.getField(eid, 'NameComponent', 'name') as string ?? key)
                 : key;
             row.appendChild(ce('span', 'ed-ent-name', name));
             row.onclick = () => { this.selected = key; this.render(); };
@@ -128,7 +128,7 @@ export class EditorPanel {
     }
 
     private renderDetail(eid: number): HTMLElement {
-        const scene = this.engine.scene;
+        const scene = this.bus.scene;
         const wrap = ce('div', 'ed-detail');
 
         const hdr = ce('div', 'ed-detail-head');
@@ -157,7 +157,7 @@ export class EditorPanel {
             } else {
                 const chk = ce('input') as HTMLInputElement;
                 chk.type = 'checkbox'; chk.checked = hasComp;
-                chk.onchange = () => { scene.toggleComponent(eid, compName, chk.checked); this.render(); };
+                chk.onchange = () => { this.bus.toggleComponent(this.selected, compName, chk.checked); this.render(); };
                 compHead.appendChild(chk);
             }
             compHead.appendChild(ce('span', '', compName));
@@ -166,7 +166,7 @@ export class EditorPanel {
             if (hasComp) {
                 const grid = ce('div', 'ed-fields');
                 for (const [fieldName, fd] of Object.entries(def.fields)) {
-                    grid.appendChild(this.renderField(eid, compName, fieldName, fd));
+                    grid.appendChild(this.renderField(this.selected, eid, compName, fieldName, fd));
                 }
                 compDiv.appendChild(grid);
             }
@@ -175,8 +175,8 @@ export class EditorPanel {
         return wrap;
     }
 
-    private renderField(eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
-        const scene = this.engine.scene;
+    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
+        const scene = this.bus.scene;
         const row = ce('div', 'ed-field-row');
         row.appendChild(ce('label', 'ed-field-label', field));
 
@@ -184,20 +184,20 @@ export class EditorPanel {
         const numInputs = ce('div', 'ed-field-inputs');
 
         if (fd.type === 'string' && fd.options) {
-            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => scene.setField(eid, compName, field, v));
+            const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => this.bus.setField(entityKey, compName, field, v));
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field) as string | undefined;
                 if (cur != null) sel.value = cur;
             });
             numInputs.appendChild(sel);
         } else if (fd.type === 'string') {
-            const inp = this.makeInput('text', val as string, v => scene.setField(eid, compName, field, v));
+            const inp = this.makeInput('text', val as string, v => this.bus.setField(entityKey, compName, field, v));
             numInputs.appendChild(inp);
         } else if (fd.type === 'bool') {
             const chk = ce('input', 'ed-check') as HTMLInputElement;
             chk.type = 'checkbox';
             chk.checked = Number(val ?? fd.default) === 1;
-            chk.onchange = () => scene.setField(eid, compName, field, chk.checked ? 1 : 0);
+            chk.onchange = () => this.bus.setField(entityKey, compName, field, chk.checked ? 1 : 0);
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field);
                 if (cur != null) chk.checked = Number(cur) === 1;
@@ -207,7 +207,7 @@ export class EditorPanel {
             const defVal = (fd.default as number[]) ?? [0];
             const v = val != null ? Number(val) : defVal[0] ?? 0;
             const el = makeFloatField(v, newVal => {
-                scene.setField(eid, compName, field, newVal);
+                this.bus.setField(entityKey, compName, field, newVal);
             });
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field);
@@ -222,7 +222,7 @@ export class EditorPanel {
                     const a = [...(scene.getField(eid, compName, field) as number[] ?? (fd.default as number[]))];
                     for (let j = 0; j < count; j++) a[j] = a[j] ?? 0;
                     a[i] = newVal;
-                    scene.setField(eid, compName, field, a);
+                    this.bus.setField(entityKey, compName, field, a);
                 });
                 this.syncers.push(() => {
                     const cur = scene.getField(eid, compName, field) as number[] | undefined;
@@ -250,13 +250,20 @@ export class EditorPanel {
     private addEntity(): void {
         const name = prompt('Entity name:', 'NewEntity');
         if (!name) return;
-        this.engine.scene.createEntity(name, {});
+        this.bus.createEntity(name, {});
         this.selected = name;
         this.render();
     }
 
+    /** Select an entity by key (from 3D picking or the entity list). */
+    select(key: string): void {
+        if (!this.bus.scene.entityKeyMap.has(key)) return;
+        this.selected = key;
+        this.render();
+    }
+
     private saveJSON(): void {
-        const json = { entities: this.engine.scene.toJSON() };
+        const json = { entities: this.bus.scene.toJSON() };
         const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
@@ -275,17 +282,17 @@ export class EditorPanel {
             if (isAppManifest) {
                 const name = json.name as string | undefined;
                 if (!name) { alert('app manifest missing "name" field'); return; }
-                if (this.onAppSwitch) {
-                    await this.onAppSwitch(name);
-                } else {
-                    await this.engine.loadApp(name);
+                if (!this.onAppSwitch) {
+                    alert('No app-switch handler wired (run through the host layer).');
+                    return;
                 }
+                await this.onAppSwitch(name);
             } else {
                 // Scene entity data → reload entities in place (no glTF / render graph).
-                for (const k of [...this.engine.scene.entityKeyMap.keys()]) {
-                    this.engine.scene.removeEntity(k);
-                }
-                this.engine.loadSceneData((json.entities ?? json) as import('../ecs/Scene').SceneData);
+                this.bus.loadSceneData(
+                    (json.entities ?? json) as SceneData,
+                    JSON.stringify(this.bus.scene.toJSON()),
+                );
             }
             this.selected = '';
             this.render();

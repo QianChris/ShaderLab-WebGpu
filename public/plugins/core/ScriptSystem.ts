@@ -35,6 +35,10 @@ export class ScriptSystem implements System {
     private query!: (w: import('bitecs').World) => readonly number[];
     private modules = new Map<string, ScriptModule>();
     private loading = new Set<string>();
+    /** Paths whose hot-reload import is in flight. While a path is reloading,
+     *  update() must NOT fall back to load() (which would re-fetch the OLD file
+     *  from disk and clobber the just-edited in-memory source). */
+    private reloading = new Set<string>();
     private initialized = new Set<string>();
 
     constructor(bus: EventBus, baseDir = '') {
@@ -70,6 +74,37 @@ export class ScriptSystem implements System {
         this.modules.clear();
         this.initialized.clear();
         this.loading.clear();
+        this.reloading.clear();
+    }
+
+    /** Hot-reload a gameplay script (ScriptComponent.script path) with in-memory
+     *  source. Replaces the cached module so the next frame picks up the new
+     *  implementation; per-entity init() is re-run lazily. Throws on bad import. */
+    reloadScript(path: string, source: string): void {
+        this.modules.delete(path);
+        this.reloading.add(path);
+        for (const key of [...this.initialized]) {
+            if (key.startsWith(`${path}#`)) this.initialized.delete(key);
+        }
+        const blob = new Blob([source], { type: 'text/javascript' });
+        const blobUrl = URL.createObjectURL(blob);
+        import(/* @vite-ignore */ blobUrl)
+            .then(mod => {
+                this.modules.set(path, (mod.default ?? mod) as ScriptModule);
+            })
+            .catch(err => {
+                console.error(`[ScriptSystem] failed to hot-reload '${path}':`, err);
+            })
+            .finally(() => {
+                this.reloading.delete(path);
+                URL.revokeObjectURL(blobUrl);
+            });
+    }
+
+    /** All currently-loaded gameplay script paths (ScriptComponent.script).
+     *  Read-only enumeration for the editor's Scripts tab. */
+    getScriptPaths(): string[] {
+        return [...this.modules.keys()];
     }
 
     update(ctx: FrameContext): void {
@@ -84,6 +119,9 @@ export class ScriptSystem implements System {
 
             const mod = this.modules.get(path);
             if (!mod) {
+                // During a hot-reload the new module's import is in flight —
+                // don't re-fetch the old file from disk (would clobber the edit).
+                if (this.reloading.has(path)) continue;
                 this.load(path);
                 continue;
             }

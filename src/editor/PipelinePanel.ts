@@ -1,6 +1,6 @@
-import type { Engine } from '../Engine';
-import { type PipelineEntry, type PipelineConfig } from '../render/types';
-import { PipelineLoader } from '../render/PipelineLoader';
+import type { EditorCommandBus } from './EditorCommandBus';
+import { type PipelineEntry, type PipelineConfig, type RenderGraphData } from '../core/render/types';
+import { PipelineLoader } from '../core/render/PipelineLoader';
 import { ce, makeFloatField, makeSelect, makeCheckbox } from './dom';
 
 const TOPOLOGY_OPTIONS: string[] = [
@@ -12,13 +12,16 @@ const COMPARE_OPTIONS: string[] = [
     'never', 'less', 'equal', 'less-equal', 'greater', 'not-equal', 'greater-equal', 'always',
 ];
 
+/**
+ * Pipeline inspector. All state changes — entry toggles, parameter edits and
+ * pipeline config edits — go through the EditorCommandBus so they are undoable
+ * and never write to the render graph directly. Ctrl+Z / Ctrl+Y delegate to
+ * the command bus's unified undo/redo.
+ */
 export class PipelinePanel {
     private panel: HTMLElement;
-    private engine!: Engine;
-    /** Undo/redo stacks: JSON snapshots of render graph data (phases + params). */
-    private history: string[] = [];
-    private future: string[] = [];
-    private readonly MAX_HISTORY = 50;
+    private bus!: EditorCommandBus;
+    private unsubscribe?: () => void;
 
     private get blendOptions(): string[] {
         return PipelineLoader.blendPresetNames.length > 0
@@ -30,43 +33,40 @@ export class PipelinePanel {
         this.panel = container;
     }
 
-    attach(engine: Engine): void {
-        this.engine = engine;
+    attach(bus: EditorCommandBus): void {
+        this.bus = bus;
         this.panel.tabIndex = 0;
         this.panel.addEventListener('keydown', (e) => {
             if (e.ctrlKey && (e.key === 'z' || e.key === 'Z') && !e.shiftKey) {
                 e.preventDefault();
-                this.undo();
+                this.bus.undo();
             } else if (e.ctrlKey && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
                 e.preventDefault();
-                this.redo();
+                this.bus.redo();
             }
         });
+        this.unsubscribe?.();
+        this.unsubscribe = bus.engine.eventBus.on('editor:changed', () => this.render());
     }
 
-    /** Snapshot the current render graph state before a mutation (for undo). */
-    private snapshot(): void {
-        const data = JSON.stringify(this.engine.renderGraph.toData());
-        this.history.push(data);
-        if (this.history.length > this.MAX_HISTORY) this.history.shift();
-        this.future.length = 0;
-    }
-
-    private undo(): void {
-        if (this.history.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
-        this.future.push(current);
-        const prev = this.history.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(prev));
+    /** Dispatch a structural edit (enabled/params) as a live-sync patch. */
+    private patchStructural(apply: (data: RenderGraphData) => void): void {
+        const prev = JSON.stringify(this.bus.renderGraph.toData());
+        const data = this.bus.renderGraph.toData();
+        apply(data);
+        this.bus.patchRenderGraph(data, prev);
         this.render();
     }
 
-    private redo(): void {
-        if (this.future.length === 0) return;
-        const current = JSON.stringify(this.engine.renderGraph.toData());
-        this.history.push(current);
-        const next = this.future.pop()!;
-        this.engine.renderGraph.fromData(JSON.parse(next));
+    /** Dispatch a pipeline config edit (topology/blend/cull/depth) + rebuild.
+     *  The panel mutates a deep copy; the command applies it to the live config. */
+    private patchConfig(entry: PipelineEntry, mutate: (config: PipelineConfig) => void): void {
+        const config = PipelineLoader.getConfig(entry.pipeline);
+        if (!config) return;
+        const prev = JSON.stringify(config);
+        const next = JSON.parse(prev) as PipelineConfig;
+        mutate(next);
+        this.bus.mutatePipelineConfig(entry.pipeline, JSON.stringify(next), prev);
         this.render();
     }
 
@@ -77,8 +77,8 @@ export class PipelinePanel {
         head.appendChild(ce('span', 'ed-title', 'Render Pipeline'));
         this.panel.appendChild(head);
 
-        const phases = this.engine.renderGraph.phases;
-        const phaseNames = this.engine.renderGraph.getPhaseNames();
+        const phases = this.bus.renderGraph.phases;
+        const phaseNames = this.bus.renderGraph.getPhaseNames();
         for (const phase of phaseNames) {
             const section = ce('div', 'pp-phase');
             section.appendChild(ce('div', 'pp-phase-title', phase));
@@ -102,7 +102,12 @@ export class PipelinePanel {
         const chk = ce('input') as HTMLInputElement;
         chk.type = 'checkbox';
         chk.checked = entry.enabled;
-        chk.onchange = () => { this.snapshot(); entry.enabled = chk.checked; };
+        chk.onchange = () => this.patchStructural(data => {
+            for (const list of Object.values(data.phases)) {
+                const target = (list ?? []).find(e => e.name === entry.name);
+                if (target) target.enabled = chk.checked;
+            }
+        });
         row.appendChild(chk);
         row.appendChild(ce('span', 'pp-entry-name', entry.name));
         const config = PipelineLoader.getConfig(entry.pipeline);
@@ -112,7 +117,7 @@ export class PipelinePanel {
 
         if (entry.params) {
             for (const [key, values] of Object.entries(entry.params)) {
-                wrap.appendChild(this.renderParam(key, values));
+                wrap.appendChild(this.renderParam(entry, key, values));
             }
         }
 
@@ -122,11 +127,16 @@ export class PipelinePanel {
         return wrap;
     }
 
-    private renderParam(key: string, values: number[]): HTMLElement {
+    private renderParam(entry: PipelineEntry, key: string, values: number[]): HTMLElement {
         const box = ce('div', 'pp-params');
         box.appendChild(ce('span', 'pp-param-label', key));
         values.forEach((v, i) => {
-            const field = makeFloatField(v, newVal => { this.snapshot(); values[i] = newVal; });
+            const field = makeFloatField(v, newVal => this.patchStructural(data => {
+                for (const list of Object.values(data.phases)) {
+                    const target = (list ?? []).find(e => e.name === entry.name);
+                    if (target && target.params?.[key]) target.params[key][i] = newVal;
+                }
+            }));
             box.appendChild(field.el);
         });
         return box;
@@ -134,43 +144,40 @@ export class PipelinePanel {
 
     private renderConfig(entry: PipelineEntry, config: PipelineConfig): HTMLElement {
         const box = ce('div', 'pp-config');
-        const recompile = (): void => {
-            this.engine.renderGraph.rebuildPipeline(this.engine.device, entry.pipeline);
-        };
+        const edit = (mutate: (c: PipelineConfig) => void): void => this.patchConfig(entry, mutate);
 
         // ── Primitive ──
         box.appendChild(this.field('topology', makeSelect(
             TOPOLOGY_OPTIONS, config.primitive.topology,
-            v => { this.snapshot(); config.primitive.topology = v as GPUPrimitiveTopology; recompile(); },
+            v => edit(c => { c.primitive.topology = v as GPUPrimitiveTopology; }),
         )));
         box.appendChild(this.field('cullMode', makeSelect(
             CULL_OPTIONS, config.primitive.cullMode,
-            v => { this.snapshot(); config.primitive.cullMode = v as GPUCullMode; recompile(); },
+            v => edit(c => { c.primitive.cullMode = v as GPUCullMode; }),
         )));
         box.appendChild(this.field('frontFace', makeSelect(
             FRONT_FACE_OPTIONS, config.primitive.frontFace ?? 'ccw',
-            v => { this.snapshot(); config.primitive.frontFace = v as GPUFrontFace; recompile(); },
+            v => edit(c => { c.primitive.frontFace = v as GPUFrontFace; }),
         )));
 
         // ── Blend ──
         const blendVal = typeof config.blend === 'string' ? config.blend : 'opaque';
         box.appendChild(this.field('blend', makeSelect(
             this.blendOptions, blendVal,
-            v => { this.snapshot(); config.blend = v as PipelineConfig['blend']; recompile(); },
+            v => edit(c => { c.blend = v as PipelineConfig['blend']; }),
         )));
 
         // ── Depth ──
         if (config.depthStencil) {
-            const ds = config.depthStencil;
-            const writeEnabled = ds.depthWriteEnabled === true;
+            const writeEnabled = config.depthStencil.depthWriteEnabled === true;
             box.appendChild(this.field('depthWrite', makeCheckbox(
                 writeEnabled,
-                v => { this.snapshot(); ds.depthWriteEnabled = v; recompile(); },
+                v => edit(c => { if (c.depthStencil) c.depthStencil.depthWriteEnabled = v; }),
             )));
-            const compare = (ds.depthCompare as string) ?? 'less';
+            const compare = (config.depthStencil.depthCompare as string) ?? 'less';
             box.appendChild(this.field('depthCompare', makeSelect(
                 COMPARE_OPTIONS, compare,
-                v => { this.snapshot(); ds.depthCompare = v as GPUCompareFunction; recompile(); },
+                v => edit(c => { if (c.depthStencil) c.depthStencil.depthCompare = v as GPUCompareFunction; }),
             )));
         }
 

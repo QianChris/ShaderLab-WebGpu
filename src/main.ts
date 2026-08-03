@@ -1,25 +1,22 @@
-import { Engine } from './Engine';
-import { EditorPanel } from './editor/EditorPanel';
-import { PipelinePanel } from './editor/PipelinePanel';
+import { AppHost } from './host/AppHost';
+import { EditorUILayer } from './ui/layers/EditorUILayer';
 
 const canvas = document.getElementById('canvas') as HTMLCanvasElement;
 const errorEl = document.getElementById('error')!;
-const editorEl = document.getElementById('editor')!;
-const pipelineEl = document.getElementById('pipeline-panel')!;
-
-function setupTabs(): void {
-    const buttons = document.querySelectorAll<HTMLButtonElement>('.tab-btn');
-    for (const btn of buttons) {
-        btn.onclick = () => {
-            const tab = btn.dataset.tab;
-            for (const b of buttons) b.classList.toggle('active', b === btn);
-            document.getElementById('tab-scene')!.style.display = tab === 'scene' ? 'flex' : 'none';
-            document.getElementById('tab-pipeline')!.style.display = tab === 'pipeline' ? 'flex' : 'none';
-        };
-    }
-}
+const uiContainer = document.getElementById('ui-container')!;
+const app = document.getElementById('app')!;
 
 async function main(): Promise<void> {
+    // Surface ALL errors on first load (including unhandled promise rejections
+    // from fire-and-forget async mount() calls) so editor wiring failures are
+    // visible in the console instead of silently leaving the UI half-built.
+    window.addEventListener('error', (e) => {
+        console.error('[ShaderLab] window.onerror:', e.message, '\n', e.error);
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        console.error('[ShaderLab] unhandledrejection:', e.reason);
+    });
+
     if (!navigator.gpu) {
         errorEl.style.display = 'block';
         errorEl.textContent = 'WebGPU is not supported.\nUse Chrome 113+ or Edge 113+.';
@@ -27,50 +24,29 @@ async function main(): Promise<void> {
     }
 
     try {
-        const engine = new Engine(canvas);
-        await engine.init();
+        const host = new AppHost(canvas, uiContainer);
+        await host.init();
 
-        const app = new URLSearchParams(location.search).get('app') ?? engine.engineConfig.defaultApp;
-        await engine.loadApp(app);
+        const appName = new URLSearchParams(location.search).get('app') ?? host.engineConfig.defaultApp;
+        await host.loadApp(appName);
 
-        window.addEventListener('resize', () => engine.resize());
+        // Editor layer: toolbar, tab shell, command bus, input manager, panels.
+        const editorLayer = new EditorUILayer();
+        host.mountLayer(editorLayer, app);
 
-        const editor = new EditorPanel(editorEl);
-        editor.attach(engine);
-        editor.render();
+        // Load the App's custom UI (ui-config.json).
+        await host.loadAppUI(`${host.engineConfig.appsRoot}/${appName}`);
 
-        const pipelinePanel = new PipelinePanel(pipelineEl);
-        pipelinePanel.attach(engine);
-        pipelinePanel.render();
+        window.addEventListener('resize', () => host.resize());
+        host.startLoop();
 
-        setupTabs();
+        // Devtools back-compat: switchApp reloads app + refreshes the editor.
+        (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = (name: string) => editorLayer.switchApp(name);
+        (window as unknown as { engine: unknown }).engine = host.engine;
+        (window as unknown as { host: unknown }).host = host;
 
-        engine.startLoop();
-
-        // Unified app-switch refresh: both switchApp() (devtools) and the
-        // editor's Load-JSON-of-app.json button go through this path so the
-        // scene editor and pipeline panel both rebuild after a full loadApp.
-        const refreshPanels = (): void => {
-            editor.render();
-            pipelinePanel.render();
-        };
-        const switchToApp = async (name: string): Promise<void> => {
-            try {
-                await engine.loadApp(name);
-                refreshPanels();
-                console.log(`[ShaderLab] switched to app '${name}'`);
-            } catch (err) {
-                console.error(err);
-                errorEl.style.display = 'block';
-                errorEl.textContent = `Error: ${err}`;
-            }
-        };
-        editor.onAppSwitch = switchToApp;
-        (window as unknown as { switchApp: (name: string) => Promise<void> }).switchApp = switchToApp;
-        (window as unknown as { engine: unknown }).engine = engine;
-
-        console.log('[ShaderLab] initialized');
-        console.log('[ShaderLab] scene:', JSON.stringify(engine.exportScene(), null, 2));
+        console.log('[ShaderLab] editor mode initialized');
+        console.log('[ShaderLab] scene:', JSON.stringify(host.engine.exportScene(), null, 2));
     } catch (err) {
         console.error(err);
         errorEl.style.display = 'block';
