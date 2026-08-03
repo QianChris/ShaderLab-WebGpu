@@ -746,6 +746,18 @@ export class ResourceManager {
         return this.textureKeyToHandle.get(key) ?? 0;
     }
 
+    /** Reverse lookup: a texture handle (u32 stored on an entity field) → the
+     *  resource key/name. Returns undefined for handle 0 or unknown handles.
+     *  Used by the editor's asset-reference field to display the name backing
+     *  a stored handle. */
+    textureKeyFromHandle(handle: number): string | undefined {
+        if (!handle) return undefined;
+        for (const [key, h] of this.textureKeyToHandle) {
+            if (h === handle) return key;
+        }
+        return undefined;
+    }
+
     async uploadTextureFromImage(key: string, img: ImageBitmap | HTMLImageElement | HTMLCanvasElement, sRGB = false): Promise<GPUTexture> {
         if (this.textures.has(key)) return this.textures.get(key)!;
 

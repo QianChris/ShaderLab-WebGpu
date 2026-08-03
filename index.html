@@ -213,6 +213,32 @@
         .ed-float-edit::-webkit-outer-spin-button { appearance:none; margin:0; }
         .ed-float-wrap input[type=number] { appearance:textfield; }
 
+        /* Color field (role:"color") */
+        .ed-color-wrap { display:flex; align-items:center; gap:4px; flex:1; min-width:0; }
+        .ed-color-picker {
+            width:34px; height:22px; padding:0; border:1px solid #2a3a5c;
+            border-radius:3px; background:#0d1b33; cursor:pointer; flex-shrink:0;
+        }
+        .ed-color-picker::-webkit-color-swatch-wrapper { padding:1px; }
+        .ed-color-picker::-webkit-color-swatch { border:none; border-radius:2px; }
+        .ed-color-alpha { display:flex; align-items:center; flex:1; min-width:0; }
+        .ed-color-alpha-input { width:100%; accent-color:#4a8fc7; }
+
+        /* Asset reference field (role:"mesh"/"texture") — dropdown + drop zone */
+        .ed-asset-ref {
+            display:flex; align-items:center; gap:4px; flex:1; min-width:0;
+            border:1px solid #2a3a5c; border-radius:3px; padding:1px;
+            background:#0d1b33;
+        }
+        .ed-asset-ref .ed-select { flex:1; border:none; background:transparent; }
+        .ed-asset-drop-hint {
+            font-size:10px; color:#567; flex-shrink:0; padding:0 3px;
+        }
+        .ed-asset-ref.ed-asset-dragover {
+            border-color:#4a8fc7; background:#14233f; box-shadow:0 0 0 1px #4a8fc7 inset;
+        }
+        .ed-asset-ref.ed-asset-dragover .ed-asset-drop-hint { color:#7ec8e3; }
+
         /* Vue editor panels */
         .vue-panel-empty {
             padding: 20px; color: #667; font-size: 12px; text-align: center;
