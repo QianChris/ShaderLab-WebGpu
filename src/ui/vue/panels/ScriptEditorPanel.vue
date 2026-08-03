@@ -95,6 +95,17 @@ async function newScript(): Promise<void> {
         const ref: ScriptRef = { kind, name: path, path, url };
         if (!newScripts.value.some(r => r.url === url)) newScripts.value = [...newScripts.value, ref];
         await select(ref);
+        // In-memory registration so the script is immediately usable:
+        //  - render: register exported hooks (<name>.value / .geometry) so
+        //    pipelines can reference them without an app reload.
+        //  - gameplay: hint the user to set ScriptComponent.script on an entity
+        //    (registration = an entity reference; can't auto-pick a target).
+        if (kind === 'render') {
+            host.dispatch(new ReloadRenderScriptCommand(path, content, ''));
+            errorMsg.value = `Registered in-memory. To persist across reload, add "${path}" to render.json renderScripts.`;
+        } else {
+            errorMsg.value = `Created. Set ScriptComponent.script = "${path}" on an entity to use it.`;
+        }
     } catch (e) {
         errorMsg.value = `New script failed: ${e}`;
     }

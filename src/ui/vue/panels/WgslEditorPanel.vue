@@ -45,6 +45,7 @@ async function newShader(): Promise<void> {
         sourceCache.value[ref] = content;
         if (!newShaders.value.includes(ref)) newShaders.value = [...newShaders.value, ref];
         selectShader(ref, []);
+        errorMsg.value = `Created. Reference "${ref}" in a pipeline.json vertex/fragment shader field to use it.`;
     } catch (e) {
         errorMsg.value = `New shader failed: ${e}`;
     }
