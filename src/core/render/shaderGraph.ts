@@ -32,6 +32,9 @@ export type ShaderGraphBufferKind = 'storage' | 'uniform' | 'vertex';
 export interface ShaderGraphDataNode {
     id: string;
     type: 'data';
+    /** Optional editor-only position (vue-flow canvas coords). Absent =
+     *  graphAdapter auto-layouts the node. Not consumed by the executor. */
+    position?: { x: number; y: number };
     /** Buffer handle source: `Component.field` (a u32 BufferHandle) or
      *  `buffer:<name>` for a BufferRegistry storage/uniform buffer. */
     source: string;
@@ -47,6 +50,8 @@ export interface ShaderGraphDataNode {
 export interface ShaderGraphShaderNode {
     id: string;
     type: 'shader';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** WGSL shader ref (resolved like pipeline shaders — plugin/URL/virtual). */
     shader: string;
     entryPoint: string;
@@ -58,6 +63,8 @@ export interface ShaderGraphShaderNode {
 export interface ShaderGraphIfNode {
     id: string;
     type: 'if';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Condition value source — a scalar component field (non-zero = true). */
     condition: string;
 }
@@ -65,6 +72,8 @@ export interface ShaderGraphIfNode {
 export interface ShaderGraphForEachNode {
     id: string;
     type: 'foreach';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Item count value source — a component field. */
     count: string;
     /** Optional index source (e.g. `builtin.entityId` or a component field). */
@@ -74,6 +83,8 @@ export interface ShaderGraphForEachNode {
 export interface ShaderGraphLoopNode {
     id: string;
     type: 'loop';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Iteration count — a component field or numeric literal. */
     iterations: string;
 }

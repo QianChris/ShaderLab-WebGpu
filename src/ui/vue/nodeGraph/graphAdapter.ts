@@ -61,7 +61,7 @@ export function shaderGraphToFlow(graph: ShaderGraph): { nodes: GraphFlowNode[];
         nodes.push({
             id: n.id,
             type: 'data',
-            position: { x: 0, y: dataY * 90 },
+            position: n.position ?? { x: 0, y: dataY * 90 },
             data: { node: n, label: nodeLabel(n) },
         });
         dataY++;
@@ -72,7 +72,7 @@ export function shaderGraphToFlow(graph: ShaderGraph): { nodes: GraphFlowNode[];
         nodes.push({
             id: n.id,
             type: n.type,
-            position: { x: 320, y: flowY * 110 },
+            position: n.position ?? { x: 320, y: flowY * 110 },
             data: { node: n, label: nodeLabel(n) },
         });
         flowY++;

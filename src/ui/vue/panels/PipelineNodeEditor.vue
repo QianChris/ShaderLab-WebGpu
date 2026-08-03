@@ -158,11 +158,26 @@ function commitParams(): void {
     if (!graph) return;
     nodeParamError.value = '';
     const prev = JSON.stringify(graph);
-    // Read current values from the flow nodes.
-    const nodes = flowNodes.value.map(n => (n.data as { node: ShaderGraphNode }).node);
+    // Read current values from the flow nodes — including dragged positions
+    // (vue-flow updates node.position on drag; mirror it into the graph node
+    // so Save persists the layout. Absent position = graphAdapter auto-layouts).
+    const nodes = flowNodes.value.map(n => {
+        const node = (n.data as { node: ShaderGraphNode }).node;
+        if (n.position) node.position = { x: n.position.x, y: n.position.y };
+        return node;
+    });
     graph.nodes = nodes;
     host.dispatch(new MutateShaderGraphCommand(graph.name, graph, prev));
     loadGraph();
+    statusMsg.value = '';
+}
+
+/** Track position changes (drag) without dispatching a command per frame —
+ *  the user clicks Apply (commitParams) to persist. Just flag unsaved state. */
+function onNodesChange(changes: { type: string; id?: string }[]): void {
+    if (changes.some(c => c.type === 'position')) {
+        statusMsg.value = 'unsaved layout — click Apply';
+    }
 }
 
 const selectedNodeId = ref<string>('');
@@ -201,6 +216,7 @@ function selectNode(id: string): void {
                 fit-view-on-init
                 @ready="onFlowReady"
                 @connect="onConnect"
+                @nodes-change="onNodesChange"
                 @node-click="({ node }) => selectNode(node.id)"
                 @node-double-click="({ node }) => removeNode(node.id)">
                 <template #node-data="{ data }">
