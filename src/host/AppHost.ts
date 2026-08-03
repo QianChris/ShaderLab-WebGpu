@@ -1,6 +1,7 @@
 import { Engine } from '../core/Engine';
 import { EventBus } from '../core/events/EventBus';
 import { UIManager } from './UIManager';
+import { IndexedDBFS, FileSystemAccessFS, type ProjectFS } from './ProjectFS';
 import type { Command, CommandContext } from '../editor/commands/Command';
 import type { UILayer } from '../ui/UILayer';
 
@@ -23,6 +24,10 @@ export class AppHost {
     private uiContainer: HTMLElement;
     private uiManager: UIManager;
     private editorLayer?: { dispatch(cmd: Command): boolean };
+    /** Project file-system backend for editor persistence (scripts/shaders/
+     *  scene). Defaults to IndexedDBFS (refresh-safe, no permission); can be
+     *  switched to FileSystemAccessFS via connectProjectFolder(). */
+    projectFS: ProjectFS = new IndexedDBFS();
 
     constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
         this.engine = new Engine(canvas);
@@ -35,6 +40,16 @@ export class AppHost {
     startLoop(): void { this.engine.startLoop(); }
     resize(): void { this.engine.resize(); }
     get engineConfig() { return this.engine.engineConfig; }
+
+    /** Prompt the user to pick the project root folder (Chrome File System
+     *  Access API). On success, switches projectFS to FileSystemAccessFS so
+     *  saves write real files. Returns false if unavailable or cancelled. */
+    async connectProjectFolder(): Promise<boolean> {
+        const fs = await FileSystemAccessFS.connect();
+        if (!fs) return false;
+        this.projectFS = fs;
+        return true;
+    }
 
     // Read-only proxies (UI layer queries).
     get scene() { return this.engine.scene; }
