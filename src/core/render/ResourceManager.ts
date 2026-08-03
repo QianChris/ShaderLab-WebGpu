@@ -415,6 +415,18 @@ export class ResourceManager {
         return this.meshData.has(name) || this.pbrMeshData.has(name) || this.meshGpu.has(name);
     }
 
+    /** CPU-side simple mesh data (positions/indices). Read-only accessor for
+     *  the editor's mesh wireframe preview. */
+    getMeshData(name: string): MeshData | undefined {
+        return this.meshData.get(name);
+    }
+
+    /** CPU-side PBR mesh data (positions/normals/uvs/...). Read-only accessor
+     *  for the editor's mesh wireframe preview. */
+    getPbrMeshData(name: string): PbrMeshData | undefined {
+        return this.pbrMeshData.get(name);
+    }
+
     private makeVertexBuffer(src: ArrayLike<number>): GPUBuffer {
         const arr = Float32Array.from(src);
         const buf = this.device.createBuffer({
