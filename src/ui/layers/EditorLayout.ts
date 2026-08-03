@@ -65,6 +65,8 @@ export class EditorLayout {
             <button class="tb-btn" id="btn-undo" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
             <button class="tb-btn" id="btn-redo" title="Redo (Ctrl+Y)" disabled>↷ Redo</button>
             <button class="tb-btn tb-btn-player" id="btn-player" title="Open this app in player mode">▶ Player</button>
+            <button class="tb-btn" id="btn-connect" title="Connect a project folder to save files to disk">📁 Connect</button>
+            <span class="tb-dirty" id="tb-dirty" title="Unsaved changes"></span>
             <span class="tb-title">ShaderLab Editor</span>
         `;
 

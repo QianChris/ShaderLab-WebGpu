@@ -24,6 +24,7 @@ export class EditorOrchestrator {
     private unsubscribeChanged?: () => void;
     private undoBtn?: HTMLButtonElement;
     private redoBtn?: HTMLButtonElement;
+    private dirtyDot?: HTMLElement;
 
     constructor(
         private readonly host: AppHost,
@@ -38,14 +39,18 @@ export class EditorOrchestrator {
         const { host, handles } = this;
         // ── 1. Command bus (undo/redo + edit-mode gating) ──
         this.commandBus = new EditorCommandBus(host.engine);
+        this.commandBus.projectFS = host.projectFS;
 
         // ── 2. Toolbar button handlers (markup is owned by the layout). ──
         this.undoBtn = handles.toolbar.querySelector('#btn-undo') as HTMLButtonElement;
         this.redoBtn = handles.toolbar.querySelector('#btn-redo') as HTMLButtonElement;
+        this.dirtyDot = handles.toolbar.querySelector('#tb-dirty') ?? undefined;
         this.undoBtn.onclick = () => this.commandBus?.undo();
         this.redoBtn.onclick = () => this.commandBus?.redo();
         const playerBtn = handles.toolbar.querySelector('#btn-player') as HTMLButtonElement;
         playerBtn.onclick = () => this.openPlayer();
+        const connectBtn = handles.toolbar.querySelector('#btn-connect') as HTMLButtonElement;
+        connectBtn.onclick = () => this.connectFolder();
 
         // ── 3. Mount Vue sidebar tabs + the asset view below the viewport. ──
         this.mountVuePanels(handles.sidebar);
@@ -92,11 +97,21 @@ export class EditorOrchestrator {
         this.mountAssetPanel();
     }
 
-    /** Refresh undo/redo button enabled state (stack emptiness). */
+    /** Refresh undo/redo button enabled state (stack emptiness) + dirty dot. */
     refreshToolbar(): void {
         if (!this.undoBtn || !this.redoBtn || !this.commandBus) return;
         this.undoBtn.disabled = !this.commandBus.canUndo;
         this.redoBtn.disabled = !this.commandBus.canRedo;
+        if (this.dirtyDot) this.dirtyDot.textContent = this.commandBus.dirty ? '●' : '';
+    }
+
+    /** Prompt the user to connect a real project folder (Chrome File System
+     *  Access API). On success saves write real files; otherwise the default
+     *  IndexedDB backend still persists in-browser. */
+    private async connectFolder(): Promise<void> {
+        const ok = await this.host.connectProjectFolder();
+        if (ok && this.commandBus) this.commandBus.projectFS = this.host.projectFS;
+        if (ok) console.log('[EditorOrchestrator] project folder connected');
     }
 
     /** AppHost routes host.dispatch() here while the editor layer is mounted. */

@@ -303,9 +303,22 @@ export class EditorPanel {
         this.render();
     }
 
-    private saveJSON(): void {
+    private async saveJSON(): Promise<void> {
         const json = { entities: this.bus.scene.toJSON() };
-        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+        const text = JSON.stringify(json, null, 2);
+        const fs = this.bus.projectFS;
+        if (fs && fs.backend !== 'none') {
+            try {
+                const appName = this.bus.engine.currentApp ?? 'scene';
+                await fs.writeFile(`apps/${appName}/scene.json`, text);
+                this.bus.clearDirty();
+                return;
+            } catch (e) {
+                console.warn('[EditorPanel] projectFS write failed, falling back to download:', e);
+            }
+        }
+        // Fallback: browser download (original behavior).
+        const blob = new Blob([text], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
     }

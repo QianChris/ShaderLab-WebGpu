@@ -107,6 +107,17 @@ function onSave(code: string): void {
     } catch (e) {
         errorMsg.value = String(e);
     }
+    // Persist to disk (best-effort; the reload is in-memory either way).
+    void persist(ref.path, code);
+}
+
+async function persist(path: string, code: string): Promise<void> {
+    try {
+        await host.projectFS.writeFile(path, code);
+    } catch (e) {
+        // Don't clobber the reload's status; surface a separate hint.
+        errorMsg.value = errorMsg.value ? `${errorMsg.value} | disk save failed` : `disk save failed: ${e}`;
+    }
 }
 
 function dirty(): boolean {

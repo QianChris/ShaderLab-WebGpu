@@ -45,6 +45,11 @@ function onSave(code: string): void {
     } catch (e) {
         errorMsg.value = String(e);
     }
+    // Persist to disk (best-effort; shader keys may be plugin refs that can't
+    // be written — the catch surfaces a hint without blocking the reload).
+    void host.projectFS.writeFile(key, code).catch((e: unknown) => {
+        errorMsg.value = errorMsg.value ? `${errorMsg.value} | disk save failed` : `disk save failed: ${e}`;
+    });
 }
 </script>
 
