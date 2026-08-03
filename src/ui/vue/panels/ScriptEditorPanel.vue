@@ -26,6 +26,11 @@ const sourceCache = ref<Record<string, string>>({});
 const selected = ref<ScriptRef | null>(null);
 const saving = ref(false);
 const errorMsg = ref('');
+/** Editor-created scripts not yet referenced by scene/systems.json (so they
+ *  don't appear in the engine-derived list). Merged into the displayed list so
+ *  the user can immediately edit them; registration into app config is a
+ *  separate step (Phase 2.4). */
+const newScripts = ref<ScriptRef[]>([]);
 
 /** Collect every script a user can edit:
  *  1. Gameplay scripts — unique ScriptComponent.script values across the scene.
@@ -63,8 +68,37 @@ const scripts = computed<ScriptRef[]>(() => {
         out.push({ kind: 'render', name: file, path: file, url });
     }
 
-    return out;
+    return [...out, ...newScripts.value];
 });
+
+/** Create a new script from a template: fetch the boilerplate, write it to
+ *  projectFS, and open it immediately (sourceCache pre-seeded so select skips
+ *  the fetch — the file may not exist at the real URL until registered). */
+async function newScript(): Promise<void> {
+    const kindStr = prompt('Script kind (gameplay / render):', 'gameplay');
+    if (!kindStr) return;
+    if (kindStr !== 'gameplay' && kindStr !== 'render') { errorMsg.value = 'Invalid kind'; return; }
+    const kind = kindStr as ScriptKind;
+    const name = prompt('Script name (without extension):', 'myScript');
+    if (!name) return;
+    const engine = host.engine;
+    const appBase = `${host.engineConfig.appsRoot}/${engine.currentApp}`;
+    const templatePath = kind === 'gameplay' ? '/common/templates/gameplay.js' : '/common/templates/render.js';
+    const path = `scripts/${name}.js`;
+    const url = `${appBase}/${path}`;
+    try {
+        const resp = await fetch(templatePath);
+        if (!resp.ok) throw new Error(`template HTTP ${resp.status}`);
+        const content = await resp.text();
+        await host.projectFS.writeFile(`apps/${engine.currentApp}/${path}`, content);
+        sourceCache.value[url] = content;
+        const ref: ScriptRef = { kind, name: path, path, url };
+        if (!newScripts.value.some(r => r.url === url)) newScripts.value = [...newScripts.value, ref];
+        await select(ref);
+    } catch (e) {
+        errorMsg.value = `New script failed: ${e}`;
+    }
+}
 
 async function select(ref: ScriptRef): Promise<void> {
     selected.value = ref;
@@ -129,7 +163,7 @@ function dirty(): boolean {
 <template>
     <div class="script-panel vue-panel">
         <div class="file-tree">
-            <div class="tree-title">Scripts</div>
+            <div class="tree-title">Scripts <button class="tree-new-btn" @click="newScript" title="New script from template">+ New</button></div>
             <div v-for="s in scripts" :key="s.url"
                  :class="['tree-item', { active: selected?.url === s.url }]"
                  @click="select(s)">
@@ -162,6 +196,11 @@ function dirty(): boolean {
 .tree-item:hover { background: #2a2a2a; }
 .tree-item.active { background: #1a4d8f; color: #fff; }
 .tree-empty { padding: 12px; color: #667; font-size: 11px; font-style: italic; }
+.tree-new-btn {
+    float: right; font-size: 10px; background: #2a3a5c; color: #ccc;
+    border: 1px solid #3a4a6c; border-radius: 3px; padding: 0 5px; cursor: pointer;
+}
+.tree-new-btn:hover { background: #3a4a6c; color: #fff; }
 .editor-wrap { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .editor-toolbar {
     padding: 6px 10px; border-bottom: 1px solid #333; display: flex; gap: 10px;
