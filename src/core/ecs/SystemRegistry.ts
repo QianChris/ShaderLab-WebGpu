@@ -45,11 +45,14 @@ export interface FrameContext {
      *  `renderScripts` or referenced by an enabled pipeline's `aux`). `count`
      *  is the logical item count; the workgroup count is derived from the
      *  pipeline's declared workgroupSize (in computeTgs). Optional `entries`
-     *  build a fresh bind group against @group(0) for this dispatch.
+     *  build a fresh bind group against @group(0) for this dispatch; when
+     *  `entries` is omitted but `eid` is provided AND the pipeline declares
+     *  `bindings`, the engine resolves them declaratively (storage/uniform/
+     *  timeInput/storageTexture/texture) against this entity + frame context.
      *  Dispatches are batched into one compute pass per frame and submitted
      *  together by `flushCompute()` (called by the renderer before recording
      *  render passes, and again at end of frame as a safety net). */
-    dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void;
+    dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[], eid?: number): void;
     /** Submit any compute dispatches batched since the last flush. Called by
      *  the renderer at the start of execute() so compute results are visible
      *  to the render passes that follow in the same frame. */

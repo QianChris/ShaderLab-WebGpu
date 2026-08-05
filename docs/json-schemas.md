@@ -829,18 +829,24 @@ schema 同 [C8](#c8-app-systemsjson--系统顺序覆写)。`Engine.init` 装载�
 | `bindLayout` | string[] | 可选 | — | `:58` |
 | `layout` | `'auto' \| ...` | 可选 | `'auto'` | `:59` |
 | `countField` | string | 可选 | `count` | `:60`（per-item count 读自该组件字段） |
-| `bindings` | `ComputeBindingDecl[]` | 可选 | — | `:61`（声明式 `@group(0)` 绑定） |
+| `bindings` | `ComputeBindingDecl[]` | 可选 | — | `:61`（声明式 `@group(0)` 绑定；`ctx.dispatchCompute(name, count, undefined, eid)` 自动解析） |
 
 **`ComputeBindingDecl`：**
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 |------|------|------|------|------|
 | `binding` | number | **必填** | — | `@binding(N)` |
-| `source` | `'storage'\|'uniform'\|'timeInput'` | **必填** | — | |
+| `source` | `'storage'\|'uniform'\|'timeInput'\|'storageTexture'\|'texture'` | **必填** | — | storage=per-entity SSBO；uniform=打包 UBO；timeInput=全局 TimeInput UBO；storageTexture=写/读写 storage 纹理；texture=只读采样纹理 |
 | `key` | string | 可选 | — | buffer 缓存 key 前缀（后缀实体 id） |
 | `stride` | number | 可选 | — | storage：每项字节 |
 | `strideLayout` | string | 可选 | — | storage：uniform-layouts 名，byteSize × count |
-| `pack` | string[] | 可选 | — | uniform：打包值（组件字段名或 `$time`/`$count`） |
+| `pack` | string[] | 可选 | — | uniform：打包值（组件字段名或 `$time`/`$count`/数字字面量） |
+| `texture` | string | 可选 | — | storageTexture/texture：纹理引用。`renderTarget:<name>`（仅 texture；render target 无 STORAGE_BINDING 用法故 storageTexture 引用会 throw）/ `asset:<path>`（相对 dataRoot）/ `<Component>.<field>`（per-eid u32 句柄）/ `<namedKey>`（resourceManager.getTexture key） |
+| `access` | `GPUStorageTextureAccess` | 可选 | `'write-only'` | storageTexture：访问模式 |
+| `viewDimension` | `GPUTextureViewDimension` | 可选 | `'2d'` | storageTexture/texture：视图维度 |
+
+> **纹理大小无需额外 UBO**：WGSL `textureDimensions(myStorageTex)` 在 shader 内直接查询 storage 纹理尺寸。其他标量参数（笔刷颜色/半径等）走 `uniform` source 的 `pack`。
+> **解析器**：`resolveComputeBindings(bindings, ctx)`（`src/core/render/computeBindings.ts`，经 `@shaderlab/api` 导出）按 per-eid 上下文解析所有 source 为 `GPUBindGroupEntry[]`。`Engine.dispatchCompute` 在 `entries` 缺席 + `eid` 提供 + pipeline 有 `bindings` 时自动调用。
 
 ```json
 {
@@ -848,6 +854,22 @@ schema 同 [C8](#c8-app-systemsjson--系统顺序覆写)。`Engine.init` 装载�
   "compute": { "shader": "../shaders/ParticleSim.wgsl", "entryPoint": "main" },
   "workgroupSize": 64,
   "bindLayout": ["particleSim"]
+}
+```
+
+**storageTexture 示例（GPU 端纹理编辑）**：
+```json
+{
+  "name": "PaintComputePipeline",
+  "compute": { "shader": "../shaders/Paint.wgsl", "entryPoint": "main" },
+  "workgroupSize": 8,
+  "bindLayout": ["textureEditCompute"],
+  "countField": "CanvasComponent.width",
+  "bindings": [
+    { "binding": 0, "source": "storageTexture", "texture": "CanvasComponent.texHandle", "access": "read-write" },
+    { "binding": 1, "source": "uniform", "key": "brush", "pack": ["BrushComponent.color", "BrushComponent.radius", "BrushComponent.opacity"] },
+    { "binding": 2, "source": "timeInput" }
+  ]
 }
 ```
 

@@ -66,8 +66,15 @@ export interface ComputePipelineConfig {
 /** One entry in a compute pipeline's declarative bind group. */
 export interface ComputeBindingDecl {
     binding: number;
-    /** storage = per-entity SSBO; uniform = packed UBO; timeInput = global TimeInput UBO. */
-    source: 'storage' | 'uniform' | 'timeInput';
+    /** Source kind for this binding:
+     *  - 'storage'        per-entity SSBO (key + eid suffix, sized by stride×count)
+     *  - 'uniform'        packed UBO (component fields / $time / $count)
+     *  - 'timeInput'      global TimeInput UBO (declared by the 'input' system)
+     *  - 'storageTexture' write / read-write storage texture (use for GPU-side
+     *                     texture editing; shader queries dimensions via
+     *                     textureDimensions() — no extra UBO needed)
+     *  - 'texture'        read-only sampled texture (renderTarget:/asset:/handle/key) */
+    source: 'storage' | 'uniform' | 'timeInput' | 'storageTexture' | 'texture';
     /** Buffer cache-key prefix (storage/uniform), suffixed with the entity id. */
     key?: string;
     /** storage: bytes per item (buffer size = count * stride). */
@@ -76,6 +83,17 @@ export interface ComputeBindingDecl {
     strideLayout?: string;
     /** uniform: values to pack, each a component field name or `$time` / `$count`. */
     pack?: string[];
+    /** storageTexture/texture: texture reference. Forms:
+     *  - "renderTarget:<name>" (texture source only — render targets lack
+     *    STORAGE_BINDING usage, so binding one as storageTexture throws)
+     *  - "asset:<path>"        relative to engine-config.dataRoot
+     *  - "<Component>.<field>"  u32 handle resolved per-eid (e.g. CanvasComponent.texHandle)
+     *  - "<namedKey>"           resourceManager.getTexture key */
+    texture?: string;
+    /** storageTexture: access mode. Defaults 'write-only'. */
+    access?: GPUStorageTextureAccess;
+    /** storageTexture/texture: view dimension. Defaults '2d'. */
+    viewDimension?: GPUTextureViewDimension;
 }
 
 /** Retained metadata for a compiled compute pipeline. */
