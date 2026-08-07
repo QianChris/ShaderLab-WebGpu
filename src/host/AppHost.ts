@@ -1,5 +1,7 @@
 import { Engine } from '../core/Engine';
 import { EventBus } from '../core/events/EventBus';
+import { UIManager } from './UIManager';
+import { IndexedDBFS, FileSystemAccessFS, type ProjectFS } from './ProjectFS';
 import type { Command, CommandContext } from '../editor/commands/Command';
 import type { UILayer } from '../ui/UILayer';
 
@@ -20,11 +22,17 @@ export class AppHost {
     public engine: Engine;
     private uiLayers: UILayer[] = [];
     private uiContainer: HTMLElement;
-    private editorLayer?: { dispatch(cmd: Command): boolean };
+    private uiManager: UIManager;
+    private editorLayer?: { dispatch(cmd: Command): boolean; undo?(): void; redo?(): void };
+    /** Project file-system backend for editor persistence (scripts/shaders/
+     *  scene). Defaults to IndexedDBFS (refresh-safe, no permission); can be
+     *  switched to FileSystemAccessFS via connectProjectFolder(). */
+    projectFS: ProjectFS = new IndexedDBFS();
 
     constructor(canvas: HTMLCanvasElement, uiContainer: HTMLElement) {
         this.engine = new Engine(canvas);
         this.uiContainer = uiContainer;
+        this.uiManager = new UIManager(uiContainer);
     }
 
     async init(): Promise<void> { await this.engine.init(); }
@@ -32,6 +40,16 @@ export class AppHost {
     startLoop(): void { this.engine.startLoop(); }
     resize(): void { this.engine.resize(); }
     get engineConfig() { return this.engine.engineConfig; }
+
+    /** Prompt the user to pick the project root folder (Chrome File System
+     *  Access API). On success, switches projectFS to FileSystemAccessFS so
+     *  saves write real files. Returns false if unavailable or cancelled. */
+    async connectProjectFolder(): Promise<boolean> {
+        const fs = await FileSystemAccessFS.connect();
+        if (!fs) return false;
+        this.projectFS = fs;
+        return true;
+    }
 
     // Read-only proxies (UI layer queries).
     get scene() { return this.engine.scene; }
@@ -51,6 +69,7 @@ export class AppHost {
     unmountAll(): void {
         for (const layer of this.uiLayers) layer.unmount();
         this.uiLayers = [];
+        this.uiManager.unmountAll();
         this.editorLayer = undefined;
     }
 
@@ -63,51 +82,16 @@ export class AppHost {
         return cmd.execute(ctx);
     }
 
+    /** Load the app's custom UI scripts (app.json `ui` field). Delegated to
+     *  UIManager; the public signature is unchanged so main.ts / player.ts /
+     *  EditorOrchestrator.switchApp keep calling host.loadAppUI(base). */
     async loadAppUI(appBase: string): Promise<void> {
-        for (const layer of this.appUILayers) layer.unmount();
-        this.appUILayers = [];
-
-        const manifestResp = await fetch(`${appBase}/app.json`);
-        if (!manifestResp.ok) return;
-        const manifest = await manifestResp.json() as { ui?: string };
-        if (!manifest.ui) return;
-
-        const configs = await fetch(`${appBase}/${manifest.ui}`).then(r => r.json()) as AppUIConfig[];
-        for (const cfg of configs) {
-            const container = (cfg.container ? document.querySelector<HTMLElement>(cfg.container) : null)
-                ?? this.createContainer(cfg.id);
-            const mod = await this.loadUIScript(`${appBase}/${cfg.source}`);
-            const unmount = mod.mount(container, this);
-            this.appUILayers.push({ id: cfg.id, unmount });
-        }
+        await this.uiManager.loadAppUI(appBase, this);
     }
 
-    private appUILayers: Array<{ id: string; unmount: () => void }> = [];
-
-    private createContainer(id: string): HTMLElement {
-        const el = document.createElement('div');
-        el.id = `ui-${id}`;
-        this.uiContainer.appendChild(el);
-        return el;
-    }
-
-    private async loadUIScript(url: string): Promise<{ mount: (container: HTMLElement, host: AppHost) => () => void }> {
-        const resp = await fetch(`${url}?t=${Date.now()}`);
-        if (!resp.ok) throw new Error(`UI script not found: ${url}`);
-        const src = await resp.text();
-        const blob = new Blob([src], { type: 'text/javascript' });
-        const blobUrl = URL.createObjectURL(blob);
-        try {
-            const mod = await import(/* @vite-ignore */ blobUrl);
-            return mod.default ?? mod;
-        } finally {
-            URL.revokeObjectURL(blobUrl);
-        }
-    }
-}
-
-interface AppUIConfig {
-    id: string;
-    source: string;
-    container?: string;
+    /** Undo the last editor command (routes through the editor layer's command
+     *  bus). No-op in player mode (no editor layer). */
+    undo(): void { this.editorLayer?.undo?.(); }
+    /** Redo the last undone editor command. No-op in player mode. */
+    redo(): void { this.editorLayer?.redo?.(); }
 }

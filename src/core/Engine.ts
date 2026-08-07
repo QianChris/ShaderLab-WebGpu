@@ -4,6 +4,7 @@ import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
 import { PipelineLoader } from './render/PipelineLoader';
+import { resolveComputeBindings } from './render/computeBindings';
 import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
@@ -105,6 +106,10 @@ export class Engine {
     gltfMapping: GltfMapping | null = null;
     /** Currently loaded app id, or null before first load / after unload. */
     currentApp: string | null = null;
+    /** Scene file path (relative to the app base) for the current app — from
+     *  app.json's `scene` field, default "scene.json". Lets the editor write
+     *  scene edits back to the exact loaded file. */
+    sceneFile = 'scene.json';
     /** Opaque objects published by plugins (owner-tagged), consumed by hooks. */
     attachments = new Map<string, { obj: unknown; owner: string }>();
     /** Plain-object view of attachments handed to FrameContext / hooks. */
@@ -371,6 +376,7 @@ export class Engine {
             throw new Error(`App not found at ${base}/app.json. If you renamed the folder, update the "name" field in app.json to match.`);
         }
         const manifest = await manifestResp.json() as AppManifest;
+        this.sceneFile = manifest.scene ?? 'scene.json';
 
         // App-scoped plugins (unloaded on app switch). Loaded before systems.json
         // so plugin-registered systems are resolvable in the app's system order.
@@ -471,6 +477,7 @@ export class Engine {
         // registered under their own owner tag (swept via sweepPluginOwner).
         pluginManager.unloadAppPlugins();
         this.currentApp = null;
+        this.sceneFile = 'scene.json';
     }
 
     /** Resource counts for diagnostics / stress testing (delegates to ResourceManager). */
@@ -518,8 +525,8 @@ export class Engine {
             getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
             getBuffer: (name: string) => bufferRegistry.get(name),
             writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
-            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[]) => {
-                this.dispatchCompute(pipelineName, count, entries);
+            dispatchCompute: (pipelineName: string, count: number, entries?: GPUBindGroupEntry[], eid?: number) => {
+                this.dispatchCompute(pipelineName, count, entries, eid);
             },
             flushCompute: () => { this.flushCompute(); },
         };
@@ -564,8 +571,12 @@ export class Engine {
     /** Dispatch a preloaded compute pipeline by name (script-system escape hatch).
      *  Dispatches are batched into one compute pass per frame and submitted
      *  together by flushCompute() (called by the renderer before recording
-     *  render passes, and at end of frame as a safety net). */
-    private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[]): void {
+     *  render passes, and at end of frame as a safety net).
+     *  When `entries` is omitted but `eid` is provided AND the pipeline's
+     *  ComputeMeta declares `bindings`, the bindings are resolved declaratively
+     *  (storage/uniform/timeInput/storageTexture/texture) against this entity
+     *  + the current FrameContext — see resolveComputeBindings(). */
+    private dispatchCompute(pipelineName: string, count: number, entries?: GPUBindGroupEntry[], eid?: number): void {
         const pipeline = this.renderGraph.getComputePipeline(pipelineName);
         if (!pipeline) throw new Error(`compute pipeline '${pipelineName}' not loaded`);
         const meta = PipelineLoader.getComputeMeta(pipelineName);
@@ -578,6 +589,17 @@ export class Engine {
             this.pendingComputePass = this.pendingComputeEncoder.beginComputePass();
         }
         this.pendingComputePass.setPipeline(pipeline);
+        // Declarative binding resolution: if the caller didn't supply raw
+        // entries but did supply an eid AND the pipeline declares bindings,
+        // resolve them now (storage/uniform/timeInput/storageTexture/texture).
+        if ((!entries || entries.length === 0) && eid !== undefined && meta && meta.bindings.length > 0) {
+            entries = resolveComputeBindings(meta.bindings, {
+                scene: this.scene, eid, count,
+                time: this.frameCtx.time, dt: this.frameCtx.dt,
+                aspect: this.frameCtx.aspect, screenW: this.frameCtx.cw, screenH: this.frameCtx.ch,
+                dataBase: this.engineConfig.dataRoot,
+            });
+        }
         if (entries && entries.length > 0) {
             const bg = this.device.createBindGroup({
                 layout: pipeline.getBindGroupLayout(0),

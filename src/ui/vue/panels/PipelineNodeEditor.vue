@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue';
-import { VueFlow, useVueFlow, type Node, type Edge } from '@vue-flow/core';
+import { VueFlow, useVueFlow, Handle, Position, type Node, type Edge, type Connection } from '@vue-flow/core';
 import { Background } from '@vue-flow/background';
 import { Controls } from '@vue-flow/controls';
 import '@vue-flow/core/dist/style.css';
@@ -87,6 +87,21 @@ function onFlowReady(): void {
 useEditorEvent('editor:changed', refreshList);
 onMounted(refreshList);
 
+// ── Keyboard: Delete removes the selected node; Ctrl+Z/Y undo/redo. ──
+function onKeydown(e: KeyboardEvent): void {
+    if (e.key === 'Delete' && selectedNodeId.value) {
+        e.preventDefault();
+        removeNode(selectedNodeId.value);
+        selectedNodeId.value = '';
+    } else if (e.ctrlKey && !e.shiftKey && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        host.undo();
+    } else if (e.ctrlKey && ((e.key === 'y' || e.key === 'Y') || (e.shiftKey && (e.key === 'z' || e.key === 'Z')))) {
+        e.preventDefault();
+        host.redo();
+    }
+}
+
 // ── Edits ──────────────────────────────────────────────
 
 function applyGraph(mutate: (g: ShaderGraph) => void): void {
@@ -98,11 +113,8 @@ function applyGraph(mutate: (g: ShaderGraph) => void): void {
     loadGraph();
 }
 
-function addNode(): void {
-    const type = (window as unknown as { prompt: (m: string) => string | null }).prompt(
-        `Node type (${NODE_TYPES.join(' / ')}):`,
-    ) as string | null;
-    if (!type || !(NODE_TYPES as readonly string[]).includes(type)) {
+function addNode(type: string): void {
+    if (!(NODE_TYPES as readonly string[]).includes(type)) {
         statusMsg.value = 'Invalid node type';
         return;
     }
@@ -135,6 +147,57 @@ function removeNode(nodeId: string): void {
     });
 }
 
+/** Draw a new edge (vue-flow @connect). Constructs a ShaderGraphEdge from the
+ *  connection's source/target + handle ids and dispatches via applyGraph so
+ *  it enters the undo stack (same mechanism as commitParams). Connection
+ *  constraints are enforced by isValidConnection first. */
+function onConnect(conn: Connection): void {
+    if (!isValidConnection(conn)) {
+        statusMsg.value = 'invalid connection — data.out→shader.in:N only; body/next from control nodes';
+        return;
+    }
+    if (!conn.source || !conn.target) return;
+    // Block duplicate edges (same source/handle → target/handle).
+    const graph = currentGraph();
+    if (graph?.edges.some(e =>
+        e.source === conn.source && e.sourceHandle === (conn.sourceHandle ?? 'out')
+        && e.target === conn.target && e.targetHandle === (conn.targetHandle ?? 'in:0'))) {
+        statusMsg.value = 'connection already exists';
+        return;
+    }
+    const edge: ShaderGraphEdge = {
+        id: `e${Date.now()}`,
+        source: conn.source,
+        sourceHandle: (conn.sourceHandle ?? 'out') as ShaderGraphEdge['sourceHandle'],
+        target: conn.target,
+        targetHandle: conn.targetHandle ?? 'in:0',
+    };
+    applyGraph(g => { g.edges.push(edge); });
+    statusMsg.value = '';
+}
+
+/** Connection constraints:
+ *  - data.out → shader.in:N only (buffer binding)
+ *  - body/next from control nodes (if/foreach/loop) → any target (the
+ *    executor determines role by sourceHandle, so the target handle is free)
+ *  - no self-loops, no other handle combinations */
+function isValidConnection(conn: Connection): boolean {
+    if (!conn.source || !conn.target || conn.source === conn.target) return false;
+    const srcNode = flowNodes.value.find(n => n.id === conn.source);
+    const tgtNode = flowNodes.value.find(n => n.id === conn.target);
+    if (!srcNode || !tgtNode) return false;
+    const sh = conn.sourceHandle ?? '';
+    const th = conn.targetHandle ?? '';
+    if (sh === 'out') {
+        // data output → shader binding slot only
+        return srcNode.type === 'data' && tgtNode.type === 'shader' && /^in:\d+$/.test(th);
+    }
+    if (sh === 'body' || sh === 'next') {
+        return srcNode.type === 'if' || srcNode.type === 'foreach' || srcNode.type === 'loop';
+    }
+    return false;
+}
+
 /** Re-serialize the flow node data back into the graph. Fields edited in the
  *  inspector (see selectedNodeParams) mutate node.data.node, so we push the
  *  live node objects back into the graph and dispatch. */
@@ -143,11 +206,26 @@ function commitParams(): void {
     if (!graph) return;
     nodeParamError.value = '';
     const prev = JSON.stringify(graph);
-    // Read current values from the flow nodes.
-    const nodes = flowNodes.value.map(n => (n.data as { node: ShaderGraphNode }).node);
+    // Read current values from the flow nodes — including dragged positions
+    // (vue-flow updates node.position on drag; mirror it into the graph node
+    // so Save persists the layout. Absent position = graphAdapter auto-layouts).
+    const nodes = flowNodes.value.map(n => {
+        const node = (n.data as { node: ShaderGraphNode }).node;
+        if (n.position) node.position = { x: n.position.x, y: n.position.y };
+        return node;
+    });
     graph.nodes = nodes;
     host.dispatch(new MutateShaderGraphCommand(graph.name, graph, prev));
     loadGraph();
+    statusMsg.value = '';
+}
+
+/** Track position changes (drag) without dispatching a command per frame —
+ *  the user clicks Apply (commitParams) to persist. Just flag unsaved state. */
+function onNodesChange(changes: { type: string; id?: string }[]): void {
+    if (changes.some(c => c.type === 'position')) {
+        statusMsg.value = 'unsaved layout — click Apply';
+    }
 }
 
 const selectedNodeId = ref<string>('');
@@ -163,13 +241,12 @@ function selectNode(id: string): void {
 </script>
 
 <template>
-    <div class="node-editor vue-panel">
+    <div class="node-editor vue-panel" tabindex="0" @keydown="onKeydown">
         <div class="toolbar">
             <select v-model="selectedName" @change="loadGraph">
                 <option v-for="g in graphNames" :key="g" :value="g">{{ g }}</option>
             </select>
-            <button @click="addNode">+ Node</button>
-            <button @click="commitParams">Apply Params</button>
+            <button @click="commitParams">Apply</button>
             <span class="status">{{ statusMsg }}</span>
         </div>
 
@@ -178,41 +255,61 @@ function selectNode(id: string): void {
             (or register one via RegisterShaderGraphCommand).
         </div>
 
-        <div v-else class="flow-wrap">
+        <div v-else class="flow-area">
+            <!-- Palette: click a node template to add it -->
+            <div class="palette">
+                <div class="palette-title">Add</div>
+                <button v-for="t in NODE_TYPES" :key="t" :class="['palette-item', `node-${t}`]"
+                        :title="`Add ${t} node`" @click="addNode(t)">{{ t }}</button>
+            </div>
+            <div class="flow-wrap">
             <VueFlow
                 :nodes="flowNodes"
                 :edges="flowEdges"
                 :node-types="{}"
                 fit-view-on-init
                 @ready="onFlowReady"
+                @connect="onConnect"
+                @nodes-change="onNodesChange"
                 @node-click="({ node }) => selectNode(node.id)"
                 @node-double-click="({ node }) => removeNode(node.id)">
                 <template #node-data="{ data }">
                     <div class="gf-node node-data">
+                        <Handle type="source" :position="Position.Right" id="out" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">BufferHandle source</div>
                     </div>
                 </template>
                 <template #node-shader="{ data }">
                     <div class="gf-node node-shader">
+                        <Handle type="target" :position="Position.Left" id="in:0" />
+                        <Handle type="target" :position="Position.Left" id="in:1" style="top:60%" />
+                        <Handle type="target" :position="Position.Left" id="in:2" style="top:80%" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Compute shader</div>
                     </div>
                 </template>
                 <template #node-if="{ data }">
                     <div class="gf-node node-if">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Conditional</div>
                     </div>
                 </template>
                 <template #node-foreach="{ data }">
                     <div class="gf-node node-loop">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Iterate</div>
                     </div>
                 </template>
                 <template #node-loop="{ data }">
                     <div class="gf-node node-loop">
+                        <Handle type="source" :position="Position.Bottom" id="body" />
+                        <Handle type="source" :position="Position.Right" id="next" />
                         <div class="gf-title">{{ data.label }}</div>
                         <div class="gf-hint">Loop</div>
                     </div>
@@ -220,6 +317,7 @@ function selectNode(id: string): void {
                 <Background pattern-color="#333" :gap="16" />
                 <Controls />
             </VueFlow>
+            </div>
         </div>
 
         <!-- Node inspector: edit params sourced from component fields -->
@@ -266,6 +364,21 @@ function selectNode(id: string): void {
 .toolbar { padding: 6px; background: #1a1a1a; border-bottom: 1px solid #333; display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
 .toolbar select, .toolbar button { font-size: 11px; background: #2a3a5c; color: #ccc; border: 1px solid #3a4a6c; border-radius: 3px; padding: 2px 6px; }
 .status { color: #7fd8a8; font-size: 10px; margin-left: auto; }
+.flow-area { flex: 1; display: flex; min-height: 0; }
+.palette {
+    width: 80px; flex-shrink: 0; background: #1a1a1a; border-right: 1px solid #333;
+    display: flex; flex-direction: column; gap: 4px; padding: 6px;
+}
+.palette-title { color: #8899aa; font-size: 9px; text-transform: uppercase; font-weight: 600; }
+.palette-item {
+    font-size: 10px; padding: 4px 6px; border-radius: 3px; cursor: pointer;
+    border: 1px solid #3a4a6c; color: #ccc; background: #0d1b33; text-align: left;
+}
+.palette-item:hover { background: #1e2d44; border-color: #4a8fc7; }
+.palette-item.node-data { border-left: 3px solid #4a8fc7; }
+.palette-item.node-shader { border-left: 3px solid #2f7a58; }
+.palette-item.node-if { border-left: 3px solid #c77f4a; }
+.palette-item.node-foreach, .palette-item.node-loop { border-left: 3px solid #7a4ac7; }
 .flow-wrap { flex: 1; min-height: 0; position: relative; }
 .empty { padding: 20px; color: #667; }
 .vue-flow { flex: 1; background: #111; }

@@ -83,6 +83,8 @@ export type {
     GeometryHookContext,
     ComputeHookContext,
 } from './core/render/PipelineDriver';
+export { resolveComputeBindings } from './core/render/computeBindings';
+export type { ComputeResolveContext } from './core/render/computeBindings';
 
 /* ── Events ────────────────────────────────────────────────────── */
 export { EventBus } from './core/events/EventBus';

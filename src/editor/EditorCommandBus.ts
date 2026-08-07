@@ -1,4 +1,5 @@
 import type { Engine } from '../core/Engine';
+import type { ProjectFS } from '../host/ProjectFS';
 import type { Command, CommandContext } from './commands/Command';
 import {
     SetFieldCommand,
@@ -33,6 +34,15 @@ export class EditorCommandBus {
     constructor(private _engine: Engine) {}
 
     get engine(): Engine { return this._engine; }
+    /** ProjectFS for editor persistence (script/shader/scene writes). Set by
+     *  EditorOrchestrator after construction from host.projectFS. Optional so
+     *  the bus works without a host (tests). */
+    projectFS?: ProjectFS;
+    /** True when any command has dispatched since the last save. Toolbar shows
+     *  an unsaved indicator; cleared by clearDirty() on explicit saves. */
+    private _dirty = false;
+    get dirty(): boolean { return this._dirty; }
+    clearDirty(): void { this._dirty = false; this._engine.eventBus.emit('editor:changed', { source: 'dirty-cleared' }); }
     get editMode(): EditMode { return this.mode; }
     get scene() { return this._engine.scene; }
     get renderGraph() { return this._engine.renderGraph; }
@@ -78,6 +88,7 @@ export class EditorCommandBus {
         this.undoStack.push(cmd);
         if (this.undoStack.length > this.maxHistory) this.undoStack.shift();
         this.redoStack.length = 0;
+        this._dirty = true;
         this._engine.eventBus.emit('editor:changed', { source: cmd.type });
         return true;
     }

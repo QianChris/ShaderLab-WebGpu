@@ -32,6 +32,9 @@ export type ShaderGraphBufferKind = 'storage' | 'uniform' | 'vertex';
 export interface ShaderGraphDataNode {
     id: string;
     type: 'data';
+    /** Optional editor-only position (vue-flow canvas coords). Absent =
+     *  graphAdapter auto-layouts the node. Not consumed by the executor. */
+    position?: { x: number; y: number };
     /** Buffer handle source: `Component.field` (a u32 BufferHandle) or
      *  `buffer:<name>` for a BufferRegistry storage/uniform buffer. */
     source: string;
@@ -47,6 +50,8 @@ export interface ShaderGraphDataNode {
 export interface ShaderGraphShaderNode {
     id: string;
     type: 'shader';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** WGSL shader ref (resolved like pipeline shaders — plugin/URL/virtual). */
     shader: string;
     entryPoint: string;
@@ -58,6 +63,8 @@ export interface ShaderGraphShaderNode {
 export interface ShaderGraphIfNode {
     id: string;
     type: 'if';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Condition value source — a scalar component field (non-zero = true). */
     condition: string;
 }
@@ -65,6 +72,8 @@ export interface ShaderGraphIfNode {
 export interface ShaderGraphForEachNode {
     id: string;
     type: 'foreach';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Item count value source — a component field. */
     count: string;
     /** Optional index source (e.g. `builtin.entityId` or a component field). */
@@ -74,6 +83,8 @@ export interface ShaderGraphForEachNode {
 export interface ShaderGraphLoopNode {
     id: string;
     type: 'loop';
+    /** Optional editor-only position (vue-flow canvas coords). */
+    position?: { x: number; y: number };
     /** Iteration count — a component field or numeric literal. */
     iterations: string;
 }
@@ -128,6 +139,11 @@ export class ShaderGraphExecutor {
     private bindingsOf = new Map<string, Array<{ binding: number; dataNodeId: string }>>();
     /** Cache of compiled value-source closures keyed by the source string. */
     private compiledSrc = new Map<string, (ctx: ValueContext) => number | ArrayLike<number>>();
+    /** Per-frame cache of EVALUATED value sources, keyed by `${eid}:${src}`.
+     *  Cleared at the start of each run(); lets multiple nodes (or a node
+     *  inside a foreach body) reading the same Component.field reuse the
+     *  first evaluation within the same frame + entity context. */
+    private fieldCache = new Map<string, number>();
     private resolvedBuffers = new Map<string, GPUBuffer>();
     /** Lazily-allocated output buffers (data nodes with allocCount). Owned by
      *  the executor; recreated on demand when the count grows. */
@@ -240,6 +256,7 @@ export class ShaderGraphExecutor {
     /** Execute the whole graph for one entity. Returns the resolved output buffers. */
     run(frame: ShaderGraphFrame): Map<string, GPUBuffer> {
         this.resolvedBuffers.clear();
+        this.fieldCache.clear();
         const vctx: ValueContext = {
             scene: frame.scene, eid: frame.eid, tag: '',
             time: frame.time, dt: frame.dt,
@@ -370,9 +387,18 @@ export class ShaderGraphExecutor {
     }
 
     private evalSource(src: string, vctx: ValueContext): number | ArrayLike<number> {
+        // Per-frame cache: same eid + same source = same result (the frame is
+        // a snapshot; component fields don't mutate mid-run). The eid is part
+        // of the key so foreach iterations (which change vctx.eid) don't share
+        // results across entities.
+        const key = `${vctx.eid}:${src}`;
+        const cached = this.fieldCache.get(key);
+        if (cached !== undefined) return cached;
         const fn = this.compileSource(src);
         const v = fn(vctx);
-        return typeof v === 'number' ? v : (v[0] ?? 0);
+        const result = typeof v === 'number' ? v : (v[0] ?? 0);
+        this.fieldCache.set(key, result);
+        return result;
     }
 }
 

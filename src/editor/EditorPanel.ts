@@ -1,7 +1,7 @@
 import type { EditorCommandBus } from './EditorCommandBus';
 import { schemaRegistry } from '../core/ecs/SchemaRegistry';
 import type { SceneData } from '../core/ecs/Scene';
-import { ce, makeFloatField, makeSelect } from './dom';
+import { ce, makeFloatField, makeSelect, makeColorField, makeAssetRef, MIME_MESH, MIME_TEXTURE } from './dom';
 
 export class EditorPanel {
     private panel: HTMLElement;
@@ -26,6 +26,14 @@ export class EditorPanel {
 
     attach(bus: EditorCommandBus): void {
         this.bus = bus;
+        this.panel.tabIndex = 0;
+        // Ctrl+S saves the scene (to projectFS if connected, else download).
+        this.panel.onkeydown = (e: KeyboardEvent) => {
+            if (e.ctrlKey && (e.key === 's' || e.key === 'S')) {
+                e.preventDefault();
+                void this.saveJSON();
+            }
+        };
         // Idempotent: app switch clears the event bus, so re-attaching must not
         // double-subscribe.
         this.unsubscribe?.();
@@ -41,6 +49,10 @@ export class EditorPanel {
     }
 
     render(): void {
+        try { this.renderInner(); }
+        catch (e) { console.error('[EditorPanel] render failed:', e); this.panel.innerHTML = '<div class="ed-error">Render failed — see console</div>'; }
+    }
+    private renderInner(): void {
         this.panel.innerHTML = '';
         this.syncers = [];
         const scene = this.bus.scene;
@@ -175,7 +187,7 @@ export class EditorPanel {
         return wrap;
     }
 
-    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[] }): HTMLElement {
+    private renderField(entityKey: string, eid: number, compName: string, field: string, fd: { type: string; default: unknown; options?: string[]; role?: string }): HTMLElement {
         const scene = this.bus.scene;
         const row = ce('div', 'ed-field-row');
         row.appendChild(ce('label', 'ed-field-label', field));
@@ -183,7 +195,48 @@ export class EditorPanel {
         const val = scene.getField(eid, compName, field);
         const numInputs = ce('div', 'ed-field-inputs');
 
-        if (fd.type === 'string' && fd.options) {
+        // ── Role dispatch (resource references / color) — runs BEFORE the
+        //    raw-type dispatch so a 'mesh' string or 'texture' u32 renders as
+        //    a dropdown+drop instead of a plain text/number input. ──
+        const role = fd.role;
+        if (role === 'color' && (fd.type === 'vec3' || fd.type === 'vec4')) {
+            const arr = (Array.isArray(val) ? val : (fd.default as number[])) as number[];
+            const el = makeColorField(arr, newVal => this.bus.setField(entityKey, compName, field, newVal));
+            this.syncers.push(() => {
+                const cur = scene.getField(eid, compName, field) as number[] | undefined;
+                if (cur) el.setValue(cur);
+            });
+            numInputs.appendChild(el.el);
+        } else if (role === 'mesh') {
+            const rm = this.bus.engine.resourceManager;
+            const names = rm.getMeshNames();
+            const cur = (val as string) ?? String(fd.default ?? '');
+            const el = makeAssetRef(names, cur, name => this.bus.setField(entityKey, compName, field, name), MIME_MESH);
+            this.syncers.push(() => {
+                const cur2 = scene.getField(eid, compName, field) as string | undefined;
+                if (cur2 != null) el.setValue(cur2);
+            });
+            numInputs.appendChild(el.el);
+        } else if (role === 'texture') {
+            const rm = this.bus.engine.resourceManager;
+            const names = rm.getTextureNames();
+            const handle = Number(val ?? fd.default ?? 0);
+            const curName = rm.textureKeyFromHandle(handle) ?? '';
+            const el = makeAssetRef(
+                names,
+                curName,
+                name => this.bus.setField(entityKey, compName, field, rm.textureHandle(name)),
+                MIME_TEXTURE,
+            );
+            this.syncers.push(() => {
+                const cur = scene.getField(eid, compName, field);
+                if (cur != null) {
+                    const name = rm.textureKeyFromHandle(Number(cur)) ?? '';
+                    el.setValue(name);
+                }
+            });
+            numInputs.appendChild(el.el);
+        } else if (fd.type === 'string' && fd.options) {
             const sel = makeSelect(fd.options, (val as string) ?? String(fd.default), v => this.bus.setField(entityKey, compName, field, v));
             this.syncers.push(() => {
                 const cur = scene.getField(eid, compName, field) as string | undefined;
@@ -262,9 +315,22 @@ export class EditorPanel {
         this.render();
     }
 
-    private saveJSON(): void {
+    private async saveJSON(): Promise<void> {
         const json = { entities: this.bus.scene.toJSON() };
-        const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+        const text = JSON.stringify(json, null, 2);
+        const fs = this.bus.projectFS;
+        if (fs && fs.backend !== 'none') {
+            try {
+                const appName = this.bus.engine.currentApp ?? 'scene';
+                await fs.writeFile(`apps/${appName}/${this.bus.engine.sceneFile}`, text);
+                this.bus.clearDirty();
+                return;
+            } catch (e) {
+                console.warn('[EditorPanel] projectFS write failed, falling back to download:', e);
+            }
+        }
+        // Fallback: browser download (original behavior).
+        const blob = new Blob([text], { type: 'application/json' });
         const a = document.createElement('a');
         a.href = URL.createObjectURL(blob); a.download = 'scene.json'; a.click();
     }

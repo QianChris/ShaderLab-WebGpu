@@ -4,6 +4,17 @@ export interface FieldDef {
     type: string;
     default: unknown;
     options?: string[];
+    /** Semantic role hint. Consumed by the renderer (render-tag detection via
+     *  getFieldByRole/isRenderTag) AND by the editor UI (EditorPanel.renderField
+     *  dispatches on role before type). Known values:
+     *  - 'color'     → vec3/vec4 color (editor: color picker)
+     *  - 'mesh'      → string mesh name (editor: mesh dropdown + drop)
+     *  - 'texture'   → u32 texture handle (editor: texture dropdown + drop)
+     *  - 'shader'    → shader ref (editor: ref box)
+     *  - 'buffer'    → buffer handle
+     *  - 'extra'/'viewport' → renderer-only metadata
+     * The type stays `string` (not a union) so plugins can add custom roles
+     * without breaking existing color/extra/viewport consumers. */
     role?: string;
 }
 

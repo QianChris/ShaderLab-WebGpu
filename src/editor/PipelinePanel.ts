@@ -71,6 +71,10 @@ export class PipelinePanel {
     }
 
     render(): void {
+        try { this.renderInner(); }
+        catch (e) { console.error('[PipelinePanel] render failed:', e); this.panel.innerHTML = '<div class="ed-error">Render failed — see console</div>'; }
+    }
+    private renderInner(): void {
         this.panel.innerHTML = '';
 
         const head = ce('div', 'editor-head');

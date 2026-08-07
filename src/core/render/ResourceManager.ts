@@ -65,6 +65,14 @@ export class ResourceManager {
     private bufferFreeList: number[] = [];
     private textureFreeList: number[] = [];
 
+    /* mesh handle table: a stable numeric id per mesh NAME (not per GPU
+     * resource — there is no meshList array because meshes are not indexed
+     * GPU-side like textures). Handles are assigned lazily by getMeshHandle
+     * for known mesh names and used by the editor/preview as a cache key and
+     * a protocol-stable id. Index 0 reserved as invalid. */
+    private meshKeyToHandle = new Map<string, number>();
+    private meshHandleCounter = 0;
+
     private bindLayoutDecls = new Map<string, BindEntryDecl[]>();
     private bindLayouts = new Map<string, GPUBindGroupLayout>();
     private samplers = new Map<string, GPUSampler>();
@@ -188,11 +196,13 @@ export class ResourceManager {
             if (owner !== appId) continue;
             this.meshData.delete(name);
             this.meshDataOwner.delete(name);
+            this.meshKeyToHandle.delete(name);
         }
         for (const [name, owner] of this.pbrMeshDataOwner) {
             if (owner !== appId) continue;
             this.pbrMeshData.delete(name);
             this.pbrMeshDataOwner.delete(name);
+            this.meshKeyToHandle.delete(name);
         }
         for (const [name, owner] of this.meshGpuOwner) {
             if (owner !== appId) continue;
@@ -200,6 +210,7 @@ export class ResourceManager {
             if (gpu) this.destroyMeshGpu(gpu);
             this.meshGpu.delete(name);
             this.meshGpuOwner.delete(name);
+            this.meshKeyToHandle.delete(name);
         }
         for (const [key, owner] of this.uniformOwner) {
             if (owner !== appId) continue;
@@ -402,6 +413,18 @@ export class ResourceManager {
 
     hasMesh(name: string): boolean {
         return this.meshData.has(name) || this.pbrMeshData.has(name) || this.meshGpu.has(name);
+    }
+
+    /** CPU-side simple mesh data (positions/indices). Read-only accessor for
+     *  the editor's mesh wireframe preview. */
+    getMeshData(name: string): MeshData | undefined {
+        return this.meshData.get(name);
+    }
+
+    /** CPU-side PBR mesh data (positions/normals/uvs/...). Read-only accessor
+     *  for the editor's mesh wireframe preview. */
+    getPbrMeshData(name: string): PbrMeshData | undefined {
+        return this.pbrMeshData.get(name);
     }
 
     private makeVertexBuffer(src: ArrayLike<number>): GPUBuffer {
@@ -744,6 +767,42 @@ export class ResourceManager {
 
     textureHandle(key: string): number {
         return this.textureKeyToHandle.get(key) ?? 0;
+    }
+
+    /** Reverse lookup: a texture handle (u32 stored on an entity field) → the
+     *  resource key/name. Returns undefined for handle 0 or unknown handles.
+     *  Used by the editor's asset-reference field to display the name backing
+     *  a stored handle. */
+    textureKeyFromHandle(handle: number): string | undefined {
+        if (!handle) return undefined;
+        for (const [key, h] of this.textureKeyToHandle) {
+            if (h === handle) return key;
+        }
+        return undefined;
+    }
+
+    /** A stable numeric handle for a mesh NAME. Assigned lazily for known
+     *  meshes only (hasMesh must be true); returns 0 for unknown names. The
+     *  handle is NOT stored on MeshComponent.mesh (which keeps its string
+     *  name) — it exists for editor/preview cache keys and a protocol-stable
+     *  id. Parallel to textureHandle but without a GPU-resource list. */
+    getMeshHandle(name: string): number {
+        let h = this.meshKeyToHandle.get(name);
+        if (h === undefined) {
+            if (!this.hasMesh(name)) return 0;
+            h = ++this.meshHandleCounter;
+            this.meshKeyToHandle.set(name, h);
+        }
+        return h;
+    }
+
+    /** Reverse lookup: mesh handle → name. */
+    meshKeyFromHandle(handle: number): string | undefined {
+        if (!handle) return undefined;
+        for (const [name, h] of this.meshKeyToHandle) {
+            if (h === handle) return name;
+        }
+        return undefined;
     }
 
     async uploadTextureFromImage(key: string, img: ImageBitmap | HTMLImageElement | HTMLCanvasElement, sRGB = false): Promise<GPUTexture> {

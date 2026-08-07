@@ -16,34 +16,56 @@
 | `npm run dev` / `run.bat` | Vite 开发服务器 |
 | `npm run build` | `tsc`（src/ 类型检查）+ `vite build`（产出 main + 固定名 `assets/engine-api.js`） |
 | `npm run check:plugins` | `tsc -p public/plugins`（插件 TS 类型检查，经 `@shaderlab/api`→src 源码映射） |
+| `npm test` | `vitest run`（129 个测试，纯逻辑 + 机制 + 集成，<1 秒） |
+| `npm run verify` | 一键全量：`build` + `check:plugins` + `test` + `validate` + `smoke` |
 | `node scripts/validate-config.mjs` | 静态校验组合层（场景组件、管线引用、hook 可达、插件存在等） |
 | `node scripts/smoke-plugin-loader.mjs` | Node 冒烟：对真实插件跑 转译→import 重写→装载→实例化 全链 |
 
-**改完任何代码后至少跑 build + check:plugins + validate + smoke 四件套。** 无 Linter/格式化工具/浏览器测试自动化。
+**改完任何代码后至少跑 build + check:plugins + test + validate + smoke 五件套（= `npm run verify`）。** 无 Linter/格式化工具/浏览器测试自动化。
 
 ## 目录结构
 
 ```
-src/                          引擎 = 宿主 + 机制（对插件零知识）
-  main.ts                     入口：Engine + 两个编辑器面板 + rAF
-  Engine.ts                   宿主：GPU 初始化、engine-config、插件装卸编排、app 装卸、
+src/                          分层：host(宿主桥) → core(引擎机制) → ui/editor(界面)
+  main.ts                     编辑器入口：AppHost + EditorUILayer（无 rAF——AppHost.startLoop）
+  player.ts                   运行时入口（player.html）：AppHost only，无编辑器/工具/undo
+  api.ts                      @shaderlab/api 唯一公开面（基类+类型+机制单例+math+RAPIER/bitecs 再导出）
+  core/                       引擎机制（对插件零知识；原 src/ 根的引擎层全迁此）
+    Engine.ts                 宿主：GPU 初始化、engine-config、插件装卸编排、app 装卸、
                               帧循环（时间 + FrameContext 组装 + systems.json 顺序分发）、
                               attachments 表、插件 ctx/声明注入/owner 清扫、loadGltf
-  api.ts                      @shaderlab/api 唯一公开面（基类+类型+机制单例+math+RAPIER/bitecs 再导出）
-  plugins/
-    Plugin.ts                 EnginePlugin 基类 + PluginContext + 声明字段类型
-    PluginManager.ts          装载链：fetch → sucrase 剥类型 → es-module-lexer 重写 import
-                              （相对→Blob 递归；@shaderlab/api→api URL；裸导入 throw）→
-                              Blob import → meta.dependencies 拓扑 → init/applyDecls/setup；
-                              卸载：teardown → 各注册表按 owner 'plugin:<id>' 清扫
-  ecs/                        Scene(bitecs 封装) / SchemaRegistry / SystemRegistry / （皆 owner 化）
-  render/                     RenderGraph(相位调度执行器) / PipelineDriver(声明式 draw) /
-                              PipelineLoader(管线编译，含 '<plugin>:' 虚拟/文件源) /
-                              ResourceManager(GPU 资源+owner) / UniformLayout(std140) /
-                              vertexSlots / valueResolver(mini-DSL) / phaseBehaviors(默认三行为) /
-                              BufferRegistry / RenderScriptLoader(app 级逃生舱，官方 hook 已插件化)
-  tools/ ToolSystem(机制) + SceneTool 类型      events/ EventBus + EVENT_TYPES
-  gltf/ GltfLoader            editor/ 面板（读注册表，纯 DOM）
+    PluginHost.ts             插件声明应用/owner 清扫/render-hook/mesh-catalog（Engine 委托）
+    math.ts                   纯函数 vec3/vec4/mat4 + *Into out-param 变体
+    plugins/  Plugin.ts（EnginePlugin 基类 + PluginContext + 声明字段类型）
+              PluginManager.ts（装载链：fetch → sucrase 剥类型 → es-module-lexer 重写 import
+              （相对→Blob 递归；@shaderlab/api→api URL；裸导入 throw）→
+              Blob import → meta.dependencies 拓扑 → init/applyDecls/setup；
+              卸载：teardown → 各注册表按 owner 'plugin:<id>' 清扫）
+    ecs/      Scene(bitecs 封装) / SchemaRegistry / SystemRegistry（皆 owner 化）
+    render/   RenderGraph(相位调度执行器) / PipelineDriver(声明式 draw) /
+              PipelineLoader(管线编译，含 '<plugin>:' 虚拟/文件源) /
+              ResourceManager(GPU 资源+owner) / UniformLayout(std140) /
+              vertexSlots / valueResolver(mini-DSL) / phaseBehaviors(默认三行为) /
+              BufferRegistry / shaderGraph(节点式着色器图注册表) / RenderScriptLoader(app 级逃生舱)
+    tools/    ToolRegistry(机制)
+    events/   EventBus + eventTypes
+    gltf/     GltfLoader + GltfTypes
+  host/                       宿主桥层：UI Layer → AppHost → Engine Core（AppHost 是唯一桥）
+    AppHost.ts                 拥有 Engine + UI 层；dispatch(command) 下行 / eventBus 上行；
+                               编辑器层拦截 dispatch 走 command bus（edit-mode 门控 + undo/redo），
+                               无编辑器层（player）则直送 engine（不栈化）
+    ProjectFS.ts               项目文件系统抽象：FileSystemAccessFS / DevServerFS / IndexedDBFS / NullFS
+                               （按环境/权限切换；IndexedDBFS 为默认 refresh-safe 回退）
+    UIManager.ts               app 自定义 UI 脚本装载（app.json `ui` → Blob import mount(container,host)）
+  ui/                          界面层（唯一放 UI 代码处；经 host.dispatch 写，eventBus 读）
+    UILayer.ts                 接口：mount(container,host)/unmount
+    layers/  EditorUILayer(组合根，仅 main.ts 装) / EditorLayout(纯 DOM 框架) / EditorOrchestrator(行为)
+    vue/     Vue 面板 + composables + nodeGraph(节点图 @connect/Handle/palette/drag)
+  editor/                      原生面板 + 命令系统（被 ui/layers 消费，非自挂载）
+    EditorPanel.ts / PipelinePanel.ts(undo/redo + 虚拟滚动) / EditorCommandBus.ts / dom.ts(ce 工厂)
+    input/   EditorInputManager / ToolSystem / SceneTool
+    commands/ Command(基类) + Scene/RenderGraph/Shader/Script/ShaderGraph Commands
+  types/                       bitecs-legacy.d.ts
 
 public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发，改动无需重构引擎）
   index.ts                    default export class extends EnginePlugin；meta.id=目录名
@@ -103,7 +125,7 @@ export default class MyFxPlugin extends EnginePlugin {
 ## 引擎侧关键机制（改代码前须知）
 
 - **帧循环**（Engine.frame）：计时 → 组装 `FrameContext`（scene/time/dt/尺寸/device/eventBus/**attachments**/**getSystem**/getBuffer/writeBuffer/dispatchCompute，**无任何具体系统类型**）→ 按 systems.json 顺序 `systemRegistry.resolve(name).update(ctx)` → rAF。`appLoading` 期间跳帧。
-- **PhaseBehavior**：phases.json 每相位 `behavior` 名 → RenderGraph 注册表查表执行。引擎默认 `normal`（按 target 合并 pass）/`shadow-clear`/`postprocess-chain` 三个实现（src/render/phaseBehaviors.ts），经与插件相同的 `registerPhaseBehavior` 注册。行为拿到窄门面 `PhaseBehaviorContext`（encoder/drivers/frame/pipelineFor/runDefault/getSystem/transientTargets…）。`perCamera:false` 的行为在 multiView 走每帧一次的 stage1。
+- **PhaseBehavior**：phases.json 每相位 `behavior` 名 → RenderGraph 注册表查表执行。引擎默认 `normal`（按 target 合并 pass）/`shadow-clear`/`postprocess-chain` 三个实现（src/core/render/phaseBehaviors.ts），经与插件相同的 `registerPhaseBehavior` 注册。行为拿到窄门面 `PhaseBehaviorContext`（encoder/drivers/frame/pipelineFor/runDefault/getSystem/transientTargets…）。`perCamera:false` 的行为在 multiView 走每帧一次的 stage1。
 - **attachments**：插件 `ctx.registerAttachment(name, obj)` 发布不透明对象（'particles'/'physics'/'splats'）；FrameContext 与 hook ctx 透传，引擎不调用。
 - **owner 清扫**：一切注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/tools/generators/atoms）带 owner 标签（'engine' | 'app:<id>' | 'plugin:<id>'）；跨 owner 重名 throw；插件卸载=按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 unloadCurrentApp 自动逆序卸载）。
 - **IRenderer 缝**：Engine.renderer 默认= RenderGraph；插件可 `ctx.replaceRenderer(r)`（重注册 'render' 分派目标）。编辑器 PipelinePanel 依赖 to/fromData 数据面。
@@ -140,6 +162,38 @@ export default class MyFxPlugin extends EnginePlugin {
 - gaussianSplat 用 `before: ['camera']` 自动插入，sort 使用上一帧 camera 数据（一帧延迟，对排序可接受）。
 - PhysicsWorld 多控制器冲突检测未实现（P3 暂缓）；当前多 `PhysicsControllerComponent` 会静默用最后一个。
 
+## 测试体系
+
+### 分层结构
+
+| 层级 | 目录 | 测试数 | 说明 |
+|------|------|--------|------|
+| **纯逻辑** | `tests/unit/` | 68 | 无 GPU 依赖，Node 直跑，覆盖 math/valueResolver/uniformLayout/systemRegistry/scene |
+| **机制** | `tests/mechanism/` | 52 | Mock GPU 设备，覆盖 resourceManager/pluginManager/pluginHost/renderGraph/pipelineDriver |
+| **集成** | `tests/integration/` | 9 | 多模块协作，覆盖插件完整生命周期/渲染数据面往返/跨 app 资源作用域 |
+
+### Mock 基础设施
+
+- `tests/mocks/gpu.ts`：MockGPUDevice（createBuffer/Texture/BindGroup, createCommandEncoder）、MockRenderPassEncoder（记录所有 setPipeline/setBindGroup/draw/drawIndexed 调用供断言）、MockComputePassEncoder。
+- `tests/mocks/pluginHost.ts`：MockPluginHost 记录 applyDeclarations/sweepOwner/beginOwner/endOwner 调用。
+- `tests/helpers/reset.ts`：`resetRegistries()` 清扫模块单例（schemaRegistry/uniformLayouts/systemRegistry/resourceManager/PipelineLoader/atomNamespaces），测试间隔离。
+- `tests/helpers/fixtures.ts`：共享测试数据（RendererDecl 变体、RenderGraphData、组件定义）。
+- `tests/setup.ts`：WebGPU 全局常量 polyfill（GPUBufferUsage/GPUTextureUsage/GPUShaderStage），Node 环境无 WebGPU API。
+
+### 运行
+
+- `npm test`：全量运行（129 tests, <1 秒）。
+- `npm run test:watch`：watch 模式。
+- `npm run verify`：一键全量验证（build + check:plugins + test + validate + smoke）。
+- CI（`.github/workflows/ci.yml`）在 push/PR 时自动运行 verify 套件。
+
+### 测试约定
+
+- 模块单例（schemaRegistry/resourceManager 等）无全局 reset；测试用 `owner: 'test'` 隔离，`afterEach` 调 `resetRegistries()`。
+- ResourceManager 用 `enterApp('test')` / `exitApp('test')` 隔离资源作用域。
+- `vi.spyOn(pm, 'importPluginModule')` mock 插件模块加载（按 baseUrl 返回不同插件类）。
+- PipelineDriver 测试用 `defineQuery` from bitecs 构建真实 query，MockRenderPassEncoder 记录绘制调用。
+
 ## 性能优化（已落地）
 
 ### 热路径
@@ -168,4 +222,4 @@ export default class MyFxPlugin extends EnginePlugin {
 
 ### 架构
 
-- **PluginHost 提取**：`src/PluginHost.ts` 封装插件声明应用（`applyDeclarations`）、owner 清扫（`sweepOwner`）、render-hook 注册、mesh-catalog 构建。Engine 在 `init()` 创建 `PluginHostHelper` 并委托。减少 Engine ~150 行，使插件注册生命周期可独立测试。`Engine.customRenderer`/`customRendererOwner`/`pluginLedgers` 改为 public 供 helper 访问。
+- **PluginHost 提取**：`src/core/PluginHost.ts` 封装插件声明应用（`applyDeclarations`）、owner 清扫（`sweepOwner`）、render-hook 注册、mesh-catalog 构建。Engine 在 `init()` 创建 `PluginHostHelper` 并委托。减少 Engine ~150 行，使插件注册生命周期可独立测试。`Engine.customRenderer`/`customRendererOwner`/`pluginLedgers` 改为 public 供 helper 访问。
