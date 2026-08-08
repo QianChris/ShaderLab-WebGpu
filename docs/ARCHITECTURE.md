@@ -47,6 +47,7 @@ UI 层可直接导入以下单例进行**只读查询**：
 | `Scene` | 所有 getter（`getField`, `hasComponent`, `getActiveCameras` 等） |
 | `RenderGraph` | `getPhaseNames()`, `toData()`, `getComputePipeline()`（只读） |
 | `PipelineLoader` | `getConfig()`, `blendPresetNames`（只读） |
+| `ResourceManager` | `get*Names()`、`getStats()`（只读） |
 
 **禁止**：UI 层直接调用 `register*`, `load*`, `setField`, `createEntity`, `fromData`, `writeBuffer` 等写入方法。
 
@@ -144,8 +145,20 @@ public/apps/<name>/           app：app.json + scene.json + render.json + 可选
 ### attachments（跨插件协作对象）
 插件 `ctx.registerAttachment(name, obj)` 发布不透明对象（`'particles'`/`'physics'`/`'splats'`/`'pbd'`）；FrameContext 与 hook ctx 透传，引擎不调用。跨插件协作用 `ctx.getSystem<T>(name)` / `ctx.getPlugin(id)` / attachments —— **结构类型契约**（本地声明 interface），运行时 fail-loud。
 
+### 共享 GPU 资源
+`GpuResourceRegistry` 是不感知环境光、阴影或粒子语义的机制层注册表。插件通过
+`registerGpuResourceSet(setName, resources)` / `replaceGpuResourceSet(setName, resources)` /
+`unregisterGpuResourceSet(setName)` 原子发布 buffer/sampler/texture 资源组，管线以 `renderer.bindGroups[].resources` +
+`resource:<name>` 声明式消费。跨 owner 重名、缺失资源和 bind layout 类型不匹配均抛错。
+
+组名在 owner 内局部唯一。注册表记录每组的完整资源名集合；替换漏传或增加成员都会
+抛错，全部名称、owner 和 descriptor 校验通过后才整体提交，避免更新时混用新旧
+buffer/texture。只有显式 `owned: true` 的 Buffer/Texture 会在替换、注销或 owner sweep
+时销毁；借用 TextureView 不反向销毁来源。具体契约见
+[plugin-development.md §共享 GPU 资源](./plugin-development.md#共享-gpu-资源)。
+
 ### owner 清扫（一切注册带标签）
-所有注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/tools/generators/atoms）带 owner 标签（`'engine'` | `'app:<id>'` | `'plugin:<id>'`）；跨 owner 重名 throw；插件卸载 = 按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 `unloadCurrentApp` 自动逆拓扑卸载）。
+所有注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/GPU resources/tools/generators/atoms）带 owner 标签（`'engine'` | `'app:<id>'` | `'plugin:<id>'`）；跨 owner 重名 throw；插件卸载 = 按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 `unloadCurrentApp` 自动逆拓扑卸载）。
 
 ### IRenderer 缝
 `Engine.renderer` 默认 = RenderGraph；插件可 `ctx.replaceRenderer(r)`（重注册 'render' 分派目标）。编辑器 PipelinePanel 依赖 to/fromData 数据面。

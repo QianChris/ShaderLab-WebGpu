@@ -16,7 +16,7 @@
 | `npm run dev` / `run.bat` | Vite 开发服务器 |
 | `npm run build` | `tsc`（src/ 类型检查）+ `vite build`（产出 main + 固定名 `assets/engine-api.js`） |
 | `npm run check:plugins` | `tsc -p public/plugins`（插件 TS 类型检查，经 `@shaderlab/api`→src 源码映射） |
-| `npm test` | `vitest run`（129 个测试，纯逻辑 + 机制 + 集成，<1 秒） |
+| `npm test` | `vitest run`（纯逻辑 + 机制 + 集成测试） |
 | `npm run verify` | 一键全量：`build` + `check:plugins` + `test` + `validate` + `smoke` |
 | `node scripts/validate-config.mjs` | 静态校验组合层（场景组件、管线引用、hook 可达、插件存在等） |
 | `node scripts/smoke-plugin-loader.mjs` | Node 冒烟：对真实插件跑 转译→import 重写→装载→实例化 全链 |
@@ -85,6 +85,8 @@ public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发�
                               系统，从 core 迁出) + SpritePipeline + WGSL；引擎级常驻
   orbit/                      示例：OrbitComponent + OrbitSystem(自动轨道,demo8) +
                               OrbitCameraComponent + OrbitCameraSystem(鼠标驱动相机,demo3/5/6/7)
+  environment-lighting/       环境光照：静态图像源 + SH9 + GGX specular cubemap +
+                              DFG LUT + 可见天空（demo11）
 
 public/common/                组合层残留：engine-config.json（含 pluginsRoot + plugins 引擎级清单
                               [core,physics,particles,sprite] + systemOrder 旧式 bare-name 兜底）、
@@ -126,8 +128,9 @@ export default class MyFxPlugin extends EnginePlugin {
 
 - **帧循环**（Engine.frame）：计时 → 组装 `FrameContext`（scene/time/dt/尺寸/device/eventBus/**attachments**/**getSystem**/getBuffer/writeBuffer/dispatchCompute，**无任何具体系统类型**）→ 按 systems.json 顺序 `systemRegistry.resolve(name).update(ctx)` → rAF。`appLoading` 期间跳帧。
 - **PhaseBehavior**：phases.json 每相位 `behavior` 名 → RenderGraph 注册表查表执行。引擎默认 `normal`（按 target 合并 pass）/`shadow-clear`/`postprocess-chain` 三个实现（src/core/render/phaseBehaviors.ts），经与插件相同的 `registerPhaseBehavior` 注册。行为拿到窄门面 `PhaseBehaviorContext`（encoder/drivers/frame/pipelineFor/runDefault/getSystem/transientTargets…）。`perCamera:false` 的行为在 multiView 走每帧一次的 stage1。
-- **attachments**：插件 `ctx.registerAttachment(name, obj)` 发布不透明对象（'particles'/'physics'/'splats'）；FrameContext 与 hook ctx 透传，引擎不调用。
-- **owner 清扫**：一切注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/tools/generators/atoms）带 owner 标签（'engine' | 'app:<id>' | 'plugin:<id>'）；跨 owner 重名 throw；插件卸载=按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 unloadCurrentApp 自动逆序卸载）。
+- **attachments**：插件 `ctx.registerAttachment(name, obj)` 发布不透明 CPU 对象（'particles'/'physics'/'splats'）；FrameContext 与 hook ctx 透传，引擎不调用。
+- **共享 GPU 资源**：插件用 `registerGpuResourceSet(setName, resources)` / `replaceGpuResourceSet(setName, resources)` / `unregisterGpuResourceSet(setName)` 发布必须同步切换的 buffer/sampler/texture。组名在 owner 内局部唯一；替换必须保持成员名集合不变。管线以 `renderer.bindGroups[].resources` + `resource:<name>` 声明式消费；资源名用 lowercase ASCII，`.` 分命名空间、`-` 分词。
+- **owner 清扫**：一切注册（schema/uniform/slots/inputs/blends/bindLayouts/samplers/vbo/fallback/targets/phases/hooks/systems/defs/虚拟管线/attachments/GPU resources/tools/generators/atoms）带 owner 标签（'engine' | 'app:<id>' | 'plugin:<id>'）；跨 owner 重名 throw；插件卸载=按 owner sweep；**卸载插件前必须已无 active app**（app 级插件由 unloadCurrentApp 自动逆序卸载）。
 - **IRenderer 缝**：Engine.renderer 默认= RenderGraph；插件可 `ctx.replaceRenderer(r)`（重注册 'render' 分派目标）。编辑器 PipelinePanel 依赖 to/fromData 数据面。
 - **buffers**：system 元数据（`ubos`/`buffers`/`needs`/`after`/`before`）由插件 `systemDefs` 声明（SystemRegistry.injectedDefs），BufferRegistry 按 systems.json 清单分配（common/app scope）。
 - **自动插入**：app 未提供自有 systems.json 时，`SystemRegistry.autoInsert(commonSystems)` 把声明了 `after`/`before` 但不在默认列表中的 system 自动插入。`after: ['input']` = 插到 input 之后；`before: ['render']` = 插到 render 之前。app 提供了自有 systems.json → 显式覆写优先，不自动插入。`needs` 不驱动自动插入（仅做顺序验证）。
@@ -152,7 +155,28 @@ export default class MyFxPlugin extends EnginePlugin {
 4. **改系统顺序**：改 common/systems.json 或 app systems.json（纯 JSON）。新 system 声明 `after`/`before` 可自动插入默认顺序（无需 app 自带 systems.json）。
 5. **给插件开新引擎能力**：api.ts 加导出（这是契约变更，慎重+文档）。
 6. **机制级改动**（RenderGraph/ResourceManager/PluginManager…）：动 src/，勿引入内容/插件知识。
-7. 收尾必跑四件套（见上）。
+7. 收尾必跑五件套（见上）。
+
+## 插件命名
+
+1. 插件 ID 使用 ASCII lowercase kebab-case，目录名与 `meta.id` 必须一致。
+2. 使用能力或领域名，不使用实现类名，不添加 `-plugin` 后缀。
+3. 广泛认可的技术缩写可以使用，例如 `pbd`。
+4. 集成插件使用 `<domain>-<extension>`，例如 `splat-physics`。
+5. 不用 `builtin`、`internal`、`core` 等名称为新插件制造等级。
+6. 插件自有 GPU 资源使用 `<id-or-domain>.<resource-name>` 命名空间。
+
+## 渲染插件贡献协议（Agent 必读）
+
+详细流程见 `docs/plugin-development.md` 的“渲染插件贡献检查表”。新增渲染能力时还必须遵守：
+
+1. **默认只改插件与 demo**：先用现有 `@shaderlab/api`、声明注册表和 RenderGraph 完成闭环；若确实受机制阻塞，记录缺口和被拒绝的 workaround，经维护者确认后再做最小机制改动。
+2. **真实渲染优先**：优先贡献有明确物理/成像依据的能力（材质 BRDF、阴影、GI/IBL、后处理、体积、抗锯齿、LOD/可见性等）。提交前说明模型、近似、单位、色彩空间和限制。
+3. **一个 PR 一个能力**：插件自有 Schema、layout、pipeline、shader、hook；demo 只负责组合。不要把插件专属声明塞进 core/common，也不要夹带无关重构。
+4. **依赖可追踪**：管线引用使用 `<plugin>:`；组件名暂以 `Component` 结尾；跨插件能力必须写入 `meta.dependencies`。
+5. **demo 必须可判读**：同一画面给出基线和参数变体，固定可复现的相机、灯光、几何；不能靠说明文字替代画面。
+6. **渲染正确性检查**：至少检查有限值、归一化、参数边界、能量、多光源、阴影、深度/剔除，以及切换 app 后的资源清理。性能敏感路径避免逐帧创建 GPU 对象和无界 shader 循环。
+7. **验证与证据**：五件套全部通过后，用 `player.html?app=<demo>` 实测，检查控制台、画布和构图；PR 描述写清模型、视觉对照、验证命令和限制。
 
 ## 已知残留 / 陷阱
 
@@ -166,23 +190,23 @@ export default class MyFxPlugin extends EnginePlugin {
 
 ### 分层结构
 
-| 层级 | 目录 | 测试数 | 说明 |
-|------|------|--------|------|
-| **纯逻辑** | `tests/unit/` | 68 | 无 GPU 依赖，Node 直跑，覆盖 math/valueResolver/uniformLayout/systemRegistry/scene |
-| **机制** | `tests/mechanism/` | 52 | Mock GPU 设备，覆盖 resourceManager/pluginManager/pluginHost/renderGraph/pipelineDriver |
-| **集成** | `tests/integration/` | 9 | 多模块协作，覆盖插件完整生命周期/渲染数据面往返/跨 app 资源作用域 |
+| 层级 | 目录 | 说明 |
+|------|------|------|
+| **纯逻辑** | `tests/unit/` | 无 GPU 依赖，Node 直跑，覆盖 math/valueResolver/uniformLayout/systemRegistry/scene |
+| **机制** | `tests/mechanism/` | Mock GPU 设备，覆盖 resourceManager/pluginManager/pluginHost/renderGraph/pipelineDriver/GPU resource registry |
+| **集成** | `tests/integration/` | 多模块协作，覆盖插件完整生命周期/渲染数据面往返/跨 app 资源作用域 |
 
 ### Mock 基础设施
 
 - `tests/mocks/gpu.ts`：MockGPUDevice（createBuffer/Texture/BindGroup, createCommandEncoder）、MockRenderPassEncoder（记录所有 setPipeline/setBindGroup/draw/drawIndexed 调用供断言）、MockComputePassEncoder。
 - `tests/mocks/pluginHost.ts`：MockPluginHost 记录 applyDeclarations/sweepOwner/beginOwner/endOwner 调用。
-- `tests/helpers/reset.ts`：`resetRegistries()` 清扫模块单例（schemaRegistry/uniformLayouts/systemRegistry/resourceManager/PipelineLoader/atomNamespaces），测试间隔离。
+- `tests/helpers/reset.ts`：`resetRegistries()` 清扫模块单例（schemaRegistry/uniformLayouts/systemRegistry/resourceManager/GpuResourceRegistry/PipelineLoader/atomNamespaces），测试间隔离。
 - `tests/helpers/fixtures.ts`：共享测试数据（RendererDecl 变体、RenderGraphData、组件定义）。
 - `tests/setup.ts`：WebGPU 全局常量 polyfill（GPUBufferUsage/GPUTextureUsage/GPUShaderStage），Node 环境无 WebGPU API。
 
 ### 运行
 
-- `npm test`：全量运行（129 tests, <1 秒）。
+- `npm test`：全量运行。
 - `npm run test:watch`：watch 模式。
 - `npm run verify`：一键全量验证（build + check:plugins + test + validate + smoke）。
 - CI（`.github/workflows/ci.yml`）在 push/PR 时自动运行 verify 套件。

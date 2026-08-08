@@ -12,7 +12,7 @@
 | 渲染图 | `core/render/RenderGraph.ts` | 相位调度执行器（`PhaseBehavior` 策略 + perCamera 分发）+ 管线/driver/hook 注册表 + multiView + compute stage + shaderGraph 调度 |
 | 声明式 draw | `core/render/PipelineDriver.ts` | `RendererDecl` 数据驱动：query 过滤实体、bindGroup 写入、几何 step、排序（透明远→近/不透明近→远）、GPU Instancing |
 | 管线编译 | `core/render/PipelineLoader.ts` | 渲染/计算/着色器图管线编译 + 虚拟路径（`<plugin>:...`）+ 着色器相对解析 + 热重载 |
-| GPU 资源 | `core/render/ResourceManager.ts` | buffer/texture/sampler/bindLayout/renderTarget/pipelineLayout + owner 作用域 + 句柄 free list + frame/shadow bind group 装配 |
+| GPU 资源 | `core/render/ResourceManager.ts` + `GpuResourceRegistry.ts` | buffer/texture/sampler/bindLayout/renderTarget/pipelineLayout + owner 作用域 + 句柄 free list + 插件共享资源组 + frame/shadow bind group 装配 |
 | Uniform 布局 | `core/render/UniformLayout.ts` | std140 打包 + 按成员名写入（`byteSize`/`get`） |
 | Buffer 分配 | `core/render/BufferRegistry.ts` | 按 systems.json 清单分配 UBO/storage，common/app scope |
 | 值解析器 | `core/render/valueResolver.ts` | mini-DSL（`Comp.field`/`pack:`/`builtin.*`/`transform.*`/`tag.*`/`script:`）+ 预编译闭包 |
@@ -53,12 +53,13 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 | **splat-physics** | （splat 与 physics 桥接） | 3DGS 与物理协作（demo6 用） |
 | **orbit** | `orbit` 系统（`after: ['animation']`）+ `orbitCamera` 系统（`after: ['input']`） | 自动轨道（OrbitComponent）+ 鼠标驱动相机（OrbitCameraComponent，demo3/5/6/7/8/9 用） |
 | **pbd** | `pbd.simulate`/`pbd.draw` hook + `'pbd'` attachment + 7 条 compute 管线 | PBD 软体（predict/solve/apply/integrate/floor/draw/debugLines 全 GPU compute） |
+| **environment-lighting** | `environmentLighting` 系统 + 原子 GPU 资源组 | 静态 2:1 环境图加载、SH9 漫反射、GGX specular cubemap、DFG LUT 与可见天空 |
 
 > **新插件写法**：见 [plugin-development.md](./plugin-development.md)。
 
 ## 四、Demo Apps（public/apps/）
 
-10 个示例 app，按引入的概念复杂度排列：
+12 个示例 app，按引入的概念复杂度排列：
 
 | App | 用到的 app 级插件 | 演示要点 |
 |-----|------------------|----------|
@@ -72,6 +73,8 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 | **demo8_customSystem** | orbit | 自定义系统范例：app 级 system 注册（见 app scene/render） |
 | **demo9_softBody** | pbd, orbit | PBD 软体：softbody_asset.json + reset.js 重置脚本 |
 | **demo10_shaderGraph** | — | 着色器图：`graph.json`（data/if/loop/shader 节点）+ GraphDemoComponent + Counter.wgsl compute |
+| **demo11_environmentLighting** | environment-lighting, orbit | IBL 诊断场景：高分辨率天空、不同金属度/粗糙度材质球、全局环境光强度与旋转 |
+| **demo_paint** | — | TextureEdit compute 绘制与编辑器交互 |
 
 ## 五、能力速查表（"我要做 X，看哪个 demo/插件"）
 
@@ -92,6 +95,7 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 | 自定义交互工具 | demo1 tools.json + physics `pick` 工具类型 |
 | 自定义 UI HUD | demo1 ui-config.json + `ui/demoHUD.js`（`mount(container,host) => unmount`） |
 | GPU compute | particles 的 simulate hook / pbd 的 7 条 compute 管线 / demo10 着色器图 |
+| 环境光照 / IBL | demo11 + environment-lighting 插件 |
 | 着色器图（节点式 compute） | demo10 + `graph.json` + `code-conventions.md §着色器图` |
 | 跨插件协作 | demo6（splat + splat-physics + orbit）/ attachments + `ctx.getSystem` |
 | 自动插入系统顺序 | splat `before: ['camera']` / orbit `after: ['animation']`（app 不带 systems.json 时生效） |
