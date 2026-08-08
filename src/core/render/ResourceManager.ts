@@ -1,6 +1,7 @@
 import { meshEdges, type MeshData, type PbrMeshData } from './Primitives';
 import { uniformLayouts } from './UniformLayout';
 import { bufferRegistry } from './BufferRegistry';
+import { gpuResourceRegistry, type GpuResourceKind } from './GpuResourceRegistry';
 import type { SlotName } from './vertexSlots';
 import type { PipelineEntry, BindLayoutDecls, BindEntryDecl, SamplerDecls } from './types';
 import type { RenderTargetDecls, RenderTargetSize } from './rendererDecl';
@@ -143,7 +144,7 @@ export class ResourceManager {
     }
 
     /** Resource counts for diagnostics / stress testing (all scopes). */
-    getStats(): { meshes: number; pbrMeshes: number; meshGpu: number; textures: number; colorTargets: number; depthTargets: number; uniforms: number; storageBuffers: number } {
+    getStats(): { meshes: number; pbrMeshes: number; meshGpu: number; textures: number; colorTargets: number; depthTargets: number; uniforms: number; storageBuffers: number; gpuResources: number } {
         return {
             meshes: this.meshData.size,
             pbrMeshes: this.pbrMeshData.size,
@@ -153,6 +154,7 @@ export class ResourceManager {
             depthTargets: this.depthTargets.size,
             uniforms: this.uniformBuffers.size,
             storageBuffers: this.storageBuffers.size,
+            gpuResources: gpuResourceRegistry.names().length,
         };
     }
 
@@ -178,6 +180,8 @@ export class ResourceManager {
     getNamedVboNames(): string[] { return [...this.namedVbos.keys()]; }
     /** Named render-target declaration names (render-targets.json). */
     getRenderTargetNames(): string[] { return Object.keys(this.renderTargetDecls); }
+    /** Shared owner-aware GPU resources published by engine systems and plugins. */
+    getGpuResourceNames(): string[] { return gpuResourceRegistry.names(); }
 
     /** Claim a name in a named-decl registry for the current owner.
      *  Cross-owner duplicates throw (fail-loud); same-owner reloads pass. */
@@ -938,6 +942,24 @@ export class ResourceManager {
             case 'shadowPoint2DArray':  return this.shadowPoint2DArrayView();
             default: throw new Error(`Unknown frame resource '${name}' in bind-layouts.json`);
         }
+    }
+
+    /** Resolve a plugin-published resource against the declared layout binding type. */
+    namedGpuResource(layoutName: string, binding: number, name: string): GPUBindingResource {
+        const entries = this.bindLayoutDecls.get(layoutName);
+        if (!entries) throw new Error(`Bind layout '${layoutName}' not declared`);
+        const entry = entries.find(candidate => candidate.binding === binding);
+        if (!entry) {
+            throw new Error(`Bind layout '${layoutName}' has no @binding(${binding})`);
+        }
+        return gpuResourceRegistry.resolve(name, this.resourceKind(entry));
+    }
+
+    private resourceKind(entry: BindEntryDecl): GpuResourceKind {
+        if (entry.buffer) return 'buffer';
+        if (entry.sampler) return 'sampler';
+        if (entry.texture || entry.storageTexture) return 'texture';
+        throw new Error(`Bind layout entry @binding(${entry.binding}) has no resource type`);
     }
 
     /** Build a frame bind group from the named layout's entry declarations. */

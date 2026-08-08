@@ -413,7 +413,7 @@ export class PipelineDriver {
             // Per-entity bind-group reuse: only rebuild when a bound resource
             // changes identity (uniform buffer/sampler/view are all cached +
             // stable, so the common case is a cache hit → no new GPUBindGroup).
-            const sig = entries.map(e => (e.resource as GPUBufferBinding).buffer ?? e.resource);
+            const sig = this.bindGroupSignature(entries);
             const key = `${bg.group}_${vctx.eid}`;
             const cached = this.bgCache.get(key);
             let bgObj: GPUBindGroup;
@@ -445,6 +445,22 @@ export class PipelineDriver {
 
         for (const s of bg.samplers ?? []) {
             entries.push({ binding: s.binding, resource: resourceManager.namedSampler(s.name ?? 'default') });
+        }
+
+        for (const declared of bg.resources ?? []) {
+            if (typeof declared.source !== 'string'
+                || !declared.source.startsWith('resource:')
+                || declared.source.length === 'resource:'.length) {
+                throw new Error(
+                    `Pipeline '${this.path}': shared resource '${String(declared.source)}' ` +
+                    `must use resource:<name>`,
+                );
+            }
+            const name = declared.source.slice('resource:'.length);
+            entries.push({
+                binding: declared.binding,
+                resource: resourceManager.namedGpuResource(layoutName, declared.binding, name),
+            });
         }
 
         const compiledTex = this.compiledTextureHandles[bgIndex] ?? [];
@@ -479,8 +495,24 @@ export class PipelineDriver {
             });
         }
 
-        void layoutName;
         return entries;
+    }
+
+    private bindGroupSignature(entries: readonly GPUBindGroupEntry[]): unknown[] {
+        const signature: unknown[] = [];
+        for (const entry of entries) {
+            const bufferBinding = entry.resource as GPUBufferBinding;
+            if (bufferBinding.buffer) {
+                signature.push(
+                    bufferBinding.buffer,
+                    bufferBinding.offset ?? 0,
+                    bufferBinding.size ?? null,
+                );
+            } else {
+                signature.push(entry.resource);
+            }
+        }
+        return signature;
     }
 
     private layoutNameFor(group: number): string {

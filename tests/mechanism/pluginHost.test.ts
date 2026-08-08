@@ -5,9 +5,10 @@ import { uniformLayouts } from '../../src/core/render/UniformLayout';
 import { systemRegistry } from '../../src/core/ecs/SystemRegistry';
 import { PipelineLoader } from '../../src/core/render/PipelineLoader';
 import { resourceManager } from '../../src/core/render/ResourceManager';
+import { gpuResourceRegistry } from '../../src/core/render/GpuResourceRegistry';
 import { atomNamespaces } from '../../src/core/render/valueResolver';
 import { RenderGraph } from '../../src/core/render/RenderGraph';
-import { createMockDevice } from '../mocks/gpu';
+import { createMockDevice, type MockBuffer } from '../mocks/gpu';
 import { resetRegistries } from '../helpers/reset';
 import type { EnginePlugin } from '../../src/core/plugins/Plugin';
 import type { IRenderer } from '../../src/core/render/types';
@@ -175,6 +176,22 @@ describe('PluginHostHelper.sweepOwner round-trip', () => {
         helper.sweepOwner('plugin:myfx');
         const attachments = (deps as { attachments: Map<string, unknown> }).attachments;
         expect(attachments.has('particles')).toBe(false);
+    });
+
+    it('sweepOwner removes and destroys GPU resources owned by the plugin', () => {
+        const { deps } = createMockDeps();
+        const helper = new PluginHostHelper(deps);
+        const buffer = createMockDevice().createBuffer({ size: 16 }) as unknown as MockBuffer;
+        gpuResourceRegistry.registerSet('myfx', {
+            'myfx.data': {
+                kind: 'buffer', buffer: buffer as unknown as GPUBuffer, owned: true,
+            },
+        }, 'plugin:myfx');
+
+        helper.sweepOwner('plugin:myfx');
+
+        expect(gpuResourceRegistry.has('myfx.data')).toBe(false);
+        expect(buffer.destroyed).toBe(true);
     });
 
     it('sweepOwner restores builtin renderer when custom renderer owner matches', () => {

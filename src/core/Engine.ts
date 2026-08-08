@@ -3,6 +3,7 @@ import { registerToolType } from './tools/ToolRegistry';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
 import { resourceManager } from './render/ResourceManager';
+import { gpuResourceRegistry } from './render/GpuResourceRegistry';
 import { PipelineLoader } from './render/PipelineLoader';
 import { resolveComputeBindings } from './render/computeBindings';
 import { uniformLayouts } from './render/UniformLayout';
@@ -257,6 +258,15 @@ export class Engine {
             renderer: this.renderer,
             registerSystem: (name, sys) => systemRegistry.registerBuiltin(name, sys, owner),
             registerAttachment: (name, obj) => this.setAttachment(name, obj, owner),
+            registerGpuResourceSet: (setName, resources) => {
+                gpuResourceRegistry.registerSet(setName, resources, owner);
+            },
+            replaceGpuResourceSet: (setName, resources) => {
+                gpuResourceRegistry.replaceSet(setName, resources, owner);
+            },
+            unregisterGpuResourceSet: (setName) => {
+                gpuResourceRegistry.unregisterSet(setName, owner);
+            },
             registerRenderHook: (name, fn) => this.pluginHost.registerRenderHook(name, fn, owner),
             registerPhaseBehavior: (name, behavior) => this.renderGraph.registerPhaseBehavior(name, behavior, owner),
             replaceRenderer: (r) => {

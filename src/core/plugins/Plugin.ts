@@ -15,6 +15,7 @@ import type {
     SamplerDecls,
     IRenderer,
 } from '../render/types';
+import type { GpuResourceSet } from '../render/GpuResourceRegistry';
 import type { RenderTargetDecls } from '../render/rendererDecl';
 import type { GeometryHook, ComputeHook } from '../render/PipelineDriver';
 import type { ValueContext, AtomResolver } from '../render/valueResolver';
@@ -63,6 +64,12 @@ export interface PluginContext {
     registerSystem(name: string, sys: System): void;
     /** Publish an opaque object for hooks / other plugins (e.g. 'particles'). */
     registerAttachment(name: string, obj: unknown): void;
+    /** Atomically publish a locally named group of GPU resources. */
+    registerGpuResourceSet(setName: string, resources: GpuResourceSet): void;
+    /** Replace a group; its resource-name membership must remain unchanged. */
+    replaceGpuResourceSet(setName: string, resources: GpuResourceSet): void;
+    /** Remove a complete group and destroy its owned resources. */
+    unregisterGpuResourceSet(setName: string): void;
     /** Register a render escape-hatch hook addressable as `script:<name>`
      *  (value / geometry / compute — same name space as renderScripts). */
     registerRenderHook(name: string, fn: GeometryHook | ComputeHook | ValueHook): void;

@@ -175,6 +175,22 @@ describe('PipelineDriver.dispose', () => {
         driver.dispose();
         expect(cache.size).toBe(0);
     });
+
+    it('includes buffer offset and size in bind-group cache signatures', () => {
+        const driver = makeDriver({ phase: 'opaque', geometry: { steps: [] } }, false);
+        const signature = (driver as unknown as {
+            bindGroupSignature(entries: readonly GPUBindGroupEntry[]): unknown[];
+        }).bindGroupSignature([{
+            binding: 0,
+            resource: {
+                buffer: {} as GPUBuffer,
+                offset: 16,
+                size: 32,
+            },
+        }]);
+
+        expect(signature.slice(1)).toEqual([16, 32]);
+    });
 });
 
 describe('PipelineDriver.record: render sort', () => {
