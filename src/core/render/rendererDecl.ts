@@ -104,6 +104,8 @@ export interface BindGroupDecl {
     };
     samplers?: { binding: number; name?: string }[];
     textures?: { binding: number; source: string; fallback?: string }[];
+    /** Shared plugin/engine GPU resources, addressed as `resource:<name>`. */
+    resources?: { binding: number; source: string }[];
 }
 
 /** render-targets.json: named offscreen color/depth targets. */

@@ -3,6 +3,7 @@ import { uniformLayouts } from '../../src/core/render/UniformLayout';
 import { systemRegistry } from '../../src/core/ecs/SystemRegistry';
 import { PipelineLoader } from '../../src/core/render/PipelineLoader';
 import { resourceManager } from '../../src/core/render/ResourceManager';
+import { gpuResourceRegistry } from '../../src/core/render/GpuResourceRegistry';
 import { atomNamespaces } from '../../src/core/render/valueResolver';
 
 /**
@@ -21,6 +22,7 @@ export function resetRegistries(): void {
     systemRegistry.removeSystemsByOwner('plugin:test');
     resourceManager.exitApp('test');
     resourceManager.exitApp('plugin:test');
+    gpuResourceRegistry.clear();
     PipelineLoader.removeVirtualsByPrefix('test:');
     PipelineLoader.removeInputsByOwner('test');
     PipelineLoader.removeInputsByOwner('plugin:test');

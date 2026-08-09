@@ -908,6 +908,7 @@ schema 同 [C8](#c8-app-systemsjson--系统顺序覆写)。`Engine.init` 装载�
 | `uniform` | `{ layoutRef; binding?=0; writes: { member; value }[] }` | 可选 | — | `layoutRef`=uniform-layouts.json 名；`value`=值源 mini-DSL |
 | `samplers` | `{ binding; name?='default' }[]` | 可选 | — | |
 | `textures` | `{ binding; source; fallback? }[]` | 可选 | — | `source`=`Comp.field`(tex 句柄)\|`renderTarget:<name>`\|`asset:<path>`\|`builtin:...`；`fallback`=fallback-textures.json 名 |
+| `resources` | `{ binding; source }[]` | 可选 | — | 共享 GPU 资源；`source` 必须为 `resource:<name>`，类型必须与 bind layout binding 匹配 |
 
 **值源 mini-DSL**（`value`/`source`/`countField`/`instanceCountField` 串）：
 

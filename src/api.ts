@@ -49,6 +49,7 @@ export type {
 
 /* ── Render mechanisms (usage surface) ─────────────────────────── */
 export { resourceManager } from './core/render/ResourceManager';
+export type { GpuResourceSet } from './core/render/GpuResourceRegistry';
 export { bufferRegistry } from './core/render/BufferRegistry';
 export { uniformLayouts, UniformLayout } from './core/render/UniformLayout';
 export type { UniformLayoutDecls, UniformMemberDecl, UniformMemberType } from './core/render/UniformLayout';

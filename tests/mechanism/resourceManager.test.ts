@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { resourceManager } from '../../src/core/render/ResourceManager';
+import { gpuResourceRegistry } from '../../src/core/render/GpuResourceRegistry';
 import { createMockDevice, type MockBuffer } from '../mocks/gpu';
 import type { MeshData } from '../../src/core/render/Primitives';
 
@@ -125,5 +126,41 @@ describe('ResourceManager: getStats', () => {
         resourceManager.getMesh('m'); // build GPU
         const stats = resourceManager.getStats();
         expect(stats.meshGpu).toBeGreaterThan(0);
+    });
+});
+
+describe('ResourceManager: shared GPU resources', () => {
+    it('resolves resources against bind-layout types', () => {
+        resourceManager.loadBindLayouts({
+            sharedTest: {
+                entries: [
+                    { binding: 0, visibility: ['fragment'], buffer: 'uniform' },
+                    { binding: 1, visibility: ['fragment'], sampler: 'filtering' },
+                    { binding: 2, visibility: ['fragment'], texture: 'float' },
+                ],
+            },
+        });
+        const device = createMockDevice();
+        const buffer = device.createBuffer({ size: 16 });
+        const sampler = device.createSampler();
+        const texture = device.createTexture({
+            size: { width: 1, height: 1 },
+            format: 'rgba8unorm',
+        });
+        gpuResourceRegistry.registerSet('test', {
+            'test.data': { kind: 'buffer', buffer },
+            'test.sampler': { kind: 'sampler', sampler },
+            'test.texture': { kind: 'texture', texture },
+        }, 'test');
+
+        expect(resourceManager.namedGpuResource('sharedTest', 0, 'test.data'))
+            .toEqual({ buffer });
+        expect(resourceManager.namedGpuResource('sharedTest', 1, 'test.sampler'))
+            .toBe(sampler);
+        expect((resourceManager.namedGpuResource('sharedTest', 2, 'test.texture') as unknown as {
+            texture: GPUTexture;
+        }).texture).toBe(texture);
+        expect(() => resourceManager.namedGpuResource('sharedTest', 0, 'test.texture'))
+            .toThrow(/expects buffer/);
     });
 });

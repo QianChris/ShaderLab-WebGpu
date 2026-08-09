@@ -211,10 +211,48 @@ export default class ParticlesPlugin extends EnginePlugin {
 | **Phase behavior** | `ctx.registerPhaseBehavior`（无字段，setup 里调） | `phases.json` `behavior` |
 | **Value atom** | `valueAtoms` 字段 或 `ctx.registerValueAtoms` | 值源 `<ns>.<atom>` |
 | **Attachment** | `ctx.registerAttachment`（setup 里调） | hook ctx `ctx.attachments.<name>` |
+| **共享 GPU 资源组** | `ctx.registerGpuResourceSet` / `replaceGpuResourceSet` / `unregisterGpuResourceSet` | 管线 `renderer.bindGroups[].resources` |
 
 > **现状提示**：仓库内插件用了 `components/uniformLayouts/bindLayouts/.../systemDefs/renderHooks`（particles/physics/pbd/splat/core 都用）。`pipelines`/`shaders` 内存字段、`meshGenerators`/`toolTypes`/`valueAtoms` 声明字段**机制全 wired 但仓库内无插件用**——文件约定更主流。
 
-## 九、跨插件协作
+## 九、共享 GPU 资源
+
+长寿命的 buffer/sampler/texture 组可由插件原子发布，再由声明式渲染管线消费。
+这与 compute pipeline 的每次 dispatch `bindings` 不同：共享资源组跨帧存活，由插件
+lifecycle 和 owner sweep 管理。
+
+```ts
+ctx.registerGpuResourceSet('lighting', {
+    'myfx.data': { kind: 'buffer', buffer: dataBuffer, owned: true },
+    'myfx.sampler': { kind: 'sampler', sampler },
+    'myfx.radiance': {
+        kind: 'texture', texture: radiance,
+        viewDescriptor: { dimension: 'cube' }, owned: true,
+    },
+});
+```
+
+管线按 bind layout 的 binding 类型解析：
+
+```json
+{
+  "group": 1,
+  "resources": [
+    { "binding": 0, "source": "resource:myfx.data" },
+    { "binding": 1, "source": "resource:myfx.sampler" },
+    { "binding": 2, "source": "resource:myfx.radiance" }
+  ]
+}
+```
+
+- 组名在当前 plugin owner 内局部唯一，使用 lowercase ASCII；注销只传组名。
+- 资源名使用 lowercase ASCII，`.` 分命名空间，`-` 分词；推荐 `<plugin-or-domain>.<name>`。
+- 只有希望注册表在替换、注销或卸载时销毁的 Buffer/Texture 才标 `owned: true`。
+- 更新完整契约用 `replaceGpuResourceSet('lighting', resources)`；资源成员名必须与初次注册完全一致，否则 throw。无组件或能力关闭但管线仍静态绑定时，发布完整的中性降级组。
+- 注册/替换失败时新 descriptor 未发布，插件仍负责销毁刚创建的资源。
+- 跨 owner 重名、缺失资源、descriptor 非法或 bind layout 类型不匹配均 fail-loud。
+
+## 十、跨插件协作
 
 ### 结构类型契约（推荐）
 ```ts
@@ -241,7 +279,7 @@ const core = ctx.getPlugin<CorePlugin>('core');   // 必须在 meta.dependencies
 ```
 少用——优先结构契约。
 
-## 十、系统元数据（systemDefs）详解
+## 十一、系统元数据（systemDefs）详解
 
 ```ts
 interface SystemDef {
@@ -278,7 +316,7 @@ systemDefs = [
 systemDefs = [{ name: 'gaussianSplat', source: 'plugin:splat', components: ['GsComponent','Transform'], ubos: [], buffers: [], needs: [], before: ['camera'] }];
 ```
 
-## 十一、陷阱与 fail-loud
+## 十二、陷阱与 fail-loud
 
 - **`meta.id` 必须等于目录名**——否则装载 throw。
 - **相对导入必须带 `.ts`**——`import { Foo } from './Foo'` 会 Blob fetch 失败。
@@ -291,13 +329,13 @@ systemDefs = [{ name: 'gaussianSplat', source: 'plugin:splat', components: ['GsC
 - **卸载插件前必须无 active app**——app 级插件由 `unloadCurrentApp` 自动逆拓扑卸载，不要手动 unload。
 - **`renderScripts`（render.json）与 `renderHooks`（插件字段）共享 `script:<name>` 命名空间**——插件注册的 hook 优先；文件名首段目录被剥掉（`render/foo.js` → `foo.bar`）。
 
-## 十二、校验命令
+## 十三、校验命令
 
 - `npm run check:plugins` —— `tsc -p public/plugins`（插件 TS 类型检查，经 `@shaderlab/api`→src 源码映射）
 - `node scripts/smoke-plugin-loader.mjs` —— Node 冒烟：对真实插件跑 转译→import 重写→装载→实例化 全链
 - `npm run verify` —— 一键全量（build + check:plugins + test + validate + smoke）
 
-## 十三、Agent 操作清单（写新插件时）
+## 十四、Agent 操作清单（写新插件时）
 
 1. 建 `public/plugins/<id>/` 目录，`id` = `meta.id`。
 2. 写 `index.ts`：`export default class extends EnginePlugin`，`readonly meta = { id: '<id>', dependencies: [...] }`。
@@ -310,6 +348,17 @@ systemDefs = [{ name: 'gaussianSplat', source: 'plugin:splat', components: ['GsC
 7. 如需 hook：`hooks/myfx.ts` 导出函数 → `renderHooks` 字段注册。
 8. 相对导入**带 `.ts`**；裸导入只 `@shaderlab/api`。
 9. 声明 engine 级（改 `engine-config.json` `plugins`）或 app 级（`app.json` `plugins`）。
-10. 跑 `npm run check:plugins` + `node scripts/smoke-plugin-loader.mjs` + 浏览器验证。
+10. 跑 `npm run verify` + 浏览器验证。
 
 **最简参考**：`particles/index.ts`（38 行，hook 驱动）/ `orbit/index.ts`（系统 + autoInsert）/ `core/index.ts`（全生命周期 + 12 JSON）。
+
+## 十五、渲染插件贡献检查表
+
+1. **先定义现象与证据**：写清渲染现象、参考模型、近似、基线与 demo 要展示的可视差异。
+2. **默认只改插件与 demo**：先使用现有声明、hook、phase behavior、attachment 和 `@shaderlab/api`；只在通用机制确实缺失时改 `src/`。
+3. **一个 PR 一个能力**：Schema/layout/pipeline/shader/system 归插件，demo 只选择和组合；不把插件专属声明塞进 core/common。
+4. **命名与依赖明确**：插件 ID 用 lowercase kebab-case，目录名等于 `meta.id`，不加 `-plugin`；跨插件依赖写入 `meta.dependencies`。
+5. **区分字段生效时机**：说明字段是逐帧生效，还是只在 app/组件加载时重建资源；分别定义组件缺失、功能关闭和资源释放语义。
+6. **检查渲染正确性**：记录色彩空间/HDR 假设、坐标与 cubemap 约定、参数单位与边界、有限值、能量、阴影、深度、剔除和 GPU limit 假设。
+7. **demo 是可执行证据**：固定可复现的相机、光照和几何，同屏展示基线与有意义的参数变体，首帧即能判读结果。
+8. **验证生命周期**：`npm run verify` 后用 player 检查画布、控制台和构图，再切换 app 确认没有残留注册或 GPU 资源。

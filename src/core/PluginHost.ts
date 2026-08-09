@@ -1,6 +1,7 @@
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { uniformLayouts } from './render/UniformLayout';
 import { resourceManager } from './render/ResourceManager';
+import { gpuResourceRegistry } from './render/GpuResourceRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
 import { systemRegistry } from './ecs/SystemRegistry';
 import { PipelineLoader } from './render/PipelineLoader';
@@ -122,6 +123,7 @@ export class PluginHostHelper {
 
     /** Release everything a plugin registered (called on plugin unload). */
     sweepOwner(owner: string): void {
+        gpuResourceRegistry.removeOwner(owner);
         resourceManager.exitApp(owner);
         bufferRegistry.exitApp(owner);
         systemRegistry.removeDefsByOwner(owner);

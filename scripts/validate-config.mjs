@@ -10,8 +10,8 @@ const J = (p) => JSON.parse(readFileSync(p, 'utf8'));
 const problems = [];
 const note = (msg) => problems.push(msg);
 
-/** Plugin static analysis: existence + registerSystem('name')/components names
- *  + renderHook keys (regex-level — runtime fail-loud remains the authority). */
+/** Plugin static analysis: existence + common literal registrations
+ *  (regex-level — runtime fail-loud remains the authority). */
 function pluginInfo(id) {
     const dir = join(PLUGINS, id);
     const entry = ['index.ts', 'index.js'].map(f => join(dir, f)).find(existsSync);
@@ -22,6 +22,10 @@ function pluginInfo(id) {
         .join('\n');
     const systems = [...sources.matchAll(/registerSystem\(\s*['"]([^'"]+)['"]/g)].map(m => m[1]);
     const components = [...sources.matchAll(/name:\s*['"]([A-Za-z0-9_]+Component)['"]/g)].map(m => m[1]);
+    const componentsPath = join(dir, 'components.json');
+    if (existsSync(componentsPath)) {
+        components.push(...J(componentsPath).map(component => component.name));
+    }
     const hooks = [...sources.matchAll(/['"]([A-Za-z0-9_]+\.[A-Za-z0-9_]+)['"]\s*:/g)].map(m => m[1]);
     return { systems, components, hooks };
 }
@@ -93,6 +97,19 @@ function checkPipeline(appName, appComponents, rel, cfgEntry) {
         // uniform writes value sources: check script:/atom namespaces roughly
         for (const w of bg.uniform?.writes ?? []) {
             checkValueSource(appName, rel, w.value, allComps);
+        }
+        for (const resource of bg.resources ?? []) {
+            const source = resource?.source;
+            if (typeof source !== 'string'
+                || !source.startsWith('resource:')
+                || source.length === 'resource:'.length) {
+                note(`${appName}/${rel}: shared resource '${String(source)}' must use resource:<name>`);
+                continue;
+            }
+            const name = source.slice('resource:'.length);
+            if (!/^[a-z][a-z0-9]*(?:[.-][a-z0-9]+)*$/.test(name)) {
+                note(`${appName}/${rel}: invalid shared GPU resource name '${name}'`);
+            }
         }
     }
     if (decl.geometry?.hook) hookRefs.push({ appName, rel, hook: decl.geometry.hook });

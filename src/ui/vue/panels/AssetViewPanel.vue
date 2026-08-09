@@ -24,6 +24,7 @@ const categories = computed<Array<{ type: string; kind: PreviewKind | null; item
         { type: 'Depth Targets', kind: null, items: rm.getDepthTargetNames() },
         { type: 'Uniform Buffers', kind: null, items: rm.getUniformNames() },
         { type: 'Storage Buffers', kind: null, items: rm.getStorageNames() },
+        { type: 'Shared GPU Resources', kind: null, items: rm.getGpuResourceNames() },
         { type: 'Bind Layouts', kind: null, items: rm.getBindLayoutNames() },
         { type: 'Samplers', kind: null, items: rm.getSamplerNames() },
         { type: 'VBO Presets', kind: null, items: rm.getNamedVboNames() },
