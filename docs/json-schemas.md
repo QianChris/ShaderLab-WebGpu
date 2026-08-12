@@ -14,7 +14,7 @@
 |----|------|------|
 | **A. 插件声明字段** | 20（含 `meta`） | EnginePlugin 类的可选字段，TS 字面量或共置 JSON 填充 |
 | **B. 插件共置 JSON 文件** | 12（core）+ 2（pbd） | 文件名约定（不强制），`init()` fetch 填字段；schema 同 A |
-| **C. App 级 JSON** | 8 | `app.json`/`scene.json`/`render.json`/`tools.json`/`ui-config.json`/`graph.json`/app`components.json`/app`systems.json` |
+| **C. App 级 JSON** | 7 | `app.json`/`scene.json`/`render.json`/`tools.json`/`ui-config.json`/app`components.json`/app`systems.json` |
 | **D. Common 级 JSON** | 3 | `engine-config.json`/`systems.json`/`gltf-mapping.json` |
 | **E. 管线/着色器 JSON** | 3 | 渲染管线 `PipelineConfig` / 计算管线 `ComputePipelineConfig` / 内嵌 `RendererDecl` |
 | **F. 插件消费的资产 JSON** | 2 | sprite sheet / softbody asset（schema 由插件定，非引擎） |
@@ -48,7 +48,7 @@
 | C3 | `render.json` | app | app + common scoped | RenderGraph |
 | C4 | `tools.json` | app | editor-scoped | ToolSystem |
 | C5 | `ui-config.json` | app | editor-scoped | UIManager |
-| C6 | `graph.json` | app | `'app'` | ShaderGraphRegistry |
+| C6 | (已移除) | — | — | 着色器图 graph.json 已删，见 [PLAN.md](../PLAN.md) v2 |
 | C7 | app `components.json` | app | `app:<id>` | SchemaRegistry |
 | C8 | app `systems.json` | app | app-scoped | SystemRegistry |
 | D1 | `engine-config.json` | common | engine-lifetime | Engine.init |
@@ -557,9 +557,9 @@ type AtomResolver = (ctx: ValueContext) => number | ArrayLike<number>;
 | 字段 | 类型 | 必填 | 默认 | 锚点 |
 |------|------|------|------|------|
 | `name` | string | **必填** | — | `types.ts:134`（相位内唯一） |
-| `pipeline` | string | **必填** | — | `:135`（`<id>:pipelines/X.json` / `pipelines/Y.json` / `/abs` / `graph.json`） |
+| `pipeline` | string | **必填** | — | `:135`（`<id>:pipelines/X.json` / `pipelines/Y.json` / `/abs`） |
 | `enabled` | boolean | **必填** | — | `:136`（false 仍编译但不画） |
-| `kind` | string | 可选 | — | `:137`（`'compute'`/`'shaderGraph'`/自由标签） |
+| `kind` | string | 可选 | — | `:137`（`'compute'`/自由标签） |
 | `params` | `Record<string, number[]>` | 可选 | — | `:138`（后处理参数，`fullscreenParam` bind group） |
 | `texture` | string | 可选 | — | `:139`（遗留纹理资产） |
 | `input` | string | 可选 | — | `:140`（后处理源 target，默认 `scene`/前一输出） |
@@ -616,58 +616,9 @@ type AtomResolver = (ctx: ValueContext) => number | ArrayLike<number>;
 ]
 ```
 
-### C6. `graph.json` — 着色器图（compute 节点图）
+### C6. (已移除) 着色器图 graph.json
 
-由 `render.json` `kind: "shaderGraph"` entry 引用。`ShaderGraph`（`shaderGraph.ts:32`）：
-
-| 字段 | 类型 | 必填 | 默认 | 锚点 |
-|------|------|------|------|------|
-| `name` | string | **必填** | — | `:33`（注册名） |
-| `query` | string[] | 可选 | `[]` | `:34`（实体必须有的组件） |
-| `nodes` | `ShaderGraphNode[]` | **必填** | — | `:35` |
-| `edges` | `ShaderGraphEdge[]` | **必填** | — | `:36` |
-
-**节点 5 变体（`type` 区分）：**
-
-| type | 额外字段 |
-|------|----------|
-| `data` | `source`（`'Component.field'` u32 句柄 或 `'buffer:<name>'`）/ `kind`（`'storage'\|'uniform'\|'vertex'`）/ `stride?` / `allocCount?`（值源，懒分配输出 storage buffer） |
-| `shader` | `shader`（WGSL ref）/ `entryPoint` / `workgroupSize?`（默认 64）/ `count`（值源，dispatch 数） |
-| `if` | `condition`（标量组件字段，非零=true） |
-| `foreach` | `count`（组件字段）/ `index?`（值源覆盖 `vctx.eid`） |
-| `loop` | `iterations`（数字字面量或组件字段） |
-
-节点都有可选 `position?: { x, y }`（仅编辑器布局）。
-
-**边 `ShaderGraphEdge`：**
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|------|------|
-| `id` | string | **必填** | |
-| `source` | string | **必填** | |
-| `sourceHandle` | `'out'\|'body'\|'next'` | **必填** | `out`=数据/buffer；`body`=控制体；`next`=续接 |
-| `target` | string | **必填** | |
-| `targetHandle` | string | **必填** | `'in:<binding>'`（shader 绑定槽）或 `'body'` |
-
-```json
-{
-  "name": "DemoGraph",
-  "query": ["GraphDemoComponent"],
-  "nodes": [
-    { "id": "out",       "type": "data",   "source": "buffer:graphOut", "kind": "storage", "stride": 4, "allocCount": "GraphDemoComponent.count" },
-    { "id": "ifEnabled", "type": "if",     "condition": "GraphDemoComponent.enabled" },
-    { "id": "loopIters", "type": "loop",   "iterations": "GraphDemoComponent.iterations" },
-    { "id": "counter",   "type": "shader", "shader": "shaders/Counter.wgsl", "entryPoint": "main", "workgroupSize": 64, "count": "GraphDemoComponent.count" }
-  ],
-  "edges": [
-    { "id": "e1", "source": "out",       "sourceHandle": "out",  "target": "counter",   "targetHandle": "in:0" },
-    { "id": "e2", "source": "ifEnabled",  "sourceHandle": "body", "target": "loopIters", "targetHandle": "body" },
-    { "id": "e3", "source": "loopIters",  "sourceHandle": "body", "target": "counter",   "targetHandle": "body" }
-  ]
-}
-```
-
-> 着色器契约见 [code-conventions.md §着色器图](./code-conventions.md#着色器图shader-graph)。
+着色器图（`graph.json` + `kind: "shaderGraph"`）已删除：原 per-entity dispatch 模型与引擎批量 compute pass 机制冲突。替代方案见 [code-conventions.md §四](./code-conventions.md#四着色器图已移除) 与 [PLAN.md](../PLAN.md) v2（管线脚本编排器）。
 
 ### C7. App `components.json` — App 私有组件 schema
 

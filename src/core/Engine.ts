@@ -10,7 +10,6 @@ import { uniformLayouts } from './render/UniformLayout';
 import { schemaRegistry } from './ecs/SchemaRegistry';
 import { systemRegistry, type FrameContext, type System } from './ecs/SystemRegistry';
 import { bufferRegistry } from './render/BufferRegistry';
-import { shaderGraphRegistry } from './render/shaderGraph';
 import { PRESET_MESHES, PRESET_PBR_MESHES, registerMeshGenerator, unregisterMeshGenerator } from './render/Primitives';
 import { loadVertexSlots, removeVertexSlotsByOwner, SLOT_ORDER } from './render/vertexSlots';
 import { atomNamespaces } from './render/valueResolver';
@@ -149,7 +148,6 @@ export class Engine {
     get systemRegistry() { return systemRegistry; }
     get uniformLayouts() { return uniformLayouts; }
     get resourceManager() { return resourceManager; }
-    get shaderGraphRegistry() { return shaderGraphRegistry; }
     get canvas(): HTMLCanvasElement { return this._canvas; }
 
     /** Render canvas aspect ratio (width/height). */

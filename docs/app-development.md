@@ -17,7 +17,6 @@ public/apps/myapp/
 ├── systems.json       # 可选：覆写系统顺序（不提供则用 common + autoInsert）
 ├── tools.json         # 可选：交互工具（仅编辑器加载）
 ├── ui-config.json     # 可选：自定义 UI 脚本（仅编辑器加载）
-├── graph.json         # 可选：着色器图（render.json 用 kind:"shaderGraph" 引用）
 ├── pipelines/         # 可选：app 私有管线 JSON
 ├── shaders/           # 可选：app 私有 WGSL
 └── scripts/           # 可选：游戏脚本 .js（ScriptComponent 引用）
@@ -75,7 +74,7 @@ public/apps/myapp/
 4. 解析系统顺序：app 有 `systems.json` → 显式覆写；否则用 `common/systems.json` + `autoInsert`（把声明 `after`/`before` 的未列出 system 自动插入）。
 5. 分配 buffers（`BufferRegistry.allocateFor(systems, appId)`）。
 6. 加载 `scene` → `Scene.createEntity` 每个实体 → `resolveHandles` 填 `MeshComponent` GPU 句柄。
-7. 加载 `render` → `RenderGraph.fromData` → `compile`（编译所有管线、着色器、shaderGraph、renderScripts）。
+7. 加载 `render` → `RenderGraph.fromData` → `compile`（编译所有管线、着色器、renderScripts）。
 8. 广播 `appLoaded`（拓扑序）给所有插件；UIManager 装载 `ui` 脚本；编辑器装载 `tools`。
 
 **任意一步失败 → throw，app 不进入活跃状态。** 排查顺序：看 throw 信息 → 检查对应 JSON 字段。
@@ -149,7 +148,6 @@ public/apps/myapp/
   - `core:pipelines/X.json` → `/plugins/core/pipelines/X.json`（虚拟路径）
   - `pipelines/Y.json` → 相对 app base
   - `/abs/path.json` → 绝对
-  - `graph.json` + `kind: "shaderGraph"` → 着色器图
 - `enabled: false` 的 entry 仍编译（热重载友好），但跳过 driver。
 - `multiView: true` → 每个活跃 Camera 独立渲染自己的 viewport（见 demo7）。
 
@@ -158,9 +156,9 @@ public/apps/myapp/
 | 字段 | 必需 | 说明 |
 |------|------|------|
 | `name` | 必需 | 实例名（相位内唯一） |
-| `pipeline` | 必需 | 管线路径/虚拟 ref/graph.json |
+| `pipeline` | 必需 | 管线路径/虚拟 ref |
 | `enabled` | 必需 | `false` 仍编译但不画 |
-| `kind` | 可选 | `"compute"` / `"shaderGraph"` / 自由标签 |
+| `kind` | 可选 | `"compute"` / 自由标签 |
 | `params` | 可选 | 后处理参数（`fullscreenParam` bind group） |
 | `input`/`output` | 可选 | 后处理源/目标 target（`scene`/`ppA`/`ppB`/`screen`） |
 
@@ -224,13 +222,10 @@ app.json `tools` 指向 `tools.json`。`tools.json` 列 `{ type: "pick", enabled
 ### 8.9 用 app 私有管线/着色器
 `public/apps/<name>/pipelines/X.json` + `shaders/X.wgsl`。render.json `pipeline: "pipelines/X.json"`（相对 app base）。着色器引用相对管线文件目录（`../shaders/X.wgsl`）。见 demo5 的 GBuffer/DeferredLight。
 
-### 8.10 用着色器图（compute 节点图）
-写 `graph.json`（data/shader/if/foreach/loop 节点 + edges）。render.json Compute 相位 `{ pipeline: "graph.json", kind: "shaderGraph", enabled: true }`。见 demo10。schema 见 [json-schemas.md §C6](./json-schemas.md#c6-graphjson)。
-
-### 8.11 用 app 私有插件
+### 8.10 用 app 私有插件
 写 `public/plugins/myfx/index.ts`（见 [plugin-development.md](./plugin-development.md)）。app.json `plugins: ["myfx"]`。切 app 逆拓扑卸载。
 
-### 8.12 加载 glTF
+### 8.11 加载 glTF
 app.json `gltf: ["../../assets/models/X.glb"]`。路径相对 app base。`common/gltf-mapping.json` 把 glTF 字段映射到 `Transform`/`MeshComponent`/`PbrMaterial`。见 demo1。
 
 ## 九、调试与 fail-loud 触发点

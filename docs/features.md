@@ -9,16 +9,15 @@
 | 机制 | 位置 | 能力 |
 |------|------|------|
 | ECS | `core/ecs/` | bitecs SoA 存储 + `SchemaRegistry`（owner 化组件 schema）+ `Scene`（createEntity/getField/getActiveCameras）+ `SystemRegistry`（owner 化 system def + autoInsert） |
-| 渲染图 | `core/render/RenderGraph.ts` | 相位调度执行器（`PhaseBehavior` 策略 + perCamera 分发）+ 管线/driver/hook 注册表 + multiView + compute stage + shaderGraph 调度 |
+| 渲染图 | `core/render/RenderGraph.ts` | 相位调度执行器（`PhaseBehavior` 策略 + perCamera 分发）+ 管线/driver/hook 注册表 + multiView + compute stage |
 | 声明式 draw | `core/render/PipelineDriver.ts` | `RendererDecl` 数据驱动：query 过滤实体、bindGroup 写入、几何 step、排序（透明远→近/不透明近→远）、GPU Instancing |
-| 管线编译 | `core/render/PipelineLoader.ts` | 渲染/计算/着色器图管线编译 + 虚拟路径（`<plugin>:...`）+ 着色器相对解析 + 热重载 |
+| 管线编译 | `core/render/PipelineLoader.ts` | 渲染/计算管线编译 + 虚拟路径（`<plugin>:...`）+ 着色器相对解析 + 热重载 |
 | GPU 资源 | `core/render/ResourceManager.ts` + `GpuResourceRegistry.ts` | buffer/texture/sampler/bindLayout/renderTarget/pipelineLayout + owner 作用域 + 句柄 free list + 插件共享资源组 + frame/shadow bind group 装配 |
 | Uniform 布局 | `core/render/UniformLayout.ts` | std140 打包 + 按成员名写入（`byteSize`/`get`） |
 | Buffer 分配 | `core/render/BufferRegistry.ts` | 按 systems.json 清单分配 UBO/storage，common/app scope |
 | 值解析器 | `core/render/valueResolver.ts` | mini-DSL（`Comp.field`/`pack:`/`builtin.*`/`transform.*`/`tag.*`/`script:`）+ 预编译闭包 |
 | 顶点槽 | `core/render/vertexSlots.ts` | SoA 属性槽注册 + `SLOT_ORDER` 驱动 mesh handle 解析 |
 | 相位行为 | `core/render/phaseBehaviors.ts` | 默认三行为：`normal`/`shadow-clear`/`postprocess-chain` |
-| 着色器图 | `core/render/shaderGraph.ts` | 节点式 compute DAG（data/shader/if/foreach/loop）+ executor |
 | 渲染脚本 | `core/render/RenderScriptLoader.ts` | app 级 `.js` 逃生舱（hook 文件装载，dev 热重载） |
 | 插件装载 | `core/plugins/PluginManager.ts` | fetch → sucrase 剥类型 → es-module-lexer 重写 import → Blob import → 拓扑装载 → 回滚 |
 | 插件宿主 | `core/PluginHost.ts` | 声明应用 + owner 清扫 + render-hook + mesh-catalog（Engine 委托） |
@@ -30,7 +29,6 @@
 | 项目 FS | `host/ProjectFS.ts` | FileSystemAccess/DevServer/IndexedDB/Null 四种后端按环境切换 |
 | App UI | `host/UIManager.ts` | app.json `ui` → Blob import `mount(container,host)` |
 | 编辑器 | `editor/` | 原生 DOM 面板 + 命令系统 + 输入/工具 + 虚拟滚动 + undo/redo |
-| 节点图 | `ui/vue/nodeGraph/` | 着色器图/管线可视化编辑 |
 
 ## 二、引擎级常驻插件（engine-config.json `plugins`）
 
@@ -59,7 +57,7 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 
 ## 四、Demo Apps（public/apps/）
 
-12 个示例 app，按引入的概念复杂度排列：
+11 个示例 app，按引入的概念复杂度排列：
 
 | App | 用到的 app 级插件 | 演示要点 |
 |-----|------------------|----------|
@@ -72,7 +70,6 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 | **demo7_multiView** | orbit | 分屏：`render.json` `multiView: true`，每相机独立视口渲染 |
 | **demo8_customSystem** | orbit | 自定义系统范例：app 级 system 注册（见 app scene/render） |
 | **demo9_softBody** | pbd, orbit | PBD 软体：softbody_asset.json + reset.js 重置脚本 |
-| **demo10_shaderGraph** | — | 着色器图：`graph.json`（data/if/loop/shader 节点）+ GraphDemoComponent + Counter.wgsl compute |
 | **demo11_environmentLighting** | environment-lighting, orbit | IBL 诊断场景：高分辨率天空、不同金属度/粗糙度材质球、全局环境光强度与旋转 |
 | **demo_paint** | — | TextureEdit compute 绘制与编辑器交互 |
 
@@ -94,9 +91,8 @@ app.json `plugins` 声明，切 app 时逆拓扑卸载：
 | 自定义游戏脚本 | demo1 spin.js / demo2 game.js（ScriptComponent + `export function init/update`） |
 | 自定义交互工具 | demo1 tools.json + physics `pick` 工具类型 |
 | 自定义 UI HUD | demo1 ui-config.json + `ui/demoHUD.js`（`mount(container,host) => unmount`） |
-| GPU compute | particles 的 simulate hook / pbd 的 7 条 compute 管线 / demo10 着色器图 |
+| GPU compute | particles 的 simulate hook / pbd 的 7 条 compute 管线 |
 | 环境光照 / IBL | demo11 + environment-lighting 插件 |
-| 着色器图（节点式 compute） | demo10 + `graph.json` + `code-conventions.md §着色器图` |
 | 跨插件协作 | demo6（splat + splat-physics + orbit）/ attachments + `ctx.getSystem` |
 | 自动插入系统顺序 | splat `before: ['camera']` / orbit `after: ['animation']`（app 不带 systems.json 时生效） |
 | 显式覆写系统顺序 | demo6 `systems.json`（带自带 systems.json → 不自动插入） |

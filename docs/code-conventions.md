@@ -15,10 +15,9 @@
 | 1 | **WGSL 着色器** | `.wgsl` | 管线 JSON `vertex/fragment/compute.shader` | 引擎注入 **buffer 内容**（UBO/std140 写入、绑定）；**不注入代码**——用户写整个 `.wgsl` |
 | 2 | **游戏脚本** | `.js`（**不是 .ts**） | scene.json `ScriptComponent.script` | 引擎注入 `ScriptContext`；用户写 `export function init/update` |
 | 3 | **渲染脚本** | `.js` | render.json `renderScripts` + 管线 JSON `script:<base>.<fn>` | 引擎注入 hook 注册表 + `GeometryHookContext`/`ComputeHookContext`/`ValueContext`；用户写 hook 函数 |
-| 4 | **着色器图节点 WGSL** | `.wgsl` | graph.json `shader` 节点 | 引擎注入 executor + dispatch + bind group 装配；用户写 compute WGSL + graph JSON |
-| 5 | **插件 TS 模块** | `index.ts` + 相对 `.ts` | engine-config/app.json `plugins` | 引擎注入 `PluginContext` + owner-tracked 注册表 + 生命周期；用户写 EnginePlugin 子类 |
-| 6 | **值原子 resolver** | 插件 TS 内 | 值源 `<ns>.<atom>` | 引擎注入 `ValueContext` + 开放 `atomNamespaces`；用户写闭包（仓库内无插件自定义，仅引擎内置） |
-| 7 | **相位行为** | 插件 TS 内 | phases.json `behavior` | 引擎注入 `PhaseBehaviorContext` + `runDefault()`；用户写 `PhaseBehavior` impl（仓库内无插件自定义，仅引擎默认三行为） |
+| 4 | **插件 TS 模块** | `index.ts` + 相对 `.ts` | engine-config/app.json `plugins` | 引擎注入 `PluginContext` + owner-tracked 注册表 + 生命周期；用户写 EnginePlugin 子类 |
+| 5 | **值原子 resolver** | 插件 TS 内 | 值源 `<ns>.<atom>` | 引擎注入 `ValueContext` + 开放 `atomNamespaces`；用户写闭包（仓库内无插件自定义，仅引擎内置） |
+| 6 | **相位行为** | 插件 TS 内 | phases.json `behavior` | 引擎注入 `PhaseBehaviorContext` + `runDefault()`；用户写 `PhaseBehavior` impl（仓库内无插件自定义，仅引擎默认三行为） |
 
 **关键原则**：引擎对 WGSL **不注入任何代码、不跑预处理器、无 `#include`/`#define` 注入**。shader/引擎契约纯靠**结构**——shader 声明的 `struct`/`var` 形状必须匹配引擎侧 `uniform-layouts.json` + `bind-layouts.json`；引擎按 std140 写 buffer 内容，shader 自取。
 
@@ -113,17 +112,6 @@ fn vs(@location(0) pos: vec3f) -> VertexOutput {
 @fragment
 fn fs(in: VertexOutput) -> @location(0) vec4f {
     return in.color;
-}
-```
-
-**计算最小**（`demo10_shaderGraph/shaders/Counter.wgsl`）：
-```wgsl
-@group(0) @binding(0) var<storage, read_write> outData: array<u32>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
-    outData[i] = i + 1u;
 }
 ```
 
@@ -333,52 +321,9 @@ export function draw(pass: GPURenderPassEncoder, ctx: GeometryHookContext): void
 
 ---
 
-## 四、着色器图（Shader Graph）
+## 四、着色器图（已移除）
 
-### 4.1 是什么
-节点图 DSL，组装**单条 compute 管线**的内部程序：data 节点解析 GPU buffer，shader 节点 dispatch compute WGSL 模块，控制节点（if/foreach/loop）驱动 body 子链。**非渲染图**（渲染图编排哪条管线在哪个相位跑）——是单条 compute 管线的内部 DAG。源码单文件 `src/core/render/shaderGraph.ts`（473 行）。
-
-### 4.2 文件位置
-- **引擎源**：`src/core/render/shaderGraph.ts`——`ShaderGraph`/`ShaderGraphNode`（5 变体）/`ShaderGraphEdge`/`ShaderGraphExecutor` + 模块单例 `shaderGraphRegistry`
-- **图定义**：`public/apps/<name>/<graphName>.json`（约定 `graph.json`，但可任意名；`render.json` `pipeline` 字段指向它）
-- **图用 shader**：graph JSON `shader` 字段引用（如 `"shaders/Counter.wgsl"`），相对 app base 解析
-- **图查的组件**：app `components.json` 声明
-
-### 4.3 引用方式
-render.json，相位 entry `kind: "shaderGraph"`：
-```jsonc
-{ "phases": { "Compute": [
-  { "name": "DemoGraph", "pipeline": "graph.json", "kind": "shaderGraph", "enabled": true }
-] } }
-```
-`RenderGraph.compile` 行 270-276 特判 `entry.kind === 'shaderGraph'`：未注册则 `this.loadShaderGraph(device, dataBase, appBase, entry.pipeline)` + `shaderGraphRegistry.register(executor, 'app')`。
-
-### 4.4 graph JSON schema
-见 [json-schemas.md §C6](./json-schemas.md#c6-graphjson--着色器图compute-节点图)。节点 5 变体（`data`/`shader`/`if`/`foreach`/`loop`），边 3 handle（`out`→`in:<binding>` 数据边、`body` 控制体、`next` 续接）。
-
-### 4.5 shader 节点契约（WGSL）
-- 须是 `@compute @workgroup_size(N) fn <entryPoint>(@builtin(global_invocation_id) gid: vec3u)` 模块
-- 绑定 `@group(0) @binding(N) var<storage, read_write|read> ...`——`N` 匹配入边 `targetHandle: "in:<N>"`
-- executor 从 `pipeline.getBindgroupLayout(0)` 建 bind group（管线 layout `'auto'`）
-- dispatch 数 = `evalSource(node.count, vctx)`；`pass.dispatchWorkgroups(ceil(count / tgs))`，`tgs = node.workgroupSize ?? 64`
-
-### 4.6 完整示例（demo10）
-**graph.json**：见 [json-schemas.md §C6](./json-schemas.md#c6-graphjson--着色器图compute-节点图)。
-
-**Counter.wgsl**：
-```wgsl
-@group(0) @binding(0) var<storage, read_write> outData: array<u32>;
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3u) {
-    let i = gid.x;
-    outData[i] = i + 1u;
-}
-```
-
-### 4.7 执行模型
-- **编译**：app 装载时 `RenderGraph.compile` 检 `kind: "shaderGraph"` entry → `loadShaderGraph` fetch JSON → 构 `ShaderGraphExecutor` → `executor.compile(device)`（每 shader 节点编译成 `GPUComputePipeline`，`layout:'auto'`）→ 注册（owner `'app'`）
-- **执行**：每帧 compute stage，`RenderGraph.runShaderGraphs(encoder, scene, time, dt, device)` 迭代 `shaderGraphRegistry.all()`，按 `executor.query` 过滤实体（实体须有所有 query 组件），每实体 `executor.run({ scene, eid, device, encoder, time, dt })`。每 run：清 resolved-buffers map + field cache，走节点序（构造时拓扑排 `next`+`body` 边建一次），解析 data 节点（alloc buffer 复用/增长），dispatch shader 节点（装好 bind group）
-- **寿命**：app scoped。`RenderGraph.exitApp` 调 `shaderGraphRegistry.removeByOwner('app')`。编辑器可编程注册经 `ctx.engine.shaderGraphRegistry.register(executor, 'app')`
+着色器图（`shaderGraph.ts`）已删除：原 per-entity dispatch 模型与引擎批量 compute pass 机制冲突，每个 shader 节点开独立 compute pass 性能差；demo10 是纯计数器无视觉产出。替代方案见 [PLAN.md](../PLAN.md) v2（管线脚本编排器：节点图→RenderScript 单向编译）。
 
 ---
 
@@ -583,7 +528,6 @@ ctx.registerPhaseBehavior('my-volume-strategy', {
 | WGSL shader | buffer **内容**（UBO/std140 写入、绑定）；**无代码注入** | 整个 `.wgsl`：struct、`@group/@binding var`、entry point。须与 uniform-layouts/bind-layouts 形状兼容 |
 | 游戏脚本 | `ScriptContext`（eid/scene/time/aspect/physics/getField/setField/on/emit） | `.js` 模块，`export function init/update` |
 | 渲染脚本 | hook 注册表 + 调用；`GeometryHookContext`/`ComputeHookContext`/`ValueContext` | `.js` 模块导出 hook 函数 |
-| 着色器图节点 | executor + dispatch + bind group 装配；`ShaderGraphFrame` | `.wgsl` compute + graph JSON 节点图 |
 | 插件 TS | `PluginContext` + owner-tracked 注册表 + 生命周期分发 | `index.ts` 类 extends `EnginePlugin` |
 | 值原子 | `ValueContext` + 开放 `atomNamespaces` 注册表 | resolver 闭包（仓库内无插件自定义，仅引擎内置） |
 | 相位行为 | `PhaseBehaviorContext` + 分发 + `runDefault()` | `PhaseBehavior` impl（仓库内无插件自定义，仅引擎默认） |

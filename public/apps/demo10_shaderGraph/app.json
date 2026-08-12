@@ -1,6 +1,0 @@
-{
-  "name": "demo10_shaderGraph",
-  "scene": "scene.json",
-  "render": "render.json",
-  "components": ["components.json"]
-}

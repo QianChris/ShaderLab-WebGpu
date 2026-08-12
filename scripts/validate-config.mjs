@@ -116,31 +116,8 @@ function checkPipeline(appName, appComponents, rel, cfgEntry) {
     if (decl.compute?.script) hookRefs.push({ appName, rel, hook: decl.compute.script });
 }
 
-/** Static checks for a shader-graph entry (render.json kind:"shaderGraph"):
- *  edge references resolve to declared nodes; shader-node shader refs exist. */
-function checkShaderGraph(appName, appComponents, rel, graph) {
-    const allComps = new Set([...commonComponents, ...appComponents]);
-    const ids = new Set(graph.nodes.map(n => n.id));
-    for (const n of graph.nodes) {
-        if (n.type === 'shader') {
-            const sp = n.shader.startsWith('/') ? join(ROOT, n.shader) : join(join(APPS, appName), n.shader);
-            if (!existsSync(sp)) note(`${appName}/${rel}: shader '${n.shader}' missing at ${sp} (WILL THROW)`);
-            // dispatch count / logic params are component-field value sources
-            for (const src of [n.count]) checkValueSource(appName, rel, src, allComps);
-        } else if (n.type === 'if') {
-            checkValueSource(appName, rel, n.condition, allComps);
-        } else if (n.type === 'foreach') {
-            checkValueSource(appName, rel, n.count, allComps);
-        }
-    }
-    for (const e of graph.edges) {
-        if (!ids.has(e.source)) note(`${appName}/${rel}: edge '${e.id}' source '${e.source}' not a declared node`);
-        if (!ids.has(e.target)) note(`${appName}/${rel}: edge '${e.id}' target '${e.target}' not a declared node`);
-    }
-    if (graph.query) for (const q of graph.query) {
-        if (!allComps.has(q)) note(`${appName}/${rel}: graph query component '${q}' not registered`);
-    }
-}
+/** Static checks for a value source used in renderer declarations and
+ *  shader-graph-free configs. Kept here for callers below. */
 
 const NS = { builtin: ['entityId','time','dt','aspect','screenW','screenH'], transform: ['model','normalMatrix'], tag: ['color','extra'] };
 function checkValueSource(appName, rel, src, allComps) {
@@ -214,12 +191,6 @@ for (const app of readdirSync(APPS)) {
     // pipelines referenced
     for (const [phaseKey, entries] of Object.entries(render.phases ?? {})) {
         for (const e of entries) {
-            if (e.kind === 'shaderGraph') {
-                const gp = e.pipeline.startsWith('/') ? join(ROOT, e.pipeline) : join(dir, e.pipeline);
-                if (!existsSync(gp)) note(`${app}: shader graph '${e.pipeline}' missing at ${gp} (WILL THROW)`);
-                else checkShaderGraph(app, appComponents, e.pipeline, J(gp));
-                continue;
-            }
             checkPipeline(app, appComponents, e.pipeline, loadPipeline(dir, e.pipeline));
         }
     }

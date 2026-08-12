@@ -5,7 +5,6 @@ import type { VuePanelDef } from '../vue';
 import AssetViewPanel from '../vue/panels/AssetViewPanel.vue';
 import ScriptEditorPanel from '../vue/panels/ScriptEditorPanel.vue';
 import WgslEditorPanel from '../vue/panels/WgslEditorPanel.vue';
-import PipelineNodeEditor from '../vue/panels/PipelineNodeEditor.vue';
 import { EditorLayout } from './EditorLayout';
 import { EditorOrchestrator } from './EditorOrchestrator';
 
@@ -30,7 +29,6 @@ export class EditorUILayer implements UILayer {
     private readonly vuePanels: VuePanelDef[] = [
         { id: 'scripts', label: 'Scripts', component: ScriptEditorPanel },
         { id: 'shaders', label: 'Shaders', component: WgslEditorPanel },
-        { id: 'nodes', label: 'Nodes', component: PipelineNodeEditor },
     ];
     /** Asset view mounts below the viewport (not a sidebar tab). */
     private readonly assetPanel: VuePanelDef = { id: 'assets', label: 'Assets', component: AssetViewPanel };

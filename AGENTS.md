@@ -46,7 +46,7 @@ src/                          分层：host(宿主桥) → core(引擎机制) �
               PipelineLoader(管线编译，含 '<plugin>:' 虚拟/文件源) /
               ResourceManager(GPU 资源+owner) / UniformLayout(std140) /
               vertexSlots / valueResolver(mini-DSL) / phaseBehaviors(默认三行为) /
-              BufferRegistry / shaderGraph(节点式着色器图注册表) / RenderScriptLoader(app 级逃生舱)
+              BufferRegistry / RenderScriptLoader(app 级逃生舱)
     tools/    ToolRegistry(机制)
     events/   EventBus + eventTypes
     gltf/     GltfLoader + GltfTypes
@@ -60,11 +60,11 @@ src/                          分层：host(宿主桥) → core(引擎机制) �
   ui/                          界面层（唯一放 UI 代码处；经 host.dispatch 写，eventBus 读）
     UILayer.ts                 接口：mount(container,host)/unmount
     layers/  EditorUILayer(组合根，仅 main.ts 装) / EditorLayout(纯 DOM 框架) / EditorOrchestrator(行为)
-    vue/     Vue 面板 + composables + nodeGraph(节点图 @connect/Handle/palette/drag)
+    vue/     Vue 面板 + composables
   editor/                      原生面板 + 命令系统（被 ui/layers 消费，非自挂载）
     EditorPanel.ts / PipelinePanel.ts(undo/redo + 虚拟滚动) / EditorCommandBus.ts / dom.ts(ce 工厂)
     input/   EditorInputManager / ToolSystem / SceneTool
-    commands/ Command(基类) + Scene/RenderGraph/Shader/Script/ShaderGraph Commands
+    commands/ Command(基类) + Scene/RenderGraph/Shader/Script Commands
   types/                       bitecs-legacy.d.ts
 
 public/plugins/<id>/          插件（运行时装载 TS/JS，可拷贝分发，改动无需重构引擎）
