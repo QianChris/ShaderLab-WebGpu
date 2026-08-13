@@ -131,6 +131,10 @@ export class Engine {
     /** Pending capture request: set by captureFrame(), drained in frame()
      *  after the render pass so the swap chain texture has the rendered frame. */
     private captureResolver: { resolve: (blob: Blob) => void; reject: (e: unknown) => void } | null = null;
+    /** Editor time-mode: 'play' = systems run + time advances; 'pause' =
+     *  systems skipped, time frozen, canvas holds last frame. The Timeline
+     *  panel toggles this and calls stepOnce()/setFrameTime() to scrub. */
+    editorMode: 'play' | 'pause' = 'play';
     /** Extracted plugin declaration/sweep logic (reduces Engine God Class). */
     private pluginHost!: PluginHostHelper;
 
@@ -183,6 +187,35 @@ export class Engine {
         return new Promise<Blob>((resolve, reject) => {
             this.captureResolver = { resolve, reject };
         });
+    }
+
+    /** Scrub the editor clock to time `t` (seconds). Only meaningful while
+     *  paused; in play mode the clock runs free. stepOnce() then advances one
+     *  frame of systems at this time so the scene reflects t. */
+    setFrameTime(t: number): void {
+        const now = performance.now();
+        this.startTime = now - t * 1000;
+        this.lastTime = now;
+    }
+
+    /** Advance one frame of systems at the current (scrubbed) time while
+     *  paused, then render. Used by the Timeline panel's step button. */
+    stepOnce(): void {
+        if (this.editorMode !== 'pause') return;
+        const now = performance.now();
+        const time = (now - this.startTime) / 1000;
+        const ctx = this.frameCtx;
+        ctx.time = time; ctx.dt = 0;
+        ctx.aspect = this.aspect();
+        ctx.cw = this._canvas.width;
+        ctx.ch = this._canvas.height;
+        ctx.editorView = this.editorViewProvider ? this.editorViewProvider() : null;
+        this.editorView = ctx.editorView;
+        for (const sys of this.activeSystems) {
+            const impl = systemRegistry.resolve(sys);
+            impl?.update(ctx);
+        }
+        this.flushCompute();
     }
 
     async init(): Promise<void> {
@@ -586,6 +619,21 @@ export class Engine {
         // Skip system updates while an app is loading (partial scene/registries).
         if (this.appLoading) {
             this.lastTime = now;
+            requestAnimationFrame(this.frame);
+            return;
+        }
+        // Pause: freeze time + skip system updates, but keep rendering so
+        // editor camera moves (editorView) stay visible. Time is not advanced,
+        // so animations/physics hold. stepOnce()/setFrameTime() scrub.
+        if (this.editorMode === 'pause') {
+            const pctx = this.frameCtx;
+            pctx.aspect = this.aspect();
+            pctx.cw = this._canvas.width;
+            pctx.ch = this._canvas.height;
+            pctx.editorView = this.editorViewProvider ? this.editorViewProvider() : null;
+            this.editorView = pctx.editorView;
+            this.renderer.update(pctx);
+            this.flushCompute();
             requestAnimationFrame(this.frame);
             return;
         }

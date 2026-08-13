@@ -5,6 +5,7 @@ import type { VuePanelDef } from '../vue';
 import AssetViewPanel from '../vue/panels/AssetViewPanel.vue';
 import HierarchyPanel from '../vue/panels/HierarchyPanel.vue';
 import ScriptEditorPanel from '../vue/panels/ScriptEditorPanel.vue';
+import TimelinePanel from '../vue/panels/TimelinePanel.vue';
 import WgslEditorPanel from '../vue/panels/WgslEditorPanel.vue';
 import { EditorLayout } from './EditorLayout';
 import { EditorOrchestrator } from './EditorOrchestrator';
@@ -29,6 +30,7 @@ export class EditorUILayer implements UILayer {
     /** Vue panel definitions mounted as sidebar tabs. */
     private readonly vuePanels: VuePanelDef[] = [
         { id: 'hierarchy', label: 'Hierarchy', component: HierarchyPanel },
+        { id: 'timeline', label: 'Timeline', component: TimelinePanel },
         { id: 'scripts', label: 'Scripts', component: ScriptEditorPanel },
         { id: 'shaders', label: 'Shaders', component: WgslEditorPanel },
     ];
