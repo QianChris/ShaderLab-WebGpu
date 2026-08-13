@@ -53,7 +53,7 @@ type GltfMaterial = {
     doubleSided?: boolean;
 };
 type GltfPrimitive = {
-    attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; TANGENT?: number };
+    attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; TANGENT?: number; JOINTS_0?: number; WEIGHTS_0?: number };
     indices?: number;
     material?: number;
 };
@@ -388,7 +388,14 @@ const buildPbrMeshData = (
     const tangents: number[] = typeof primitive.attributes.TANGENT === 'number'
         ? Array.from(readAccessorAsFloatArray(gltf, buffers, primitive.attributes.TANGENT, 'VEC4'))
         : computeFallbackTangents(positions, normals, uvs, indices);
-    return { meshData: { positions, normals, uvs, tangents, indices }, primitiveName: name };
+    // Skinning attributes (optional — only present on skinned primitives).
+    const joints: number[] | undefined = typeof primitive.attributes.JOINTS_0 === 'number'
+        ? Array.from(readAccessorAsFloatArray(gltf, buffers, primitive.attributes.JOINTS_0, 'VEC4'))
+        : undefined;
+    const weights: number[] | undefined = typeof primitive.attributes.WEIGHTS_0 === 'number'
+        ? Array.from(readAccessorAsFloatArray(gltf, buffers, primitive.attributes.WEIGHTS_0, 'VEC4'))
+        : undefined;
+    return { meshData: { positions, normals, uvs, tangents, indices, joints, weights }, primitiveName: name };
 };
 
 const materialFromGltf = (

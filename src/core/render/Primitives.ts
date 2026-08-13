@@ -9,6 +9,12 @@ export interface PbrMeshData {
     uvs: number[];
     tangents: number[];
     indices: number[];
+    /** Per-vertex joint indices (4 per vertex, u16). Present only on skinned
+     *  meshes; ResourceManager builds the JointIndex vertex buffer when set. */
+    joints?: number[];
+    /** Per-vertex joint weights (4 per vertex, f32). Present only on skinned
+     *  meshes; ResourceManager builds the JointWeight vertex buffer when set. */
+    weights?: number[];
 }
 
 export function makeTriangle(): MeshData {

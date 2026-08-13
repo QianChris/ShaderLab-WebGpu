@@ -548,6 +548,25 @@ export class ResourceManager {
             UV: this.registerBuffer(uvBuf),
             Tangent: this.registerBuffer(tanBuf),
         };
+        // Skinning vertex buffers (only when the mesh carries JOINTS_0/WEIGHTS_0).
+        if (data.joints && data.weights) {
+            const jArr = new Uint16Array(data.joints);
+            const jointBuf = this.device.createBuffer({
+                size: Math.max(jArr.byteLength, 4),
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+            this.device.queue.writeBuffer(jointBuf, 0, jArr);
+            slots.JointIndex = jointBuf;
+            slotHandles.JointIndex = this.registerBuffer(jointBuf);
+            const wArr = new Float32Array(data.weights);
+            const weightBuf = this.device.createBuffer({
+                size: Math.max(wArr.byteLength, 4),
+                usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
+            });
+            this.device.queue.writeBuffer(weightBuf, 0, wArr);
+            slots.JointWeight = weightBuf;
+            slotHandles.JointWeight = this.registerBuffer(weightBuf);
+        }
 
         return {
             slots,
