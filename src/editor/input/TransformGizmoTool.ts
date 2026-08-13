@@ -363,8 +363,14 @@ export class TransformGizmoTool {
                 s[idx] = Math.max(0.01, s[idx] * factor);
                 this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [s[0], s[1], s[2]]);
             } else {
-                const v = Math.max(0.01, s[0] * factor);
-                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [v, v, v]);
+                // Free scale: apply the factor to every axis independently so a
+                // non-uniform scale (e.g. [2,1,1] long box) keeps its ratio
+                // instead of being flattened to [s[0], s[0], s[0]].
+                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [
+                    Math.max(0.01, s[0] * factor),
+                    Math.max(0.01, s[1] * factor),
+                    Math.max(0.01, s[2] * factor),
+                ]);
             }
         }
     }
