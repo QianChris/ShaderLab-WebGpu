@@ -5,7 +5,7 @@
     "renderScriptsSubdir": "scripts",
     "computeTgs": 64,
     "alphaMode": "premultiplied",
-    "systemOrder": ["input", "script", "physics", "camera", "light", "animation", "render"],
+    "systemOrder": ["input", "script", "physics", "transform", "camera", "light", "animation", "render"],
     "scriptHooks": ["init", "update"],
     "pluginsRoot": "/plugins",
     "plugins": ["core", "physics", "particles", "sprite"]

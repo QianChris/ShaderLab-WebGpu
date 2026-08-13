@@ -68,6 +68,15 @@ export class Scene {
         schemaRegistry.setAllFields('NameComponent', nc, eid, { name: key });
         comps.push('NameComponent');
 
+        // force GlobalTransform (mandatory; identity default, written by
+        // TransformSystem each frame from Transform + parent chain).
+        const gt = schemaRegistry.get('GlobalTransform');
+        if (gt) {
+            addComponent(this.world, gt, eid);
+            schemaRegistry.setAllFields('GlobalTransform', gt, eid, {});
+            comps.push('GlobalTransform');
+        }
+
         for (const [compName, compData] of Object.entries(data)) {
             const comp = schemaRegistry.get(compName);
             if (!comp) {
@@ -330,6 +339,54 @@ export class Scene {
         buf.set(target);
         this.worldDirty.delete(eid);
         return target;
+    }
+
+    // ── GlobalTransform (world matrix cache component) ─────────────────
+
+    /** Read the GlobalTransform component (col0..col3) into a mat4. O(1) —
+     *  no recursion. Falls back to getModelMatrix when the entity has no
+     *  GlobalTransform (e.g. tests that didn't register it). The renderer
+     *  reads this instead of recomputing the parent chain each frame. */
+    getGlobalMatrix(eid: number, out?: Float32Array): Float32Array {
+        const target = out ?? this.scratchModel;
+        const comp = schemaRegistry.get('GlobalTransform');
+        if (!comp || !hasComponent(this.world, comp, eid)) {
+            return this.getModelMatrix(eid, target);
+        }
+        const c0 = schemaRegistry.getComposite('GlobalTransform', comp, eid, 'col0') as number[] | undefined;
+        const c1 = schemaRegistry.getComposite('GlobalTransform', comp, eid, 'col1') as number[] | undefined;
+        const c2 = schemaRegistry.getComposite('GlobalTransform', comp, eid, 'col2') as number[] | undefined;
+        const c3 = schemaRegistry.getComposite('GlobalTransform', comp, eid, 'col3') as number[] | undefined;
+        target.set([
+            c0?.[0] ?? 1, c0?.[1] ?? 0, c0?.[2] ?? 0, c0?.[3] ?? 0,
+            c1?.[0] ?? 0, c1?.[1] ?? 1, c1?.[2] ?? 0, c1?.[3] ?? 0,
+            c2?.[0] ?? 0, c2?.[1] ?? 0, c2?.[2] ?? 1, c2?.[3] ?? 0,
+            c3?.[0] ?? 0, c3?.[1] ?? 0, c3?.[2] ?? 0, c3?.[3] ?? 1,
+        ]);
+        return target;
+    }
+
+    /** Write a mat4 (16 floats, column-major) into GlobalTransform col0..3.
+     *  Used by TransformSystem each frame. */
+    writeGlobalMatrix(eid: number, m: Float32Array): void {
+        const comp = schemaRegistry.get('GlobalTransform');
+        if (!comp || !hasComponent(this.world, comp, eid)) return;
+        schemaRegistry.setComposite('GlobalTransform', comp, eid, 'col0', [m[0], m[1], m[2], m[3]]);
+        schemaRegistry.setComposite('GlobalTransform', comp, eid, 'col1', [m[4], m[5], m[6], m[7]]);
+        schemaRegistry.setComposite('GlobalTransform', comp, eid, 'col2', [m[8], m[9], m[10], m[11]]);
+        schemaRegistry.setComposite('GlobalTransform', comp, eid, 'col3', [m[12], m[13], m[14], m[15]]);
+    }
+
+    /** World-space translation of an entity (GlobalTransform col3.xyz),
+     *  used by the gizmo to render at the entity's true world position. */
+    getWorldPosition(eid: number): [number, number, number] {
+        const comp = schemaRegistry.get('GlobalTransform');
+        if (comp && hasComponent(this.world, comp, eid)) {
+            const c3 = schemaRegistry.getComposite('GlobalTransform', comp, eid, 'col3') as number[] | undefined;
+            return [c3?.[0] ?? 0, c3?.[1] ?? 0, c3?.[2] ?? 0];
+        }
+        const m = this.getModelMatrix(eid, this.scratchModel);
+        return [m[12], m[13], m[14]];
     }
 
     // ── Parent hierarchy (Transform.parent back-ref) ───────────────────

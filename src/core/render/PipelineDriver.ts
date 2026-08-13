@@ -176,7 +176,7 @@ export class PipelineDriver {
             scene, eid: 0, tag: this.decl.tag ?? '',
             time: frame.time, dt: frame.dt,
             aspect: frame.cw / frame.ch, screenW: frame.cw, screenH: frame.ch,
-            model: () => scene.getModelMatrix(vctx.eid),
+            model: () => scene.getGlobalMatrix(vctx.eid),
             scripts: this.valueScripts,
         };
 
@@ -235,7 +235,7 @@ export class PipelineDriver {
                     const v = scene.getField(eid, filter.component, filter.field);
                     if ((Number(v) ?? 0) !== filter.value) continue;
                 }
-                const model = scene.getModelMatrix(eid, this.sortScratch);
+                const model = scene.getGlobalMatrix(eid, this.sortScratch);
                 const dx = model[12] - camPos[0];
                 const dy = model[13] - camPos[1];
                 const dz = model[14] - camPos[2];
@@ -313,7 +313,7 @@ export class PipelineDriver {
             this.instanceMatrices = new Float32Array(n * matFloats);
         }
         for (let i = 0; i < n; i++) {
-            const model = scene.getModelMatrix(matching[i], this.sortScratch);
+            const model = scene.getGlobalMatrix(matching[i], this.sortScratch);
             this.instanceMatrices.set(model, i * matFloats);
         }
         resourceManager.device.queue.writeBuffer(

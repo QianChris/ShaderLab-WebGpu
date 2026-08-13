@@ -136,10 +136,10 @@ export class TransformGizmoTool {
         if (!this.selectedKey) return null;
         const eid = this.engine.scene.entityKeyMap.get(this.selectedKey);
         if (eid == null) return null;
-        const pos = this.engine.scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+        const [x, y, z] = this.engine.scene.getWorldPosition(eid);
         const sphere = this.boundingSphereFor(eid);
         const radius = sphere ? sphere.radius : 1;
-        return { x: pos?.[0] ?? 0, y: pos?.[1] ?? 0, z: pos?.[2] ?? 0, distance: Math.max(1, radius * 3) };
+        return { x, y, z, distance: Math.max(1, radius * 3) };
     }
 
     setMode(mode: GizmoMode): void {
@@ -266,9 +266,8 @@ export class TransformGizmoTool {
         if (!sphere) return null;
         // Place the local sphere at the entity's world position, scaled by the
         // max axis of the entity's scale (rough but adequate for picking).
-        const px = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+        const [ex, ey, ez] = this.engine.scene.getWorldPosition(eid);
         const sc = scene.getField(eid, 'Transform', 'scale') as unknown as number[] | undefined;
-        const ex = px?.[0] ?? 0, ey = px?.[1] ?? 0, ez = px?.[2] ?? 0;
         const s = Math.max(sc?.[0] ?? 1, sc?.[1] ?? 1, sc?.[2] ?? 1);
         return { cx: ex + sphere.cx * s, cy: ey + sphere.cy * s, cz: ez + sphere.cz * s, radius: sphere.radius * s };
     }
@@ -379,8 +378,7 @@ export class TransformGizmoTool {
      *  to convert axis-locked screen drag deltas into world-space movement. */
     private worldPerPixel(cam: GizmoCamera, eid: number): number {
         const scene = this.engine.scene;
-        const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
-        const ex = pos?.[0] ?? 0, ey = pos?.[1] ?? 0, ez = pos?.[2] ?? 0;
+        const [ex, ey, ez] = scene.getWorldPosition(eid);
         const dist = Math.hypot(cam.pos[0] - ex, cam.pos[1] - ey, cam.pos[2] - ez);
         // proj[5] = 1/tan(fovY/2); visible world height at distance d = 2*d*tan.
         const tanHalf = 1 / (cam.proj[5] || 1);
@@ -457,8 +455,7 @@ export class TransformGizmoTool {
         if (!cam) return;
 
         const scene = this.engine.scene;
-        const px = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
-        const origin: [number, number, number] = [px?.[0] ?? 0, px?.[1] ?? 0, px?.[2] ?? 0];
+        const origin: [number, number, number] = scene.getWorldPosition(eid);
         // Gizmo size: scale with distance to keep a constant screen footprint.
         const dist = Math.hypot(cam.pos[0] - origin[0], cam.pos[1] - origin[1], cam.pos[2] - origin[2]);
         const size = Math.max(0.1, dist * 0.15);

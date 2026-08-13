@@ -3,6 +3,7 @@ import { InputSystem } from './InputSystem.ts';
 import { ScriptSystem } from './ScriptSystem.ts';
 import { CameraSystem } from './CameraSystem.ts';
 import { LightSystem } from './LightSystem.ts';
+import { TransformSystem } from './TransformSystem.ts';
 import * as paramsHooks from './hooks/params.ts';
 
 /**
@@ -23,8 +24,9 @@ export default class CorePlugin extends EnginePlugin {
     systemDefs = [
         { name: 'input', source: 'plugin:core', components: [], ubos: ['timeInput'], buffers: [], needs: [] },
         { name: 'script', source: 'plugin:core', components: ['ScriptComponent'], ubos: [], buffers: [], needs: ['input'] },
-        { name: 'camera', source: 'plugin:core', components: ['Camera', 'Transform'], ubos: ['camera'], buffers: [], needs: ['physics'] },
-        { name: 'light', source: 'plugin:core', components: ['LightComponent', 'EnvironmentComponent', 'Transform'], ubos: ['light', 'pointShadowFaces'], buffers: [], needs: ['physics'] },
+        { name: 'transform', source: 'plugin:core', components: ['Transform', 'GlobalTransform'], ubos: [], buffers: [], needs: [] },
+        { name: 'camera', source: 'plugin:core', components: ['Camera', 'Transform'], ubos: ['camera'], buffers: [], needs: ['transform'] },
+        { name: 'light', source: 'plugin:core', components: ['LightComponent', 'EnvironmentComponent', 'Transform'], ubos: ['light', 'pointShadowFaces'], buffers: [], needs: ['transform'] },
         { name: 'render', source: 'plugin:core', components: [], ubos: [], buffers: [], needs: ['camera', 'light', 'animation', 'gaussianSplat'] },
     ];
 
@@ -80,6 +82,9 @@ export default class CorePlugin extends EnginePlugin {
         const light = new LightSystem();
         light.attach(ctx.scene);
 
+        const transform = new TransformSystem();
+        transform.attach(ctx.scene);
+
         /** Thin render entry: Component data has been translated by the earlier
          *  systems into UBO/attachment state; this hands the frame to the
          *  renderer mechanism (the built-in RenderGraph unless replaced). */
@@ -87,6 +92,7 @@ export default class CorePlugin extends EnginePlugin {
 
         ctx.registerSystem('input', input);
         ctx.registerSystem('script', this.script);
+        ctx.registerSystem('transform', transform);
         ctx.registerSystem('camera', camera);
         ctx.registerSystem('light', light);
         ctx.registerSystem('render', render);
