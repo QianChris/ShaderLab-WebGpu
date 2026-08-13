@@ -755,42 +755,51 @@ export class Engine {
         const gltfLoader = new GltfLoader();
         const result = await gltfLoader.load(url);
 
-        console.log(`[GLTF] loaded ${result.primitives.length} primitives, ${result.textures.length} textures`);
-        for (const prim of result.primitives) {
-            console.log(`  mesh: ${prim.name} | verts=${prim.meshData.positions.length/3} nrm=${prim.meshData.normals.length/3} uv=${prim.meshData.uvs.length/2} idx=${prim.meshData.indices.length}`);
-            console.log(`  material: bc=${prim.material.baseColorFactor} met=${prim.material.metallicFactor} rough=${prim.material.roughnessFactor}`);
-            console.log(`  textures: bc=${prim.baseColorTexture} mr=${prim.metallicRoughnessTexture} ao=${prim.occlusionTexture} em=${prim.emissiveTexture}`);
-        }
-
         for (const tex of result.textures) {
             await resourceManager.uploadTextureFromImage(tex.key, tex.image, tex.sRGB);
         }
-
         for (const prim of result.primitives) {
             resourceManager.registerPbrMesh(prim.name, prim.meshData);
         }
 
+        // Create entities preserving the glTF node tree: each node carries a
+        // parentIndex so we wire Transform.parent → parent entity key, and
+        // Scene's recursive getModelMatrix composes parent * local (Phase 2a)
+        // instead of baking world transforms. Parents are created first
+        // because the loader walks the tree depth-first.
         for (const node of result.nodes) {
             const entityData: Record<string, Record<string, unknown>> = {};
-
-            entityData[m.transform.component] = {
+            const transformData: Record<string, unknown> = {
                 [m.transform.fields.position]: node.transform.position,
                 [m.transform.fields.rotation]: node.transform.rotation,
                 [m.transform.fields.scale]: node.transform.scale,
             };
-            entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
+            if (node.parentIndex !== undefined) {
+                const parent = result.nodes[node.parentIndex];
+                if (parent) transformData['parent'] = parent.name;
+            }
+            entityData[m.transform.component] = transformData;
 
-            const pm = result.primitives.find(p => p.name === node.meshName);
-            if (pm) {
-                const mat: Record<string, unknown> = {};
-                for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
-                    mat[fieldKey] = (pm.material as unknown as Record<string, unknown>)[gltfKey];
+            if (node.meshName) {
+                entityData[m.mesh.component] = { [m.mesh.field]: node.meshName };
+                if (node.material) {
+                    const mat: Record<string, unknown> = {};
+                    for (const [gltfKey, fieldKey] of Object.entries(m.material.fields)) {
+                        mat[fieldKey] = (node.material as unknown as Record<string, unknown>)[gltfKey];
+                    }
+                    const texMap: Record<string, string | undefined> = {
+                        baseColorTexture: node.baseColorTexture,
+                        metallicRoughnessTexture: node.metallicRoughnessTexture,
+                        normalTexture: node.normalTexture,
+                        occlusionTexture: node.occlusionTexture,
+                        emissiveTexture: node.emissiveTexture,
+                    };
+                    for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
+                        const texKey = texMap[gltfKey];
+                        mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
+                    }
+                    entityData[m.material.component] = mat;
                 }
-                for (const [gltfKey, fieldKey] of Object.entries(m.material.textures)) {
-                    const texKey = (pm as unknown as Record<string, unknown>)[gltfKey] as string | undefined;
-                    mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
-                }
-                entityData[m.material.component] = mat;
             }
 
             this.scene.createEntity(node.name, entityData);
