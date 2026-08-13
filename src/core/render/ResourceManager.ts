@@ -1,4 +1,5 @@
 import { meshEdges, type MeshData, type PbrMeshData } from './Primitives';
+import type { GltfSkinData, GltfAnimationData } from '../gltf/GltfTypes';
 import { uniformLayouts } from './UniformLayout';
 import { bufferRegistry } from './BufferRegistry';
 import { gpuResourceRegistry, type GpuResourceKind } from './GpuResourceRegistry';
@@ -41,6 +42,11 @@ export class ResourceManager {
     private meshData = new Map<string, MeshData>();
     private pbrMeshData = new Map<string, PbrMeshData>();
     private meshGpu = new Map<string, MeshGpu>();
+    /** CPU-side skin data (joints + inverse-bind matrices) from glTF; the
+     *  animation plugin reads these to compute joint matrices (Phase 4). */
+    private skinData = new Map<string, GltfSkinData>();
+    /** CPU-side animation clips from glTF (channels + samplers). */
+    private animationData = new Map<string, GltfAnimationData>();
     private colorTargets = new Map<string, ColorTarget>();
     private depthTargets = new Map<string, { tex: GPUTexture; w: number; h: number; format: GPUTextureFormat }>();
 
@@ -49,6 +55,8 @@ export class ResourceManager {
     private meshDataOwner = new Map<string, string>();
     private pbrMeshDataOwner = new Map<string, string>();
     private meshGpuOwner = new Map<string, string>();
+    private skinDataOwner = new Map<string, string>();
+    private animationDataOwner = new Map<string, string>();
     private uniformOwner = new Map<string, string>();
     private storageOwner = new Map<string, string>();
     private textureOwner = new Map<string, string>();
@@ -207,6 +215,16 @@ export class ResourceManager {
             this.pbrMeshData.delete(name);
             this.pbrMeshDataOwner.delete(name);
             this.meshKeyToHandle.delete(name);
+        }
+        for (const [name, owner] of this.skinDataOwner) {
+            if (owner !== appId) continue;
+            this.skinData.delete(name);
+            this.skinDataOwner.delete(name);
+        }
+        for (const [name, owner] of this.animationDataOwner) {
+            if (owner !== appId) continue;
+            this.animationData.delete(name);
+            this.animationDataOwner.delete(name);
         }
         for (const [name, owner] of this.meshGpuOwner) {
             if (owner !== appId) continue;
@@ -430,6 +448,21 @@ export class ResourceManager {
     getPbrMeshData(name: string): PbrMeshData | undefined {
         return this.pbrMeshData.get(name);
     }
+
+    /* ── Skin / animation assets (CPU-side, owner-tagged) ──────────── */
+
+    registerSkin(name: string, data: GltfSkinData): void {
+        this.skinData.set(name, data);
+        this.skinDataOwner.set(name, this.currentOwner);
+    }
+    registerAnimation(name: string, data: GltfAnimationData): void {
+        this.animationData.set(name, data);
+        this.animationDataOwner.set(name, this.currentOwner);
+    }
+    getSkin(name: string): GltfSkinData | undefined { return this.skinData.get(name); }
+    getAnimation(name: string): GltfAnimationData | undefined { return this.animationData.get(name); }
+    getSkinNames(): string[] { return [...this.skinData.keys()]; }
+    getAnimationNames(): string[] { return [...this.animationData.keys()]; }
 
     private makeVertexBuffer(src: ArrayLike<number>): GPUBuffer {
         const arr = Float32Array.from(src);

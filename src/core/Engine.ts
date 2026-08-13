@@ -761,6 +761,15 @@ export class Engine {
         for (const prim of result.primitives) {
             resourceManager.registerPbrMesh(prim.name, prim.meshData);
         }
+        // Land skin + animation data as ResourceManager assets for the
+        // animation plugin (Phase 4) to consume. The loader does not skin
+        // the mesh here; SkinningSystem reads these at runtime.
+        for (const skin of result.skins) {
+            resourceManager.registerSkin(skin.name, skin);
+        }
+        for (const anim of result.animations) {
+            resourceManager.registerAnimation(anim.name, anim);
+        }
 
         // Create entities preserving the glTF node tree: each node carries a
         // parentIndex so we wire Transform.parent → parent entity key, and

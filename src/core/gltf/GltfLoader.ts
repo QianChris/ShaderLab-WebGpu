@@ -4,6 +4,10 @@ import type {
     GltfTextureData,
     GltfPrimitiveResult,
     GltfNodeResult,
+    GltfSkinData,
+    GltfAnimationData,
+    GltfAnimationSampler,
+    GltfAnimationChannel,
 } from './GltfTypes';
 
 /**
@@ -66,6 +70,10 @@ type GltfNode = {
 type GltfImage = { uri?: string; mimeType?: string; bufferView?: number };
 type GltfTexture = { source?: number; sRGB?: boolean };
 type GltfScene = { nodes?: number[] };
+type GltfSkinJson = { name?: string; joints: number[]; inverseBindMatrices?: number; skeleton?: number };
+type GltfAnimationSamplerJson = { input: number; output: number; interpolation?: 'LINEAR' | 'STEP' | 'CUBICSPLINE' };
+type GltfAnimationChannelJson = { sampler: number; target: { node?: number; path: 'translation' | 'rotation' | 'scale' | 'weights' } };
+type GltfAnimationJson = { name?: string; channels: GltfAnimationChannelJson[]; samplers: GltfAnimationSamplerJson[] };
 type GltfDocument = {
     buffers?: GltfBuffer[];
     bufferViews?: GltfBufferView[];
@@ -77,6 +85,8 @@ type GltfDocument = {
     textures?: GltfTexture[];
     scenes?: GltfScene[];
     scene?: number;
+    skins?: GltfSkinJson[];
+    animations?: GltfAnimationJson[];
     extensionsUsed?: string[];
 };
 
@@ -234,6 +244,72 @@ const readIndicesAccessor = (
         out[i] = readComponent(dv, accessor.componentType, baseOffset + i * stride);
     }
     return out;
+};
+
+const readMat4Accessor = (
+    gltf: GltfDocument, buffers: ArrayBuffer[], accessorIndex: number,
+): Float32Array => {
+    const accessor = (gltf.accessors ?? [])[accessorIndex];
+    if (!accessor) throw new Error(`glTF mat4 accessor ${accessorIndex} is missing.`);
+    if (accessor.type !== 'MAT4') throw new Error(`Accessor ${accessorIndex} expected MAT4, got ${accessor.type}.`);
+    if (typeof accessor.bufferView !== 'number') return new Float32Array(accessor.count * 16);
+    const compSize = COMPONENT_BYTE_SIZE[accessor.componentType] ?? 4;
+    const view = readBufferViewRange(gltf, buffers, accessor.bufferView);
+    const stride = view.byteStride ?? 16 * compSize;
+    const baseOffset = view.byteOffset + (accessor.byteOffset ?? 0);
+    const out = new Float32Array(accessor.count * 16);
+    const dv = new DataView(view.data);
+    for (let i = 0; i < accessor.count; i++) {
+        for (let c = 0; c < 16; c++) {
+            const raw = readComponent(dv, accessor.componentType, baseOffset + i * stride + c * compSize);
+            out[i * 16 + c] = accessor.normalized ? normalizeComponent(raw, accessor.componentType) : raw;
+        }
+    }
+    return out;
+};
+
+const readScalarAccessor = (
+    gltf: GltfDocument, buffers: ArrayBuffer[], accessorIndex: number,
+): Float32Array => {
+    const accessor = (gltf.accessors ?? [])[accessorIndex];
+    if (!accessor) throw new Error(`glTF scalar accessor ${accessorIndex} is missing.`);
+    if (accessor.type !== 'SCALAR') throw new Error(`Accessor ${accessorIndex} expected SCALAR.`);
+    if (typeof accessor.bufferView !== 'number') return new Float32Array(accessor.count);
+    const compSize = COMPONENT_BYTE_SIZE[accessor.componentType] ?? 4;
+    const view = readBufferViewRange(gltf, buffers, accessor.bufferView);
+    const stride = view.byteStride ?? compSize;
+    const baseOffset = view.byteOffset + (accessor.byteOffset ?? 0);
+    const out = new Float32Array(accessor.count);
+    const dv = new DataView(view.data);
+    for (let i = 0; i < accessor.count; i++) {
+        const raw = readComponent(dv, accessor.componentType, baseOffset + i * stride);
+        out[i] = accessor.normalized ? normalizeComponent(raw, accessor.componentType) : raw;
+    }
+    return out;
+};
+
+/** Read an animation sampler output accessor (VEC3/VEC4/SCALAR), returning
+ *  the flat float data + components-per-keyframe. */
+const readAnimationOutput = (
+    gltf: GltfDocument, buffers: ArrayBuffer[], accessorIndex: number,
+): { data: Float32Array; components: number } => {
+    const accessor = (gltf.accessors ?? [])[accessorIndex];
+    if (!accessor) throw new Error(`glTF animation output accessor ${accessorIndex} is missing.`);
+    const components = TYPE_COMPONENT_COUNT[accessor.type] ?? 1;
+    if (typeof accessor.bufferView !== 'number') return { data: new Float32Array(accessor.count * components), components };
+    const compSize = COMPONENT_BYTE_SIZE[accessor.componentType] ?? 4;
+    const view = readBufferViewRange(gltf, buffers, accessor.bufferView);
+    const stride = view.byteStride ?? components * compSize;
+    const baseOffset = view.byteOffset + (accessor.byteOffset ?? 0);
+    const out = new Float32Array(accessor.count * components);
+    const dv = new DataView(view.data);
+    for (let i = 0; i < accessor.count; i++) {
+        for (let c = 0; c < components; c++) {
+            const raw = readComponent(dv, accessor.componentType, baseOffset + i * stride + c * compSize);
+            out[i * components + c] = accessor.normalized ? normalizeComponent(raw, accessor.componentType) : raw;
+        }
+    }
+    return { data: out, components };
 };
 
 const computeFallbackNormals = (positions: number[], indices: number[]): number[] => {
@@ -397,6 +473,8 @@ export class GltfLoader {
         primitives: GltfPrimitiveResult[];
         nodes: GltfNodeResult[];
         textures: GltfTextureData[];
+        skins: GltfSkinData[];
+        animations: GltfAnimationData[];
     }> {
         const resp = await fetch(url);
         if (!resp.ok) throw new Error(`Failed to fetch glTF: ${url}`);
@@ -514,6 +592,56 @@ export class GltfLoader {
         };
         for (const root of rootNodes) visit(root, undefined);
 
-        return { primitives, nodes: result, textures };
+        // Parse skins (joints + inverse-bind matrices) and animations
+        // (channels + samplers). These are landed as ResourceManager assets
+        // for the animation plugin (Phase 4) to consume; the loader does not
+        // skin the mesh here.
+        const skins: GltfSkinData[] = [];
+        const gltfSkins = gltf.skins ?? [];
+        for (let si = 0; si < gltfSkins.length; si++) {
+            const skin = gltfSkins[si];
+            const ibm = typeof skin.inverseBindMatrices === 'number'
+                ? readMat4Accessor(gltf, buffers, skin.inverseBindMatrices)
+                : new Float32Array(skin.joints.length * 16);
+            skins.push({
+                name: skin.name ?? `gltf_skin_${si}`,
+                joints: [...skin.joints],
+                inverseBindMatrices: ibm,
+                skeleton: skin.skeleton,
+            });
+        }
+
+        const animations: GltfAnimationData[] = [];
+        const gltfAnims = gltf.animations ?? [];
+        for (let ai = 0; ai < gltfAnims.length; ai++) {
+            const anim = gltfAnims[ai];
+            const samplers: GltfAnimationSampler[] = anim.samplers.map(s => {
+                const input = readScalarAccessor(gltf, buffers, s.input);
+                const output = readAnimationOutput(gltf, buffers, s.output);
+                return {
+                    input,
+                    output: output.data,
+                    interpolation: s.interpolation ?? 'LINEAR' as const,
+                    components: output.components,
+                };
+            });
+            const channels: GltfAnimationChannel[] = anim.channels.map(c => ({
+                sampler: c.sampler,
+                node: c.target.node ?? -1,
+                path: c.target.path,
+            }));
+            let duration = 0;
+            for (const s of samplers) {
+                if (s.input.length > 0) duration = Math.max(duration, s.input[s.input.length - 1]);
+            }
+            animations.push({
+                name: anim.name ?? `gltf_anim_${ai}`,
+                duration,
+                channels,
+                samplers,
+            });
+        }
+
+        return { primitives, nodes: result, textures, skins, animations };
     }
 }
