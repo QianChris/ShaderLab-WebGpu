@@ -1,4 +1,4 @@
-import { Scene, type SceneData } from './ecs/Scene';
+import { Scene, type SceneData, type CameraView } from './ecs/Scene';
 import { registerToolType } from './tools/ToolRegistry';
 import { EventBus } from './events/EventBus';
 import { RenderGraph } from './render/RenderGraph';
@@ -119,6 +119,15 @@ export class Engine {
     /** Replacement renderer installed via ctx.replaceRenderer (null = built-in). */
     customRenderer: IRenderer | null = null;
     customRendererOwner: string | null = null;
+    /** Editor viewport camera override. When non-null, the RenderGraph uses
+     *  this view in place of any active scene Camera. Set by the editor's
+     *  ViewportCameraController (via Engine.setEditorViewProvider); always null
+     *  in player mode, so the render path is unchanged. */
+    editorView: CameraView | null = null;
+    /** Per-frame provider for editorView. The EditorOrchestrator installs a
+     *  closure that returns ViewportCameraController.getCameraView(); the
+     *  Engine.frame() reads it each frame. Player mode leaves this null. */
+    private editorViewProvider: (() => CameraView | null) | null = null;
     /** Extracted plugin declaration/sweep logic (reduces Engine God Class). */
     private pluginHost!: PluginHostHelper;
 
@@ -153,6 +162,14 @@ export class Engine {
     /** Render canvas aspect ratio (width/height). */
     aspect(): number {
         return this._canvas.width / Math.max(1, this._canvas.height);
+    }
+
+    /** Install or clear the editor viewport camera provider. When set,
+     *  Engine.frame() reads it each frame and uses the returned view in place
+     *  of scene cameras. The EditorOrchestrator installs a closure over
+     *  ViewportCameraController; player mode never installs one. */
+    setEditorViewProvider(provider: (() => CameraView | null) | null): void {
+        this.editorViewProvider = provider;
     }
 
     async init(): Promise<void> {
@@ -530,6 +547,7 @@ export class Engine {
             format: this.format,
             eventBus: this.eventBus,
             attachments: this.attachmentsView,
+            editorView: null,
             getSystem: <T,>(name: string) => systemRegistry.resolve({ name }) as T | null,
             getBuffer: (name: string) => bufferRegistry.get(name),
             writeBuffer: (name: string, data: BufferSource) => bufferRegistry.write(name, this.device, data),
@@ -560,6 +578,8 @@ export class Engine {
         ctx.aspect = this.aspect();
         ctx.cw = this._canvas.width;
         ctx.ch = this._canvas.height;
+        ctx.editorView = this.editorViewProvider ? this.editorViewProvider() : null;
+        this.editorView = ctx.editorView;
 
         for (const sys of this.activeSystems) {
             const impl = systemRegistry.resolve(sys);

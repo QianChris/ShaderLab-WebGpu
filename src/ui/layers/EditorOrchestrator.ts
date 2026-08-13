@@ -4,6 +4,7 @@ import { EditorCommandBus } from '../../editor/EditorCommandBus';
 import { EditorInputManager } from '../../editor/input/EditorInputManager';
 import { EditorPanel } from '../../editor/EditorPanel';
 import { PipelinePanel } from '../../editor/PipelinePanel';
+import { ViewportCameraController } from '../../editor/input/ViewportCameraController';
 import { mountVuePanel, type VuePanelDef } from '../vue';
 import type { EditorLayout, EditorLayoutHandles } from './EditorLayout';
 
@@ -18,6 +19,7 @@ import type { EditorLayout, EditorLayoutHandles } from './EditorLayout';
 export class EditorOrchestrator {
     private commandBus?: EditorCommandBus;
     private inputManager?: EditorInputManager;
+    private viewportController?: ViewportCameraController;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private vueUnmounts: (() => void)[] = [];
     private unsubscribePick?: () => void;
@@ -70,6 +72,12 @@ export class EditorOrchestrator {
             <N,>(name: string): N | null => host.engine.systemRegistry.resolve({ name }) as unknown as N | null,
             () => host.engine.aspect(),
         );
+
+        // ── 4b. Viewport camera controller — editor-only orbit/pan/zoom.
+        //     Installs a provider the engine reads each frame; player mode
+        //     never mounts this layer, so editorView stays null there. ──
+        this.viewportController = new ViewportCameraController(host.engine.canvas);
+        host.engine.setEditorViewProvider(() => this.viewportController?.getCameraView() ?? null);
 
         // ── 5. Native DOM panels (attach through the command bus). ──
         const editorPanel = new EditorPanel(handles.sceneContainer);
@@ -221,6 +229,9 @@ export class EditorOrchestrator {
 
     unmount(): void {
         this.inputManager?.dispose();
+        this.viewportController?.dispose();
+        this.viewportController = undefined;
+        this.host.engine.setEditorViewProvider(null);
         this.unsubscribePick?.();
         this.unsubscribeChanged?.();
         for (const un of this.vueUnmounts) un();

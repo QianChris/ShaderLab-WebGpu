@@ -359,6 +359,17 @@ export class RenderGraph implements System, IRenderer {
         const cw = tex.width;
         const ch = tex.height;
         const canvasAspect = cw / Math.max(1, ch);
+        const swapView = tex.createView();
+
+        // Editor viewport override: when the editor injects a camera view
+        // (ViewportCameraController via Engine.setEditorView), use it in place
+        // of any scene Camera. Player mode never sets editorView, so the
+        // multi-view / single-camera paths below are unchanged.
+        if (ctx.editorView) {
+            this.writeCameraUBO(ctx, ctx.editorView);
+            this.executeSingle(ctx, cw, ch, swapView);
+            return;
+        }
 
         // Multi-view is opt-in via render.json `multiView: true`. When enabled
         // AND more than one Camera is active, each camera renders the whole
@@ -367,7 +378,6 @@ export class RenderGraph implements System, IRenderer {
         // command buffer (writeBuffer → submit) — a single command buffer
         // cannot safely re-write a shared UBO between render passes.
         const cameras = ctx.scene.getActiveCameras(canvasAspect);
-        const swapView = tex.createView();
         if (this.multiView && cameras.length > 1) {
             this.executeMultiView(ctx, cw, ch, swapView, cameras);
             return;
@@ -375,9 +385,26 @@ export class RenderGraph implements System, IRenderer {
         this.executeSingle(ctx, cw, ch, swapView);
     }
 
+    /** Write a single camera view's matrices into the shared camera UBO.
+     *  Used by the editor-override path. Mirrors what CameraSystem does for
+     *  the primary scene camera each frame. */
+    private writeCameraUBO(ctx: FrameContext, cam: CameraView): void {
+        const camLayout = uniformLayouts.get('camera');
+        if (this.cameraData.length === 0) {
+            this.cameraData = camLayout.createBuffer();
+        }
+        const buf = this.cameraData;
+        camLayout.write(buf, 'vp', cam.vp);
+        camLayout.write(buf, 'ivp', cam.ivp);
+        camLayout.write(buf, 'pos', cam.pos);
+        camLayout.write(buf, 'view', cam.view);
+        camLayout.write(buf, 'proj', cam.proj);
+        ctx.device.queue.writeBuffer(resourceManager.cameraUBO, 0, buf.buffer, buf.byteOffset, buf.byteLength);
+    }
+
     /** Per-frame info for drivers + hooks (attachments carry plugin objects). */
     private driverFrame(ctx: FrameContext, cw: number, ch: number): DriverFrame {
-        const cam = ctx.scene.getActiveCamera(ctx.aspect);
+        const cam = ctx.editorView ?? ctx.scene.getActiveCamera(ctx.aspect);
         return {
             time: ctx.time,
             dt: ctx.dt,

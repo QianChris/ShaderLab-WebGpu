@@ -1,4 +1,4 @@
-import type { Scene } from './Scene';
+import type { Scene, CameraView } from './Scene';
 import type { EventBus } from '../events/EventBus';
 import type { SystemEntry } from '../Engine';
 
@@ -25,6 +25,11 @@ export interface FrameContext {
     /** Opaque objects published by plugins via ctx.registerAttachment
      *  (e.g. 'particles', 'physics', 'splats'). */
     attachments: Record<string, unknown>;
+    /** Editor override view. When non-null, RenderGraph uses this camera in
+     *  place of any active scene Camera (editor viewport mode). Set by the
+     *  EditorOrchestrator from ViewportCameraController; always null in
+     *  player mode, so the render path is unchanged. */
+    editorView?: CameraView | null;
     /** Cross-system lookup. Declare a local structural interface for the
      *  fields you consume; missing system → null (caller decides severity). */
     getSystem<T = System>(name: string): T | null;
