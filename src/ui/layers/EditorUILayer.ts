@@ -3,6 +3,7 @@ import type { Command } from '../../editor/commands/Command';
 import type { UILayer } from '../UILayer';
 import type { VuePanelDef } from '../vue';
 import AssetViewPanel from '../vue/panels/AssetViewPanel.vue';
+import HierarchyPanel from '../vue/panels/HierarchyPanel.vue';
 import ScriptEditorPanel from '../vue/panels/ScriptEditorPanel.vue';
 import WgslEditorPanel from '../vue/panels/WgslEditorPanel.vue';
 import { EditorLayout } from './EditorLayout';
@@ -27,6 +28,7 @@ export class EditorUILayer implements UILayer {
 
     /** Vue panel definitions mounted as sidebar tabs. */
     private readonly vuePanels: VuePanelDef[] = [
+        { id: 'hierarchy', label: 'Hierarchy', component: HierarchyPanel },
         { id: 'scripts', label: 'Scripts', component: ScriptEditorPanel },
         { id: 'shaders', label: 'Shaders', component: WgslEditorPanel },
     ];

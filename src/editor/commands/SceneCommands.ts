@@ -154,3 +154,31 @@ export class ToggleComponentCommand implements Command {
         return true;
     }
 }
+
+/** Reparent an entity (Hierarchy panel drag-and-drop). Undo restores the
+ *  previous parent (or root if it was a root). */
+export class SetParentCommand implements Command {
+    readonly type = 'setParent';
+    get description(): string { return `setParent ${this.childKey} → ${this.newParent || '(root)'}`; }
+    private oldParent = '';
+    constructor(private childKey: string, private newParent: string) {}
+
+    execute(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.childKey);
+        if (eid == null) return false;
+        this.oldParent = ctx.engine.scene.getParent(eid);
+        ctx.engine.scene.setParent(this.childKey, this.newParent);
+        return true;
+    }
+
+    undo(ctx: CommandContext): boolean {
+        const eid = ctx.engine.scene.entityKeyMap.get(this.childKey);
+        if (eid == null) return false;
+        if (this.oldParent) {
+            ctx.engine.scene.setParent(this.childKey, this.oldParent);
+        } else {
+            ctx.engine.scene.setField(eid, 'Transform', 'parent', '');
+        }
+        return true;
+    }
+}
