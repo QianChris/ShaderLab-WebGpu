@@ -128,6 +128,9 @@ export class Engine {
      *  closure that returns ViewportCameraController.getCameraView(); the
      *  Engine.frame() reads it each frame. Player mode leaves this null. */
     private editorViewProvider: (() => CameraView | null) | null = null;
+    /** Pending capture request: set by captureFrame(), drained in frame()
+     *  after the render pass so the swap chain texture has the rendered frame. */
+    private captureResolver: { resolve: (blob: Blob) => void; reject: (e: unknown) => void } | null = null;
     /** Extracted plugin declaration/sweep logic (reduces Engine God Class). */
     private pluginHost!: PluginHostHelper;
 
@@ -172,6 +175,16 @@ export class Engine {
         this.editorViewProvider = provider;
     }
 
+    /** Request a PNG capture of the next rendered frame. The actual GPU
+     *  readback runs in frame() right after the render system, so the swap
+     *  chain texture has the fully rendered image. Resolves with a Blob
+     *  ('image/png'). */
+    captureFrame(): Promise<Blob> {
+        return new Promise<Blob>((resolve, reject) => {
+            this.captureResolver = { resolve, reject };
+        });
+    }
+
     async init(): Promise<void> {
         // Missing engine-config.json is a documented fallback (built-in defaults),
         // but a present-yet-malformed file must fail loud (json() throws below).
@@ -204,10 +217,19 @@ export class Engine {
         this.context = this._canvas.getContext('webgpu')!;
 
         this.resize();
-        this.context.configure({ device: this.device, format: this.format, alphaMode: this.engineConfig.alphaMode });
 
         resourceManager.init(this.device);
         PipelineLoader.defaultWorkgroupSize = this.engineConfig.computeTgs;
+
+        // Configure the swap chain with COPY_SRC so Engine.captureFrame() can
+        // copy the rendered texture back to a staging buffer for PNG export.
+        // RENDER_ATTACHMENT is always required; COPY_SRC has no rendering cost.
+        this.context.configure({
+            device: this.device,
+            format: this.format,
+            alphaMode: this.engineConfig.alphaMode,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
 
         for (const [name, data] of Object.entries(PRESET_MESHES)) {
             resourceManager.registerMesh(name, data);
@@ -589,8 +611,69 @@ export class Engine {
         // after it. The renderer also calls ctx.flushCompute() at the start of
         // execute() so same-frame compute results are visible to render passes.
         this.flushCompute();
+        // Drain a pending capture request now that the swap chain texture
+        // holds the fully rendered frame. Async — does not block the frame.
+        if (this.captureResolver) {
+            const r = this.captureResolver;
+            this.captureResolver = null;
+            void this.captureSwapTexture(r.resolve, r.reject);
+        }
         requestAnimationFrame(this.frame);
     };
+
+    /** Copy the current swap chain texture to a staging buffer, map it, and
+     *  build a PNG Blob. Called from frame() right after the render system
+     *  so the texture holds the fully rendered frame. */
+    private async captureSwapTexture(
+        resolve: (blob: Blob) => void,
+        reject: (e: unknown) => void,
+    ): Promise<void> {
+        try {
+            const tex = this.context.getCurrentTexture();
+            const w = tex.width, h = tex.height;
+            const bytesPerPixel = 4;
+            const stride = w * bytesPerPixel;
+            // WebGPU requires bytesPerRow to be a multiple of 256.
+            const alignedStride = Math.ceil(stride / 256) * 256;
+            const staging = this.device.createBuffer({
+                label: 'capture-staging',
+                size: alignedStride * h,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+            });
+            const encoder = this.device.createCommandEncoder();
+            encoder.copyTextureToBuffer(
+                { texture: tex },
+                { buffer: staging, bytesPerRow: alignedStride, rowsPerImage: h },
+                { width: w, height: h, depthOrArrayLayers: 1 },
+            );
+            this.device.queue.submit([encoder.finish()]);
+            await staging.mapAsync(GPUMapMode.READ);
+            const src = new Uint8Array(staging.getMappedRange());
+            const rgba = new Uint8ClampedArray(w * h * 4);
+            const swapRB = this.format === 'bgra8unorm';
+            for (let y = 0; y < h; y++) {
+                for (let x = 0; x < w; x++) {
+                    const sIdx = y * alignedStride + x * bytesPerPixel;
+                    const dIdx = (y * w + x) * 4;
+                    rgba[dIdx] = swapRB ? src[sIdx + 2] : src[sIdx];
+                    rgba[dIdx + 1] = src[sIdx + 1];
+                    rgba[dIdx + 2] = swapRB ? src[sIdx] : src[sIdx + 2];
+                    rgba[dIdx + 3] = 255;
+                }
+            }
+            staging.unmap();
+            staging.destroy();
+            const imageData = new ImageData(rgba, w, h);
+            const c = document.createElement('canvas');
+            c.width = w; c.height = h;
+            const cx = c.getContext('2d');
+            if (!cx) throw new Error('2D context unavailable for capture');
+            cx.putImageData(imageData, 0, 0);
+            c.toBlob(b => b ? resolve(b) : reject(new Error('toBlob returned null')), 'image/png');
+        } catch (e) {
+            reject(e);
+        }
+    }
 
     startLoop(): void {
         requestAnimationFrame(this.frame);

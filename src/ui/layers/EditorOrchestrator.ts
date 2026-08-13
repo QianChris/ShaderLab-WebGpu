@@ -22,6 +22,8 @@ export class EditorOrchestrator {
     private inputManager?: EditorInputManager;
     private viewportController?: ViewportCameraController;
     private gizmoTool?: TransformGizmoTool;
+    private recorder: MediaRecorder | null = null;
+    private recordChunks: Blob[] = [];
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private vueUnmounts: (() => void)[] = [];
     private unsubscribePick?: () => void;
@@ -53,6 +55,10 @@ export class EditorOrchestrator {
         this.redoBtn.onclick = () => this.commandBus?.redo();
         const playerBtn = handles.toolbar.querySelector('#btn-player') as HTMLButtonElement;
         playerBtn.onclick = () => this.openPlayer();
+        const captureBtn = handles.toolbar.querySelector('#btn-capture') as HTMLButtonElement;
+        captureBtn.onclick = () => { void this.capturePng(captureBtn); };
+        const recordBtn = handles.toolbar.querySelector('#btn-record') as HTMLButtonElement;
+        recordBtn.onclick = () => this.toggleRecording(recordBtn);
         const connectBtn = handles.toolbar.querySelector('#btn-connect') as HTMLButtonElement;
         connectBtn.onclick = () => this.connectFolder();
         const themeBtn = handles.toolbar.querySelector('#btn-theme') as HTMLButtonElement;
@@ -165,6 +171,69 @@ export class EditorOrchestrator {
         window.open(`player.html?app=${appName}`, '_blank');
     }
 
+    /** Capture the next rendered frame as a PNG and trigger a download. */
+    private async capturePng(btn: HTMLButtonElement): Promise<void> {
+        const orig = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '…';
+        try {
+            const blob = await this.host.engine.captureFrame();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            const app = this.host.engine.currentApp ?? 'scene';
+            a.download = `${app}_${Date.now()}.png`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+        } catch (e) {
+            console.error('[EditorOrchestrator] capture failed:', e);
+        } finally {
+            btn.disabled = false;
+            btn.textContent = orig;
+        }
+    }
+
+    /** Toggle WebM recording of the canvas via MediaRecorder. */
+    private toggleRecording(btn: HTMLButtonElement): void {
+        if (this.recorder) {
+            this.recorder.stop();
+            this.recorder = null;
+            btn.style.color = '';
+            btn.textContent = '⏺';
+            return;
+        }
+        const canvas = this.host.engine.canvas;
+        const stream = canvas.captureStream(60);
+        const opts = { mimeType: 'video/webm;codecs=vp9' };
+        let rec: MediaRecorder;
+        try {
+            rec = new MediaRecorder(stream, opts);
+        } catch {
+            try {
+                rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp8' });
+            } catch {
+                rec = new MediaRecorder(stream);
+            }
+        }
+        this.recordChunks = [];
+        rec.ondataavailable = (e: BlobEvent) => {
+            if (e.data.size > 0) this.recordChunks.push(e.data);
+        };
+        rec.onstop = () => {
+            const blob = new Blob(this.recordChunks, { type: 'video/webm' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            const app = this.host.engine.currentApp ?? 'scene';
+            a.download = `${app}_${Date.now()}.webm`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+            stream.getTracks().forEach(t => t.stop());
+        };
+        rec.start(1000);
+        this.recorder = rec;
+        btn.style.color = '#ff5b5b';
+        btn.textContent = '⏹';
+    }
+
     /** Reload the editor for a different app: detach old tools, load the app,
      *  reload its tools.json + app UI and refresh both panels. */
     async switchApp(name: string): Promise<void> {
@@ -245,6 +314,7 @@ export class EditorOrchestrator {
         this.viewportController = undefined;
         this.gizmoTool?.dispose();
         this.gizmoTool = undefined;
+        if (this.recorder) { this.recorder.stop(); this.recorder = null; }
         this.host.engine.setEditorViewProvider(null);
         this.unsubscribePick?.();
         this.unsubscribeChanged?.();
