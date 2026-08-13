@@ -5,6 +5,7 @@ import { EditorInputManager } from '../../editor/input/EditorInputManager';
 import { EditorPanel } from '../../editor/EditorPanel';
 import { PipelinePanel } from '../../editor/PipelinePanel';
 import { ViewportCameraController } from '../../editor/input/ViewportCameraController';
+import { TransformGizmoTool } from '../../editor/input/TransformGizmoTool';
 import { mountVuePanel, type VuePanelDef } from '../vue';
 import type { EditorLayout, EditorLayoutHandles } from './EditorLayout';
 
@@ -20,6 +21,7 @@ export class EditorOrchestrator {
     private commandBus?: EditorCommandBus;
     private inputManager?: EditorInputManager;
     private viewportController?: ViewportCameraController;
+    private gizmoTool?: TransformGizmoTool;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private vueUnmounts: (() => void)[] = [];
     private unsubscribePick?: () => void;
@@ -78,6 +80,16 @@ export class EditorOrchestrator {
         //     never mounts this layer, so editorView stays null there. ──
         this.viewportController = new ViewportCameraController(host.engine.canvas);
         host.engine.setEditorViewProvider(() => this.viewportController?.getCameraView() ?? null);
+
+        // ── 4c. Transform gizmo — editor-only pick + move/rotate/scale drag.
+        //     Subscribes to 'pick' to stay in sync with physics PickTool. ──
+        this.gizmoTool = new TransformGizmoTool(
+            host.engine.canvas,
+            host.engine,
+            this.commandBus,
+            host.eventBus,
+        );
+        this.gizmoTool.attach();
 
         // ── 5. Native DOM panels (attach through the command bus). ──
         const editorPanel = new EditorPanel(handles.sceneContainer);
@@ -231,6 +243,8 @@ export class EditorOrchestrator {
         this.inputManager?.dispose();
         this.viewportController?.dispose();
         this.viewportController = undefined;
+        this.gizmoTool?.dispose();
+        this.gizmoTool = undefined;
         this.host.engine.setEditorViewProvider(null);
         this.unsubscribePick?.();
         this.unsubscribeChanged?.();
