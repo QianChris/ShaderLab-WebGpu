@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
+import basicSsl from '@vitejs/plugin-basic-ssl';
 
 export default defineConfig({
-    plugins: [vue()],
-    server: { open: true },
+    plugins: [vue(), basicSsl()],
+    server: { open: true, host: true },
     build: {
         rollupOptions: {
             // Multi-entry: the editor (index.html → main.ts) and the runtime

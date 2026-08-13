@@ -122,6 +122,14 @@ export type { TRS } from './core/math';
 /* ── Engine config type (read-only view for plugins) ──────────── */
 export type { EngineConfig, SystemEntry, AppManifest } from './core/Engine';
 
+/* ── glTF asset data (consumed by the animation plugin) ───────── */
+export type {
+    GltfSkinData,
+    GltfAnimationData,
+    GltfAnimationSampler,
+    GltfAnimationChannel,
+} from './core/gltf/GltfTypes';
+
 /* ── Third-party re-exports (the only non-relative imports allowed
  *    in plugins go through here so the engine controls the version) ── */
 export { default as RAPIER } from '@dimforge/rapier3d-compat';

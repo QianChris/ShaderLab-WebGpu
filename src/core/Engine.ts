@@ -27,6 +27,8 @@ interface GltfMapping {
         fields: Record<string, string>;
         textures: Record<string, string>;
     };
+    skin?: { component: string; fields: Record<string, string> };
+    animation?: { component: string; fields: Record<string, string> };
 }
 
 /** App manifest (/apps/<name>/app.json): declares app-specific assets to load. */
@@ -856,6 +858,31 @@ export class Engine {
                         mat[fieldKey] = texKey ? resourceManager.textureHandle(texKey) : 0;
                     }
                     entityData[m.material.component] = mat;
+                }
+            }
+
+            // Skinning: if this node is skinned + the mapping declares a skin
+            // section, attach SkeletonComponent (skinAsset → ResourceManager
+            // skin name) so SkinningSystem can find the joint/IBM data. If an
+            // animation section is declared and the file has any clips, also
+            // attach AnimationPlayerComponent pointed at the first clip.
+            if (node.skinIndex !== undefined && m.skin && result.skins[node.skinIndex]) {
+                const skin = result.skins[node.skinIndex];
+                const skinComp: Record<string, unknown> = {};
+                const skinAssetField = m.skin.fields['skinAsset'] ?? 'skinAsset';
+                const jointCountField = m.skin.fields['jointCount'] ?? 'jointCount';
+                skinComp[skinAssetField] = skin.name;
+                skinComp[jointCountField] = skin.joints.length;
+                entityData[m.skin.component] = skinComp;
+                if (m.animation && result.animations.length > 0) {
+                    const animComp: Record<string, unknown> = {};
+                    const clipField = m.animation.fields['clip'] ?? 'clip';
+                    animComp[clipField] = result.animations[0].name;
+                    animComp['time'] = 0;
+                    animComp['playing'] = 1;
+                    animComp['loop'] = 1;
+                    animComp['speed'] = 1;
+                    entityData[m.animation.component] = animComp;
                 }
             }
 

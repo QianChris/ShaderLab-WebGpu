@@ -27,5 +27,18 @@
             "emissiveTexture": "texEmissive",
             "normalTexture": "texNormal"
         }
+    },
+    "skin": {
+        "component": "SkeletonComponent",
+        "fields": {
+            "skinAsset": "skinAsset",
+            "jointCount": "jointCount"
+        }
+    },
+    "animation": {
+        "component": "AnimationPlayerComponent",
+        "fields": {
+            "clip": "clip"
+        }
     }
 }

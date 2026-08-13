@@ -45,6 +45,8 @@ export interface GltfNodeResult {
     transform: GltfNodeTransform;
     /** Mesh name (ResourceManager key) when this node attaches a mesh. */
     meshName?: string;
+    /** glTF skin index when this node is skinned (references result.skins). */
+    skinIndex?: number;
     /** Material fields (merged from the referenced primitive's material). */
     material?: PbrMaterialData;
     /** Texture keys for the material slots that have textures. */
@@ -62,6 +64,10 @@ export interface GltfSkinData {
     name: string;
     /** Joint node indices (in the glTF node array). */
     joints: number[];
+    /** Entity key for each joint (glTF node name → Scene entity key), aligned
+     *  with `joints`. The animation plugin resolves these to eids via
+     *  scene.entityKeyMap without needing a node-index map. */
+    jointNames: string[];
     /** Inverse-bind matrices, one mat4 (16 floats) per joint, column-major. */
     inverseBindMatrices: Float32Array;
     /** Root joint node index, if declared. */
@@ -81,6 +87,9 @@ export interface GltfAnimationSampler {
 export interface GltfAnimationChannel {
     /** Target node index (in the glTF node array). */
     node: number;
+    /** Entity key for the target node (resolved at parse time so the animation
+     *  plugin writes Local Transform by key, no node-index map needed). */
+    nodeName: string;
     path: 'translation' | 'rotation' | 'scale' | 'weights';
     sampler: number;
 }

@@ -61,6 +61,7 @@ type GltfMesh = { name?: string; primitives: GltfPrimitive[] };
 type GltfNode = {
     name?: string;
     mesh?: number;
+    skin?: number;
     children?: number[];
     matrix?: number[];
     translation?: [number, number, number];
@@ -591,6 +592,7 @@ export class GltfLoader {
                     }
                 }
             }
+            if (typeof node.skin === 'number') nr.skinIndex = node.skin;
             const myIndex = result.length;
             result.push(nr);
             for (const childIndex of node.children ?? []) {
@@ -613,6 +615,7 @@ export class GltfLoader {
             skins.push({
                 name: skin.name ?? `gltf_skin_${si}`,
                 joints: [...skin.joints],
+                jointNames: skin.joints.map(idx => gltf.nodes?.[idx]?.name ?? `node_${idx}`),
                 inverseBindMatrices: ibm,
                 skeleton: skin.skeleton,
             });
@@ -635,6 +638,9 @@ export class GltfLoader {
             const channels: GltfAnimationChannel[] = anim.channels.map(c => ({
                 sampler: c.sampler,
                 node: c.target.node ?? -1,
+                nodeName: c.target.node != null
+                    ? (gltf.nodes?.[c.target.node]?.name ?? `node_${c.target.node}`)
+                    : '',
                 path: c.target.path,
             }));
             let duration = 0;

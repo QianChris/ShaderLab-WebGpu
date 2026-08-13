@@ -37,14 +37,22 @@ export function addComponent() {}
 export function removeComponent() {}
 export function quatRotateVec3() { return [0, 0, 1]; }
 export function mat4Mul(a) { return a; }
+export function mat4MulInto(a, b, out) { return out; }
 export function mat4Inverse(a) { return a; }
 export function mat4FromTRS() { return new Float32Array(16); }
+export function mat4FromTRSInto(p, r, s, out) { return out; }
+export function mat4InverseInto(a, out) { return out; }
 export function mat4LookAt() { return new Float32Array(16); }
+export function mat4LookAtInto(e, t, u, out) { return out; }
 export function mat4Perspective() { return new Float32Array(16); }
+export function mat4PerspectiveInto(f, a, n, fr, out) { return out; }
 export function mat4OrthographicSym() { return new Float32Array(16); }
+export function mat4OrthographicSymInto(h, n, f, out) { return out; }
 export function mat4TransformVec4() { return [0, 0, 0, 1]; }
 export function normalMatrix() { return new Float32Array(12); }
+export function normalMatrixInto(m, out) { return out; }
 export function buildCameraMatrices() { return { vp: new Float32Array(16), ivp: new Float32Array(16), pos: new Float32Array(3), view: new Float32Array(16), proj: new Float32Array(16) }; }
+export function buildCameraMatricesInto(t, f, a, n, fr, out) { return out; }
 export function resolveValue() { return 0; }
 export function resolveString() { return ''; }
 export function resolveHandle() { return 0; }
