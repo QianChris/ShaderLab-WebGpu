@@ -65,6 +65,9 @@ export class EditorLayout {
             <button class="tb-btn" id="btn-undo" title="Undo (Ctrl+Z)" disabled>↶ Undo</button>
             <button class="tb-btn" id="btn-redo" title="Redo (Ctrl+Y)" disabled>↷ Redo</button>
             <button class="tb-btn tb-btn-player" id="btn-player" title="Open this app in player mode">▶ Player</button>
+            <button class="tb-btn" id="btn-cam-toggle" title="Toggle between editor viewport camera and scene camera">Cam: Editor</button>
+            <button class="tb-btn" id="btn-cam-reset" title="Reset the editor camera to default framing">⟲ Reset</button>
+            <button class="tb-btn" id="btn-cam-focus" title="Frame the editor camera on the selected entity">◎ Focus</button>
             <button class="tb-btn" id="btn-capture" title="Capture a PNG of the current frame">📷</button>
             <button class="tb-btn" id="btn-record" title="Toggle WebM recording">⏺</button>
             <button class="tb-btn" id="btn-connect" title="Connect a project folder to save files to disk">📁 Connect</button>

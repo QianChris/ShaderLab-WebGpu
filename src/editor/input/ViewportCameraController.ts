@@ -106,6 +106,16 @@ export class ViewportCameraController {
         this.pitch = 0.35;
     }
 
+    /** Reset to the default framing (origin at a comfortable viewing distance). */
+    reset(): void {
+        this.yaw = 0;
+        this.pitch = 0.35;
+        this.distance = 8;
+        this.targetX = 0;
+        this.targetY = 0.5;
+        this.targetZ = 0;
+    }
+
     private handleDown(e: PointerEvent): void {
         if (this.disposed) return;
         if (e.button === 2) {

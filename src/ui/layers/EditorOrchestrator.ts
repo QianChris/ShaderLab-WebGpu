@@ -24,6 +24,7 @@ export class EditorOrchestrator {
     private gizmoTool?: TransformGizmoTool;
     private recorder: MediaRecorder | null = null;
     private recordChunks: Blob[] = [];
+    private editorCamActive = true;
     private panels: { editor?: EditorPanel; pipeline?: PipelinePanel } = {};
     private vueUnmounts: (() => void)[] = [];
     private unsubscribePick?: () => void;
@@ -55,6 +56,12 @@ export class EditorOrchestrator {
         this.redoBtn.onclick = () => this.commandBus?.redo();
         const playerBtn = handles.toolbar.querySelector('#btn-player') as HTMLButtonElement;
         playerBtn.onclick = () => this.openPlayer();
+        const camToggleBtn = handles.toolbar.querySelector('#btn-cam-toggle') as HTMLButtonElement;
+        camToggleBtn.onclick = () => this.toggleEditorCamera(camToggleBtn);
+        const camResetBtn = handles.toolbar.querySelector('#btn-cam-reset') as HTMLButtonElement;
+        camResetBtn.onclick = () => this.viewportController?.reset();
+        const camFocusBtn = handles.toolbar.querySelector('#btn-cam-focus') as HTMLButtonElement;
+        camFocusBtn.onclick = () => this.focusOnSelected();
         const captureBtn = handles.toolbar.querySelector('#btn-capture') as HTMLButtonElement;
         captureBtn.onclick = () => { void this.capturePng(captureBtn); };
         const recordBtn = handles.toolbar.querySelector('#btn-record') as HTMLButtonElement;
@@ -169,6 +176,27 @@ export class EditorOrchestrator {
         const appName = this.host.engine.currentApp;
         if (!appName) return;
         window.open(`player.html?app=${appName}`, '_blank');
+    }
+
+    /** Toggle between the editor viewport camera (ViewportCameraController)
+     *  and any active scene Camera. When the editor camera is off, the engine
+     *  falls back to scene.getActiveCameras (player-style framing). */
+    private toggleEditorCamera(btn: HTMLButtonElement): void {
+        this.editorCamActive = !this.editorCamActive;
+        if (this.editorCamActive) {
+            this.host.engine.setEditorViewProvider(() => this.viewportController?.getCameraView() ?? null);
+            btn.textContent = 'Cam: Editor';
+        } else {
+            this.host.engine.setEditorViewProvider(null);
+            btn.textContent = 'Cam: Scene';
+        }
+    }
+
+    /** Frame the editor camera on the gizmo's currently selected entity. */
+    private focusOnSelected(): void {
+        const t = this.gizmoTool?.getFocusTarget();
+        if (!t) return;
+        this.viewportController?.frameAround(t.x, t.y, t.z, t.distance);
     }
 
     /** Capture the next rendered frame as a PNG and trigger a download. */

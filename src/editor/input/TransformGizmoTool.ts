@@ -13,6 +13,7 @@ interface GizmoCamera {
     ivp: Float32Array;
     pos: Float32Array;
     view: Float32Array;
+    proj: Float32Array;
 }
 
 interface BoundingSphere { cx: number; cy: number; cz: number; radius: number; }
@@ -56,6 +57,11 @@ export class TransformGizmoTool {
     private lastY = 0;
     /** Cached bounding spheres per mesh name (computed lazily on first pick). */
     private readonly spheres = new Map<string, BoundingSphere | null>();
+    /** Per-axis screen-space segment endpoints from the last drawGizmo, used
+     *  for axis hit-testing on pointer-down. */
+    private axisScreens: Array<{ axis: 'x' | 'y' | 'z'; cx: number; cy: number; ex: number; ey: number }> = [];
+    /** Axis locked by the current drag ('x'|'y'|'z' or null). */
+    private activeAxis: 'x' | 'y' | 'z' | null = null;
     private rafId = 0;
     private disposed = false;
 
@@ -121,41 +127,64 @@ export class TransformGizmoTool {
     /** Select an entity by key (used by external callers / future gizmo axis pick). */
     select(key: string | null): void {
         this.selectedKey = key;
-        this.scheduleDraw();
+    }
+
+    /** Return the selected entity's position + a framing distance (from its
+     *  bounding sphere) for the editor camera focus button. Null when
+     *  nothing is selected. */
+    getFocusTarget(): { x: number; y: number; z: number; distance: number } | null {
+        if (!this.selectedKey) return null;
+        const eid = this.engine.scene.entityKeyMap.get(this.selectedKey);
+        if (eid == null) return null;
+        const pos = this.engine.scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+        const sphere = this.boundingSphereFor(eid);
+        const radius = sphere ? sphere.radius : 1;
+        return { x: pos?.[0] ?? 0, y: pos?.[1] ?? 0, z: pos?.[2] ?? 0, distance: Math.max(1, radius * 3) };
     }
 
     setMode(mode: GizmoMode): void {
         this.mode = mode;
-        this.scheduleDraw();
     }
 
     // ── Pointer handling ────────────────────────────────────────────────
 
     private handleDown(e: PointerEvent): void {
         if (this.disposed || e.button !== 0) return;
+        // 1. If an entity is selected and the gizmo is visible, hit-test the
+        //    axis lines first so the user can grab a specific axis.
+        if (this.selectedKey) {
+            const axis = this.pickAxis(e.clientX, e.clientY);
+            if (axis) {
+                this.activeAxis = axis;
+                this.dragging = true;
+                this.lastX = e.clientX;
+                this.lastY = e.clientY;
+                e.preventDefault();
+                return;
+            }
+        }
+        // 2. Otherwise ray-sphere pick an entity.
         const hit = this.rayPick(e.clientX, e.clientY);
-        // Click on the already-selected entity → start a transform drag.
-        if (hit && hit === this.selectedKey) {
-            this.dragging = true;
-            this.lastX = e.clientX;
-            this.lastY = e.clientY;
-            e.preventDefault();
-            return;
-        }
-        // Click on a different entity → select it (emit pick so EditorPanel
-        // and other listeners stay in sync).
         if (hit) {
-            this.selectedKey = hit;
-            this.eventBus.emit('pick', { key: hit, source: 'gizmo' });
-            this.scheduleDraw();
+            if (hit !== this.selectedKey) {
+                this.selectedKey = hit;
+                this.eventBus.emit('pick', { key: hit, source: 'gizmo' });
+            }
+            // Clicking the already-selected entity body starts a free
+            // (screen-plane) drag with no axis locked.
+            if (hit === this.selectedKey) {
+                this.activeAxis = null;
+                this.dragging = true;
+                this.lastX = e.clientX;
+                this.lastY = e.clientY;
+                e.preventDefault();
+            }
             return;
         }
-        // Miss → deselect (only when no physics tool is active; the physics
-        // PickTool may still hit a collider and emit 'pick' to reselect).
+        // 3. Miss → deselect (unless the physics PickTool may still hit).
         const physics = this.engine.systemRegistry.resolve({ name: 'physics' });
         if (!physics) {
             this.selectedKey = null;
-            this.scheduleDraw();
         }
     }
 
@@ -170,6 +199,7 @@ export class TransformGizmoTool {
 
     private handleUp(): void {
         this.dragging = false;
+        this.activeAxis = null;
     }
 
     private handleKey(e: KeyboardEvent): void {
@@ -276,51 +306,121 @@ export class TransformGizmoTool {
         if (eid == null) return;
         const cam = this.currentCamera();
         if (!cam) return;
-        const sensitivity = 0.01;
+
+        // Axis-locked drag reads the screen-space axis direction stored by
+        // the last drawGizmo. Free drag (activeAxis=null) uses camera right/up.
+        const seg = this.activeAxis ? this.axisScreens.find(a => a.axis === this.activeAxis) : null;
+        const axisWorld = this.activeAxis ? AXIS_DIRS[this.activeAxis] : null;
 
         if (this.mode === 'move') {
-            // Screen-plane movement along camera right (dx) and up (dy).
-            // Camera right = row 0 of view matrix; up = row 1 (column-major).
-            const view = cam.view;
-            const rightX = view[0], rightY = view[4], rightZ = view[8];
-            const upX = view[1], upY = view[5], upZ = view[9];
-            const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
-            const px = (pos?.[0] ?? 0) + (rightX * dx - upX * dy) * sensitivity;
-            const py = (pos?.[1] ?? 0) + (rightY * dx - upY * dy) * sensitivity;
-            const pz = (pos?.[2] ?? 0) + (rightZ * dx - upZ * dy) * sensitivity;
-            this.commandBus.setField(this.selectedKey, 'Transform', 'position', [px, py, pz]);
+            if (seg && axisWorld) {
+                const sdx = seg.ex - seg.cx, sdy = seg.ey - seg.cy;
+                const slen = Math.hypot(sdx, sdy) || 1;
+                const screenDot = (dx * sdx + dy * sdy) / slen;
+                const w = screenDot * this.worldPerPixel(cam, eid);
+                const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+                this.commandBus.setField(this.selectedKey, 'Transform', 'position', [
+                    (pos?.[0] ?? 0) + axisWorld[0] * w,
+                    (pos?.[1] ?? 0) + axisWorld[1] * w,
+                    (pos?.[2] ?? 0) + axisWorld[2] * w,
+                ]);
+            } else {
+                // Free: screen-plane along camera right/up.
+                const view = cam.view;
+                const s = 0.01;
+                const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+                this.commandBus.setField(this.selectedKey, 'Transform', 'position', [
+                    (pos?.[0] ?? 0) + (view[0] * dx - view[1] * dy) * s,
+                    (pos?.[1] ?? 0) + (view[4] * dx - view[5] * dy) * s,
+                    (pos?.[2] ?? 0) + (view[8] * dx - view[9] * dy) * s,
+                ]);
+            }
         } else if (this.mode === 'rotate') {
-            // Yaw around camera up (dx), pitch around camera right (dy).
+            // Axis-locked: angular displacement of the mouse around the entity
+            // center on screen. Free: yaw from dx (around world up).
+            const axis = axisWorld ?? [0, 1, 0];
+            const angle = seg ? this.screenAngleDelta(dx, dy, seg.cx, seg.cy) : dx * 0.01;
             const rot = scene.getField(eid, 'Transform', 'rotation') as unknown as number[] | undefined;
-            const yawDelta = dx * 0.01;
-            const pitchDelta = dy * 0.01;
-            // Simplified: apply as incremental quaternion around world Y and X.
-            // Compose: q' = dq * q (world-space rotation).
             const [qx, qy, qz, qw] = normalizeQuat(rot?.[0] ?? 0, rot?.[1] ?? 0, rot?.[2] ?? 0, rot?.[3] ?? 1);
-            // yaw around Y: (0, sin(h/2), 0, cos(h/2))
-            const yh = yawDelta / 2, ysh = Math.sin(yh), ych = Math.cos(yh);
-            // pitch around X: (sin(p/2), 0, 0, cos(p/2))
-            const ph = pitchDelta / 2, psh = Math.sin(ph), pch = Math.cos(ph);
-            // dq_yaw * q
-            const a = mulQuat(0, ysh, 0, ych, qx, qy, qz, qw);
-            // dq_pitch * (dq_yaw * q)
-            const r = mulQuat(psh, 0, 0, pch, a[0], a[1], a[2], a[3]);
+            const h = angle / 2;
+            const sh = Math.sin(h), ch = Math.cos(h);
+            // dq = axis-angle(axis, angle): (axis·sin(h), cos(h)); q' = dq * q
+            const r = mulQuat(axis[0] * sh, axis[1] * sh, axis[2] * sh, ch, qx, qy, qz, qw);
             this.commandBus.setField(this.selectedKey, 'Transform', 'rotation', [r[0], r[1], r[2], r[3]]);
         } else { // scale
             const sc = scene.getField(eid, 'Transform', 'scale') as unknown as number[] | undefined;
-            const factor = Math.max(0.05, 1 - dy * sensitivity);
-            const sx = Math.max(0.01, (sc?.[0] ?? 1) * factor);
-            this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [sx, sx, sx]);
+            const s = [(sc?.[0] ?? 1), (sc?.[1] ?? 1), (sc?.[2] ?? 1)];
+            let factor: number;
+            if (seg) {
+                const sdx = seg.ex - seg.cx, sdy = seg.ey - seg.cy;
+                const slen = Math.hypot(sdx, sdy) || 1;
+                factor = Math.max(0.05, 1 + ((dx * sdx + dy * sdy) / slen) * 0.01);
+            } else {
+                factor = Math.max(0.05, 1 - dy * 0.01);
+            }
+            if (this.activeAxis) {
+                const idx = AXIS_IDX[this.activeAxis];
+                s[idx] = Math.max(0.01, s[idx] * factor);
+                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [s[0], s[1], s[2]]);
+            } else {
+                const v = Math.max(0.01, s[0] * factor);
+                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [v, v, v]);
+            }
         }
+    }
+
+    /** Approximate world units per screen pixel at the entity's depth — used
+     *  to convert axis-locked screen drag deltas into world-space movement. */
+    private worldPerPixel(cam: GizmoCamera, eid: number): number {
+        const scene = this.engine.scene;
+        const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
+        const ex = pos?.[0] ?? 0, ey = pos?.[1] ?? 0, ez = pos?.[2] ?? 0;
+        const dist = Math.hypot(cam.pos[0] - ex, cam.pos[1] - ey, cam.pos[2] - ez);
+        // proj[5] = 1/tan(fovY/2); visible world height at distance d = 2*d*tan.
+        const tanHalf = 1 / (cam.proj[5] || 1);
+        const h = this.canvas.clientHeight || 1;
+        return (2 * dist * tanHalf) / h;
+    }
+
+    /** Angular displacement of the mouse around the entity's screen-space
+     *  center between the previous and current pointer position. */
+    private screenAngleDelta(dx: number, dy: number, cx: number, cy: number): number {
+        const rect = this.canvas.getBoundingClientRect();
+        const curX = this.lastX - rect.left, curY = this.lastY - rect.top;
+        const prevX = curX - dx, prevY = curY - dy;
+        const a1 = Math.atan2(prevY - cy, prevX - cx);
+        const a2 = Math.atan2(curY - cy, curX - cx);
+        return a2 - a1;
+    }
+
+    /** Hit-test the pointer against the 3 axis screen segments. Returns the
+     *  closest axis within the pixel threshold, or null. */
+    private pickAxis(clientX: number, clientY: number): 'x' | 'y' | 'z' | null {
+        if (this.axisScreens.length === 0) return null;
+        const rect = this.canvas.getBoundingClientRect();
+        const px = clientX - rect.left;
+        const py = clientY - rect.top;
+        const threshold = 12;
+        let bestAxis: 'x' | 'y' | 'z' | null = null;
+        let bestDist = threshold;
+        for (const a of this.axisScreens) {
+            const d = pointToSegmentDist(px, py, a.cx, a.cy, a.ex, a.ey);
+            if (d < bestDist) { bestDist = d; bestAxis = a.axis; }
+        }
+        return bestAxis;
     }
 
     // ── Gizmo overlay rendering ──────────────────────────────────────────
 
     private scheduleDraw(): void {
         if (this.rafId) return;
+        // Continuous rAF so the gizmo follows entity movement and camera
+        // changes without external redraw triggers. Each frame clears the
+        // overlay and redraws (a few line/arc draws — negligible cost).
         this.rafId = requestAnimationFrame(() => {
             this.rafId = 0;
             this.drawGizmo();
+            this.scheduleDraw();
         });
     }
 
@@ -360,33 +460,36 @@ export class TransformGizmoTool {
         const center = this.project(origin, cam, w, h);
         if (!center) return;
 
-        const axes: Array<{ dir: [number, number, number]; color: string; label: string }> = [
-            { dir: [size, 0, 0], color: '#ff5b5b', label: 'X' },
-            { dir: [0, size, 0], color: '#5bff7a', label: 'Y' },
-            { dir: [0, 0, size], color: '#5b9bff', label: 'Z' },
+        const axes: Array<{ key: 'x' | 'y' | 'z'; dir: [number, number, number]; color: string; label: string }> = [
+            { key: 'x', dir: [size, 0, 0], color: '#ff5b5b', label: 'X' },
+            { key: 'y', dir: [0, size, 0], color: '#5bff7a', label: 'Y' },
+            { key: 'z', dir: [0, 0, size], color: '#5b9bff', label: 'Z' },
         ];
+        this.axisScreens = [];
 
-        ctx.lineWidth = 2;
         ctx.font = '11px monospace';
-        if (this.mode === 'move') {
-            for (const ax of axes) {
-                const end: [number, number, number] = [origin[0] + ax.dir[0], origin[1] + ax.dir[1], origin[2] + ax.dir[2]];
-                const sp = this.project(end, cam, w, h);
-                if (!sp) continue;
-                ctx.strokeStyle = ax.color;
-                ctx.beginPath();
-                ctx.moveTo(center.x, center.y);
-                ctx.lineTo(sp.x, sp.y);
-                ctx.stroke();
-                ctx.fillStyle = ax.color;
-                ctx.fillText(ax.label, sp.x + 4, sp.y - 4);
-            }
-        } else if (this.mode === 'rotate') {
-            // Three circles in the YZ, XZ, XY planes (perpendicular to X, Y, Z).
+        // Always draw the 3 axis lines (pickable in every mode) + store screen
+        // endpoints for axis hit-testing on pointer-down.
+        for (const ax of axes) {
+            const end: [number, number, number] = [origin[0] + ax.dir[0], origin[1] + ax.dir[1], origin[2] + ax.dir[2]];
+            const sp = this.project(end, cam, w, h);
+            if (!sp) continue;
+            this.axisScreens.push({ axis: ax.key, cx: center.x, cy: center.y, ex: sp.x, ey: sp.y });
+            ctx.strokeStyle = ax.color;
+            ctx.lineWidth = this.activeAxis === ax.key ? 4 : 2;
+            ctx.beginPath();
+            ctx.moveTo(center.x, center.y);
+            ctx.lineTo(sp.x, sp.y);
+            ctx.stroke();
+            ctx.fillStyle = ax.color;
+            ctx.fillText(ax.label, sp.x + 4, sp.y - 4);
+        }
+        // Mode-specific extras drawn on top (rings for rotate, boxes for scale).
+        if (this.mode === 'rotate') {
             this.drawRing(ctx, origin, [0, 1, 0], [0, 0, 1], size, '#ff5b5b', cam, w, h);
             this.drawRing(ctx, origin, [1, 0, 0], [0, 0, 1], size, '#5bff7a', cam, w, h);
             this.drawRing(ctx, origin, [1, 0, 0], [0, 1, 0], size, '#5b9bff', cam, w, h);
-        } else { // scale
+        } else if (this.mode === 'scale') {
             for (const ax of axes) {
                 const end: [number, number, number] = [origin[0] + ax.dir[0], origin[1] + ax.dir[1], origin[2] + ax.dir[2]];
                 const sp = this.project(end, cam, w, h);
@@ -431,6 +534,21 @@ export class TransformGizmoTool {
         const ndcY = clip[1] / clip[3];
         return { x: (ndcX * 0.5 + 0.5) * w, y: (1 - (ndcY * 0.5 + 0.5)) * h };
     }
+}
+
+const AXIS_DIRS: Record<'x' | 'y' | 'z', [number, number, number]> = {
+    x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1],
+};
+const AXIS_IDX: Record<'x' | 'y' | 'z', number> = { x: 0, y: 1, z: 2 };
+
+/** Minimum distance from point (px,py) to segment (ax,ay)-(bx,by). */
+function pointToSegmentDist(px: number, py: number, ax: number, ay: number, bx: number, by: number): number {
+    const dx = bx - ax, dy = by - ay;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 > 0 ? ((px - ax) * dx + (py - ay) * dy) / len2 : 0;
+    t = Math.max(0, Math.min(1, t));
+    const cx = ax + t * dx, cy = ay + t * dy;
+    return Math.hypot(px - cx, py - cy);
 }
 
 function normalizeQuat(x: number, y: number, z: number, w: number): [number, number, number, number] {
