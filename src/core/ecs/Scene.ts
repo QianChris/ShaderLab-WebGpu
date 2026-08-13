@@ -1,7 +1,7 @@
 import { createWorld, addEntity, removeEntity, type World } from 'bitecs';
 import { addComponent, hasComponent, removeComponent } from 'bitecs/legacy';
 import { schemaRegistry } from './SchemaRegistry';
-import { buildCameraMatricesInto, mat4FromTRSInto, type TRS } from '../math';
+import { buildCameraMatricesInto, mat4FromTRSInto, mat4MulInto, type TRS } from '../math';
 
 export type SceneData = Record<string, Record<string, Record<string, unknown>>>;
 
@@ -25,10 +25,27 @@ export class Scene {
     entityTags = new Map<number, string[]>();
     /** Per-entity component list (for O(E×avgC) toJSON instead of O(E×C)). */
     private entityComponents = new Map<number, string[]>();
+    /** Reverse of entityKeyMap (eid → key) for parent-hierarchy traversal. */
+    private eidToKey = new Map<number, string>();
+    /** Parent → children key map (the back-ref of Transform.parent). */
+    private childMap = new Map<string, Set<string>>();
+    /** Child → parent key (reverse of childMap for O(1) parent lookup). */
+    private parentOf = new Map<string, string>();
     /** Scratch model matrix — reused by getModelMatrix to avoid per-call
      *  allocation. Safe because callers consume the result before the next
      *  entity's matrix is computed (PipelineDriver processes entities serially). */
     private scratchModel = new Float32Array(16);
+    /** Local TRS scratch (independent of scratchModel so a recursive parent
+     *  computation does not clobber the child's local matrix). */
+    private localScratch = new Float32Array(16);
+    /** Parent world matrix scratch (same reason — used inside getModelMatrix
+     *  recursion before writing into the caller's target). */
+    private parentScratch = new Float32Array(16);
+    /** Cached world matrices per entity (16 floats each). Invalidated by
+     *  Transform field writes / setParent / removeEntity. */
+    private worldMatrices = new Map<number, Float32Array>();
+    /** Entity ids whose world matrix needs recomputation on next getModelMatrix. */
+    private worldDirty = new Set<number>();
     /** Reusable camera pool: pre-allocated CameraView objects with pre-allocated
      *  Float32Array fields, grown as needed. Avoids per-frame allocation in the
      *  getActiveCameras hot path. */
@@ -69,18 +86,47 @@ export class Scene {
         }
 
         this.entityKeyMap.set(key, eid);
+        this.eidToKey.set(eid, key);
         this.entityTags.set(eid, tags);
         this.entityComponents.set(eid, comps);
+
+        // Wire parent (Transform.parent → childMap back-ref). The parent must
+        // already exist (scene.json / glTF loader declare parents before
+        // children); a missing parent is a config bug → throw.
+        const transformData = data['Transform'] as { parent?: string } | undefined;
+        const parentKey = transformData?.parent;
+        if (parentKey) {
+            this.linkParent(key, parentKey);
+        }
+        this.invalidate(eid);
         return eid;
     }
 
     removeEntity(key: string): void {
         const eid = this.entityKeyMap.get(key);
         if (eid !== undefined) {
+            // Detach from parent's children list (if any).
+            const parentKey = this.getParentKey(eid);
+            if (parentKey) {
+                this.childMap.get(parentKey)?.delete(key);
+            }
+            // Reparent orphans to root so the hierarchy stays consistent.
+            const kids = this.childMap.get(key);
+            if (kids) {
+                for (const ck of kids) {
+                    const ceid = this.entityKeyMap.get(ck);
+                    if (ceid != null) this.setField(ceid, 'Transform', 'parent', '');
+                }
+            }
+            this.childMap.delete(key);
+            this.parentOf.delete(key);
             removeEntity(this.world, eid);
             this.entityKeyMap.delete(key);
+            this.eidToKey.delete(eid);
             this.entityTags.delete(eid);
             this.entityComponents.delete(eid);
+            this.worldMatrices.delete(eid);
+            this.worldDirty.delete(eid);
         }
     }
 
@@ -90,13 +136,26 @@ export class Scene {
             this.removeEntity(key);
         }
         this.entityKeyMap.clear();
+        this.eidToKey.clear();
         this.entityTags.clear();
+        this.childMap.clear();
+        this.parentOf.clear();
+        this.worldMatrices.clear();
+        this.worldDirty.clear();
     }
 
     setField(eid: number, compName: string, field: string, value: unknown): void {
         const comp = schemaRegistry.get(compName);
         if (!comp || !hasComponent(this.world, comp, eid)) return;
         schemaRegistry.setComposite(compName, comp, eid, field, value);
+        if (compName === 'Transform') {
+            if (field === 'parent') {
+                const childKey = this.eidToKey.get(eid);
+                if (childKey) this.relinkParent(childKey, value as string);
+            } else if (field === 'position' || field === 'rotation' || field === 'scale') {
+                this.invalidate(eid);
+            }
+        }
     }
 
     toggleComponent(eid: number, compName: string, enabled: boolean): void {
@@ -227,13 +286,130 @@ export class Scene {
         };
     }
 
-    /** Compute an entity's model matrix. With no `out`, writes into a reusable
-     *  scratch buffer (safe for immediate consumption — callers must not retain
-     *  the reference across another getModelMatrix call). Pass `out` to write
-     *  into a caller-owned buffer for long-lived storage. */
+    /** Compute an entity's world model matrix. With no `out`, writes into a
+     *  reusable scratch buffer (safe for immediate consumption — callers must
+     *  not retain the reference across another getModelMatrix call). Pass
+     *  `out` to write into a caller-owned buffer for long-lived storage.
+     *  Recursive across the parent chain (Transform.parent) with per-entity
+     *  caching: writes to Transform.position/rotation/scale/parent mark the
+     *  entity + its descendants dirty so the next read recomputes. */
     getModelMatrix(eid: number, out?: Float32Array): Float32Array {
+        const target = out ?? this.scratchModel;
+        if (!this.worldDirty.has(eid)) {
+            const cached = this.worldMatrices.get(eid);
+            if (cached) { target.set(cached); return target; }
+        }
+        // Recurse the parent chain FIRST so the parent's cached world matrix
+        // is valid before we compute our own local. We deliberately do NOT
+        // read this.parentScratch after the call — the parent's result lives
+        // in the worldMatrices cache, and parentScratch may have been
+        // clobbered by deeper recursion.
+        const parentKey = this.getParentKey(eid);
+        let parentMat: Float32Array | null = null;
+        if (parentKey) {
+            const parentEid = this.entityKeyMap.get(parentKey);
+            if (parentEid != null) {
+                if (!this.worldMatrices.has(parentEid) || this.worldDirty.has(parentEid)) {
+                    this.getModelMatrix(parentEid, this.parentScratch);
+                }
+                parentMat = this.worldMatrices.get(parentEid) ?? null;
+            }
+        }
+        // Now compute our local TRS — after parent recursion is done with
+        // localScratch (parent used it for its own local; that value is no
+        // longer needed because the parent's world is cached).
         const trs = this.getTransformTRS(eid);
-        return mat4FromTRSInto(trs.pos, trs.rot, trs.scale, out ?? this.scratchModel);
+        mat4FromTRSInto(trs.pos, trs.rot, trs.scale, this.localScratch);
+        if (parentMat) {
+            mat4MulInto(parentMat, this.localScratch, target);
+        } else {
+            target.set(this.localScratch);
+        }
+        let buf = this.worldMatrices.get(eid);
+        if (!buf) { buf = new Float32Array(16); this.worldMatrices.set(eid, buf); }
+        buf.set(target);
+        this.worldDirty.delete(eid);
+        return target;
+    }
+
+    // ── Parent hierarchy (Transform.parent back-ref) ───────────────────
+
+    /** Direct children keys of `key`, or empty array if none. */
+    getChildren(key: string): string[] {
+        const set = this.childMap.get(key);
+        return set ? [...set] : [];
+    }
+
+    /** Parent key of `eid`, or '' if it is a root. */
+    getParent(eid: number): string {
+        return this.getParentKey(eid);
+    }
+
+    /** Wire a parent for `childKey`. Writes the Transform.parent field and
+     *  maintains the childMap / parentOf caches. Throws on cycles or missing
+     *  parent (fail-loud). Public for editor drag-reparent (Phase 3). */
+    setParent(childKey: string, parentKey: string): void {
+        const childEid = this.entityKeyMap.get(childKey);
+        if (childEid == null) throw new Error(`setParent: child '${childKey}' does not exist`);
+        this.setField(childEid, 'Transform', 'parent', parentKey);
+    }
+
+    private getParentKey(eid: number): string {
+        const key = this.eidToKey.get(eid);
+        if (key == null) return '';
+        return this.parentOf.get(key) ?? '';
+    }
+
+    /** Link childKey under parentKey (no field write — caller already set the
+     *  Transform.parent field). Maintains childMap + parentOf + cycle check. */
+    private linkParent(childKey: string, parentKey: string): void {
+        if (!parentKey) return;
+        if (!this.entityKeyMap.has(parentKey)) {
+            throw new Error(`Transform.parent '${parentKey}' does not exist (entity '${childKey}')`);
+        }
+        // Cycle check: walk the parent chain from parentKey upward; if we hit
+        // childKey, linking would form a cycle.
+        let cur: string | undefined = parentKey;
+        const guard = new Set<string>();
+        while (cur) {
+            if (cur === childKey) {
+                throw new Error(`Hierarchy cycle: '${childKey}' is already an ancestor of '${parentKey}'`);
+            }
+            if (guard.has(cur)) break; // existing cycle (shouldn't happen) — stop
+            guard.add(cur);
+            cur = this.parentOf.get(cur);
+        }
+        let kids = this.childMap.get(parentKey);
+        if (!kids) { kids = new Set(); this.childMap.set(parentKey, kids); }
+        kids.add(childKey);
+        this.parentOf.set(childKey, parentKey);
+    }
+
+    /** Re-link an entity whose Transform.parent field just changed: detach
+     *  from the old parent's children list, attach to the new one, invalidate. */
+    private relinkParent(childKey: string, newParentKey: string): void {
+        const oldParent = this.parentOf.get(childKey);
+        if (oldParent) this.childMap.get(oldParent)?.delete(childKey);
+        if (newParentKey) {
+            this.linkParent(childKey, newParentKey);
+        } else {
+            this.parentOf.delete(childKey);
+        }
+        const childEid = this.entityKeyMap.get(childKey);
+        if (childEid != null) this.invalidate(childEid);
+    }
+
+    /** Mark `eid`'s world matrix (and all descendants') as needing recomputation. */
+    private invalidate(eid: number): void {
+        this.worldDirty.add(eid);
+        const key = this.eidToKey.get(eid);
+        if (!key) return;
+        const kids = this.childMap.get(key);
+        if (!kids) return;
+        for (const ck of kids) {
+            const ceid = this.entityKeyMap.get(ck);
+            if (ceid != null) this.invalidate(ceid);
+        }
     }
 
     /** Export every entity's components as JSON. Uses the per-entity component

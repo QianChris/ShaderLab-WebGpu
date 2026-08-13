@@ -9,7 +9,8 @@
     "fields": {
       "position": { "type": "vec3", "default": [0, 0, 0] },
       "rotation": { "type": "vec4", "default": [0, 0, 0, 1] },
-      "scale":    { "type": "vec3", "default": [1, 1, 1] }
+      "scale":    { "type": "vec3", "default": [1, 1, 1] },
+      "parent":   { "type": "string", "default": "" }
     }
   },
   {
