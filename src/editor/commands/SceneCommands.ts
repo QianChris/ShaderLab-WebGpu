@@ -209,11 +209,20 @@ function reparentKeepWorld(scene: Scene, childKey: string, parentKey: string): v
 }
 
 function writeLocalTRS(scene: Scene, eid: number, m: Float32Array): void {
+    // Column-major: col0 = [m0,m1,m2], col1 = [m4,m5,m6], col2 = [m8,m9,m10].
+    const sx = Math.hypot(m[0], m[1], m[2]);
+    const sy = Math.hypot(m[4], m[5], m[6]);
+    const sz = Math.hypot(m[8], m[9], m[10]);
     scene.setField(eid, 'Transform', 'position', [m[12], m[13], m[14]]);
-    scene.setField(eid, 'Transform', 'scale', [
-        Math.hypot(m[0], m[1], m[2]),
-        Math.hypot(m[4], m[5], m[6]),
-        Math.hypot(m[8], m[9], m[10]),
-    ]);
-    scene.setField(eid, 'Transform', 'rotation', mat4ToQuat(m));
+    scene.setField(eid, 'Transform', 'scale', [sx, sy, sz]);
+    // mat4ToQuat assumes a pure rotation matrix — divide the basis columns by
+    // their scale first, or the extracted quaternion will be sheared and the
+    // reparented entity will visibly rotate even though translation is held.
+    const r = [
+        m[0] / sx, m[1] / sx, m[2] / sx, 0,
+        m[4] / sy, m[5] / sy, m[6] / sy, 0,
+        m[8] / sz, m[9] / sz, m[10] / sz, 0,
+        0, 0, 0, 1,
+    ];
+    scene.setField(eid, 'Transform', 'rotation', mat4ToQuat(r));
 }
