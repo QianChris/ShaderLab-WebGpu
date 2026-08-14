@@ -131,15 +131,39 @@ export class TransformGizmoTool {
 
     /** Return the selected entity's position + a framing distance (from its
      *  bounding sphere) for the editor camera focus button. Null when
-     *  nothing is selected. */
+     *  nothing is selected. For skinned meshes the focus targets the root
+     *  ancestor (which is what the gizmo moves). */
     getFocusTarget(): { x: number; y: number; z: number; distance: number } | null {
         if (!this.selectedKey) return null;
-        const eid = this.engine.scene.entityKeyMap.get(this.selectedKey);
-        if (eid == null) return null;
-        const [x, y, z] = this.engine.scene.getWorldPosition(eid);
-        const sphere = this.boundingSphereFor(eid);
+        const rootKey = this.getRootAncestor(this.selectedKey);
+        const rootEid = this.engine.scene.entityKeyMap.get(rootKey);
+        if (rootEid == null) return null;
+        const [x, y, z] = this.engine.scene.getWorldPosition(rootEid);
+        // Use the picked mesh entity's bounding sphere for framing distance.
+        const pickedEid = this.engine.scene.entityKeyMap.get(this.selectedKey);
+        const sphere = pickedEid != null ? this.boundingSphereFor(pickedEid) : null;
         const radius = sphere ? sphere.radius : 1;
         return { x, y, z, distance: Math.max(1, radius * 3) };
+    }
+
+    /** Walk the parent chain to the top-level ancestor (no parent). For a
+     *  skinned mesh this is the root node whose Transform drives the whole
+     *  skeleton (joint GlobalTransform is parented under it), so dragging the
+     *  root actually moves the character. */
+    private getRootAncestor(key: string): string {
+        const scene = this.engine.scene;
+        let cur = key;
+        const guard = new Set<string>();
+        while (true) {
+            if (guard.has(cur)) break;
+            guard.add(cur);
+            const eid = scene.entityKeyMap.get(cur);
+            if (eid == null) break;
+            const parent = scene.getParent(eid);
+            if (!parent) break;
+            cur = parent;
+        }
+        return cur;
     }
 
     setMode(mode: GizmoMode): void {
@@ -300,8 +324,12 @@ export class TransformGizmoTool {
 
     private applyDrag(dx: number, dy: number): void {
         if (!this.selectedKey) return;
+        // For skinned meshes, drag the root ancestor (joint GlobalTransform is
+        // parented under it, so moving the root moves the whole character).
+        // For static meshes getRootAncestor returns the entity itself.
+        const targetKey = this.getRootAncestor(this.selectedKey);
         const scene = this.engine.scene;
-        const eid = scene.entityKeyMap.get(this.selectedKey);
+        const eid = scene.entityKeyMap.get(targetKey);
         if (eid == null) return;
         const cam = this.currentCamera();
         if (!cam) return;
@@ -318,7 +346,7 @@ export class TransformGizmoTool {
                 const screenDot = (dx * sdx + dy * sdy) / slen;
                 const w = screenDot * this.worldPerPixel(cam, eid);
                 const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
-                this.commandBus.setField(this.selectedKey, 'Transform', 'position', [
+                this.commandBus.setField(targetKey, 'Transform', 'position', [
                     (pos?.[0] ?? 0) + axisWorld[0] * w,
                     (pos?.[1] ?? 0) + axisWorld[1] * w,
                     (pos?.[2] ?? 0) + axisWorld[2] * w,
@@ -328,7 +356,7 @@ export class TransformGizmoTool {
                 const view = cam.view;
                 const s = 0.01;
                 const pos = scene.getField(eid, 'Transform', 'position') as unknown as number[] | undefined;
-                this.commandBus.setField(this.selectedKey, 'Transform', 'position', [
+                this.commandBus.setField(targetKey, 'Transform', 'position', [
                     (pos?.[0] ?? 0) + (view[0] * dx - view[1] * dy) * s,
                     (pos?.[1] ?? 0) + (view[4] * dx - view[5] * dy) * s,
                     (pos?.[2] ?? 0) + (view[8] * dx - view[9] * dy) * s,
@@ -345,7 +373,7 @@ export class TransformGizmoTool {
             const sh = Math.sin(h), ch = Math.cos(h);
             // dq = axis-angle(axis, angle): (axis·sin(h), cos(h)); q' = dq * q
             const r = mulQuat(axis[0] * sh, axis[1] * sh, axis[2] * sh, ch, qx, qy, qz, qw);
-            this.commandBus.setField(this.selectedKey, 'Transform', 'rotation', [r[0], r[1], r[2], r[3]]);
+            this.commandBus.setField(targetKey, 'Transform', 'rotation', [r[0], r[1], r[2], r[3]]);
         } else { // scale
             const sc = scene.getField(eid, 'Transform', 'scale') as unknown as number[] | undefined;
             const s = [(sc?.[0] ?? 1), (sc?.[1] ?? 1), (sc?.[2] ?? 1)];
@@ -360,12 +388,12 @@ export class TransformGizmoTool {
             if (this.activeAxis) {
                 const idx = AXIS_IDX[this.activeAxis];
                 s[idx] = Math.max(0.01, s[idx] * factor);
-                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [s[0], s[1], s[2]]);
+                this.commandBus.setField(targetKey, 'Transform', 'scale', [s[0], s[1], s[2]]);
             } else {
                 // Free scale: apply the factor to every axis independently so a
                 // non-uniform scale (e.g. [2,1,1] long box) keeps its ratio
                 // instead of being flattened to [s[0], s[0], s[0]].
-                this.commandBus.setField(this.selectedKey, 'Transform', 'scale', [
+                this.commandBus.setField(targetKey, 'Transform', 'scale', [
                     Math.max(0.01, s[0] * factor),
                     Math.max(0.01, s[1] * factor),
                     Math.max(0.01, s[2] * factor),
@@ -449,7 +477,8 @@ export class TransformGizmoTool {
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
         ctx.clearRect(0, 0, w, h);
         if (!this.selectedKey) return;
-        const eid = this.engine.scene.entityKeyMap.get(this.selectedKey);
+        const rootKey = this.getRootAncestor(this.selectedKey);
+        const eid = this.engine.scene.entityKeyMap.get(rootKey) ?? this.engine.scene.entityKeyMap.get(this.selectedKey);
         if (eid == null) return;
         const cam = this.currentCamera();
         if (!cam) return;

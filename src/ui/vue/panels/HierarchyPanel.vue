@@ -13,6 +13,7 @@ interface Row { key: string; name: string; depth: number; hasChildren: boolean; 
  *  their children). The name comes from NameComponent; the parent chain is
  *  Scene's childMap (Transform.parent back-ref from Phase 2a). */
 const rows = computed<Row[]>(() => {
+    trigger.value; // dependency: re-evaluate on editor:changed
     const all = scene.getAllEntities().map(e => e.key);
     const childrenOf = (key: string): string[] => scene.getChildren(key);
     const out: Row[] = [];
@@ -45,14 +46,17 @@ const rows = computed<Row[]>(() => {
 const selectedKey = ref('');
 const dragKey = ref('');
 const dropTarget = ref('');
+/** Bump on every editor:changed so the `rows` computed re-evaluates (scene
+ *  reads are not reactive by themselves). */
+const trigger = ref(0);
 
 // Sync selection when the gizmo / EditorPanel pick an entity.
 useEditorEvent('pick', (payload) => {
     const p = payload as { key?: string };
     if (p?.key) selectedKey.value = p.key;
 });
-// Refresh on any editor change (entity add/remove/field/reparent).
-useEditorEvent('editor:changed', () => { /* computed reactivity via scene reads */ });
+// Refresh the tree on any editor change (entity add/remove/field/reparent).
+useEditorEvent('editor:changed', () => { trigger.value++; });
 
 function selectRow(key: string): void {
     selectedKey.value = key;
@@ -79,11 +83,15 @@ function onDrop(e: DragEvent, key: string): void {
     const child = dragKey.value;
     dragKey.value = '';
     if (!child || child === key) return;
-    // Scene.setParent throws on cycles; catch so the editor keeps running.
+    // Scene.setParent throws on cycles (e.g. dropping an ancestor onto its
+    // own descendant); surface that as an alert so the user sees why nothing
+    // happened instead of a silent console error.
     try {
         host.dispatch(new SetParentCommand(child, key));
     } catch (err) {
-        console.error('[HierarchyPanel] reparent failed:', err);
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error('[HierarchyPanel] reparent failed:', msg);
+        alert(`Cannot reparent '${child}' under '${key}':\n${msg}`);
     }
 }
 

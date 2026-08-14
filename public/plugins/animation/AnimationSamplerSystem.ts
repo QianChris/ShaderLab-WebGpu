@@ -31,24 +31,27 @@ export class AnimationSamplerSystem implements System {
             if (apc) this.query = defineQuery([apc]);
         }
         const scene = this.scene;
-        const dt = ctx.dt;
         for (const eid of this.query(scene.world)) {
             const clipName = scene.getField(eid, 'AnimationPlayerComponent', 'clip') as string;
             if (!clipName) continue;
             const anim = resourceManager.getAnimation(clipName);
             if (!anim) continue;
             const playing = Number(scene.getField(eid, 'AnimationPlayerComponent', 'playing') ?? 0);
-            let time = Number(scene.getField(eid, 'AnimationPlayerComponent', 'time') ?? 0);
             const loop = Number(scene.getField(eid, 'AnimationPlayerComponent', 'loop') ?? 1);
             const speed = Number(scene.getField(eid, 'AnimationPlayerComponent', 'speed') ?? 1);
-            if (playing) {
-                time += dt * speed;
-                if (time > anim.duration) {
-                    if (loop) { time = time % anim.duration; }
-                    else { time = anim.duration; scene.setField(eid, 'AnimationPlayerComponent', 'playing', 0); }
+            // Sample from the engine clock (ctx.time) so Timeline scrub
+            // (Engine.setFrameTime + stepOnce) drives the pose directly: pause
+            // freezes ctx.time → pose holds; play advances ctx.time → animates.
+            let time = ctx.time * speed;
+            if (anim.duration > 0) {
+                if (loop) {
+                    time = time % anim.duration;
+                } else if (time > anim.duration) {
+                    time = anim.duration;
+                    if (playing) scene.setField(eid, 'AnimationPlayerComponent', 'playing', 0);
                 }
-                scene.setField(eid, 'AnimationPlayerComponent', 'time', time);
             }
+            if (playing) scene.setField(eid, 'AnimationPlayerComponent', 'time', time);
             this.sampleChannels(anim, time, scene);
         }
     }

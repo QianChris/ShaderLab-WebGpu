@@ -1,14 +1,27 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useHost } from '../composables/useHost';
+import { useEditorEvent } from '../composables/useEditorEvent';
 
 const host = useHost();
 const engine = host.engine;
 
 const isPaused = ref(false);
 const currentTime = ref(0);
-const duration = ref(0);
 const scrubbing = ref(false);
+/** Max animation duration across all loaded clips — drives the scrubber range. */
+const duration = computed(() => {
+    const rm = engine.resourceManager;
+    let max = 0;
+    for (const n of rm.getAnimationNames()) {
+        const a = rm.getAnimation(n);
+        if (a && a.duration > max) max = a.duration;
+    }
+    return max;
+});
+
+// Re-evaluate duration + current time when the editor clock ticks (pause/play/scrub).
+useEditorEvent('editor:changed', () => { /* duration computed is reactive */ });
 
 let rafId = 0;
 const tick = (): void => {
