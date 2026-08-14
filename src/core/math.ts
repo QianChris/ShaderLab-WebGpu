@@ -274,3 +274,41 @@ export function mat4InverseInto(m: Float32Array, out: Float32Array): Float32Arra
 
     return inv;
 }
+
+/** Extract a rotation quaternion [x,y,z,w] from a column-major mat4's upper
+ *  3×3 (m is a 16-element Float32Array/number[] in column-major order). Used
+ *  by the glTF loader (matrix-form nodes) and the editor's reparent command
+ *  (keep-world-stays). Standard formula. */
+export function mat4ToQuat(m: ArrayLike<number>): [number, number, number, number] {
+    const m00 = m[0], m01 = m[4], m02 = m[8];
+    const m10 = m[1], m11 = m[5], m12 = m[9];
+    const m20 = m[2], m21 = m[6], m22 = m[10];
+    const trace = m00 + m11 + m22;
+    let qx: number, qy: number, qz: number, qw: number;
+    if (trace > 0) {
+        const S = Math.sqrt(trace + 1.0) * 2;
+        qw = 0.25 * S;
+        qx = (m21 - m12) / S;
+        qy = (m02 - m20) / S;
+        qz = (m10 - m01) / S;
+    } else if (m00 > m11 && m00 > m22) {
+        const S = Math.sqrt(1.0 + m00 - m11 - m22) * 2;
+        qw = (m21 - m12) / S;
+        qx = 0.25 * S;
+        qy = (m01 + m10) / S;
+        qz = (m02 + m20) / S;
+    } else if (m11 > m22) {
+        const S = Math.sqrt(1.0 + m11 - m00 - m22) * 2;
+        qw = (m02 - m20) / S;
+        qx = (m01 + m10) / S;
+        qy = 0.25 * S;
+        qz = (m12 + m21) / S;
+    } else {
+        const S = Math.sqrt(1.0 + m22 - m00 - m11) * 2;
+        qw = (m10 - m01) / S;
+        qx = (m02 + m20) / S;
+        qy = (m12 + m21) / S;
+        qz = 0.25 * S;
+    }
+    return [qx, qy, qz, qw];
+}

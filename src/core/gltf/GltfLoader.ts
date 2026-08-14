@@ -1,4 +1,5 @@
 import type { PbrMeshData } from '../render/Primitives';
+import { mat4ToQuat } from '../math';
 import type {
     PbrMaterialData,
     GltfTextureData,
@@ -312,43 +313,6 @@ const readAnimationOutput = (
     }
     return { data: out, components };
 };
-
-/** Extract a rotation quaternion [x,y,z,w] from a column-major mat4's upper
- *  3×3. Used when a glTF node specifies `matrix` instead of TRS — common for
- *  root axis-converters (e.g. CesiumMan's "Z_UP" node). Standard algorithm. */
-function mat4ToQuat(m: number[]): [number, number, number, number] {
-    const m00 = m[0], m01 = m[4], m02 = m[8];
-    const m10 = m[1], m11 = m[5], m12 = m[9];
-    const m20 = m[2], m21 = m[6], m22 = m[10];
-    const trace = m00 + m11 + m22;
-    let qx: number, qy: number, qz: number, qw: number;
-    if (trace > 0) {
-        const s = 0.5 / Math.sqrt(trace + 1.0);
-        qw = 0.25 / s;
-        qx = (m12 - m21) * s;
-        qy = (m20 - m02) * s;
-        qz = (m01 - m10) * s;
-    } else if (m00 > m11 && m00 > m22) {
-        const s = 2.0 * Math.sqrt(1.0 + m00 - m11 - m22);
-        qw = (m12 - m21) / s;
-        qx = 0.25 * s;
-        qy = (m10 + m01) / s;
-        qz = (m20 + m02) / s;
-    } else if (m11 > m22) {
-        const s = 2.0 * Math.sqrt(1.0 + m11 - m00 - m22);
-        qw = (m20 - m02) / s;
-        qx = (m10 + m01) / s;
-        qy = 0.25 * s;
-        qz = (m21 + m12) / s;
-    } else {
-        const s = 2.0 * Math.sqrt(1.0 + m22 - m00 - m11);
-        qw = (m01 - m10) / s;
-        qx = (m20 + m02) / s;
-        qy = (m21 + m12) / s;
-        qz = 0.25 * s;
-    }
-    return [qx, qy, qz, qw];
-}
 
 const computeFallbackNormals = (positions: number[], indices: number[]): number[] => {
     const normals = new Array(positions.length).fill(0);

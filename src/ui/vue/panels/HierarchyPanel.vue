@@ -96,6 +96,20 @@ function onDrop(e: DragEvent, key: string): void {
 }
 
 function onDragLeave(): void { dropTarget.value = ''; }
+
+/** Drop on empty area (not on a row) → detach to root. */
+function onDropBlank(e: DragEvent): void {
+    e.preventDefault();
+    dropTarget.value = '';
+    const child = dragKey.value;
+    dragKey.value = '';
+    if (!child) return;
+    try {
+        host.dispatch(new SetParentCommand(child, ''));
+    } catch (err) {
+        console.error('[HierarchyPanel] detach failed:', err);
+    }
+}
 </script>
 
 <template>
@@ -104,7 +118,7 @@ function onDragLeave(): void { dropTarget.value = ''; }
             <span>Hierarchy</span>
             <span class="h-count">{{ rows.length }}</span>
         </div>
-        <div class="h-body">
+        <div class="h-body" @dragover.prevent @drop="onDropBlank">
             <div v-for="r in rows" :key="r.key"
                  :class="['h-row', { selected: selectedKey === r.key, droptarget: dropTarget === r.key }]"
                  :style="{ paddingLeft: (8 + r.depth * 14) + 'px' }"
@@ -117,7 +131,7 @@ function onDragLeave(): void { dropTarget.value = ''; }
                 <span :class="['h-twisty', { leaf: !r.hasChildren }]">{{ r.hasChildren ? '▾' : '•' }}</span>
                 <span class="h-name" :title="r.key">{{ r.name }}</span>
             </div>
-            <div v-if="rows.length === 0" class="h-empty">No entities</div>
+            <div v-if="rows.length === 0" class="h-empty">No entities — drag a row here to detach from its parent.</div>
         </div>
     </div>
 </template>

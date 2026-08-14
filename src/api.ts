@@ -112,6 +112,7 @@ export {
     mat4MulInto,
     mat4Inverse,
     mat4InverseInto,
+    mat4ToQuat,
     mat4TransformVec4,
     quatRotateVec3,
     normalMatrix,

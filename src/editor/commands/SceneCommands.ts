@@ -1,5 +1,6 @@
 import { schemaRegistry } from '../../core/ecs/SchemaRegistry';
-import type { SceneData } from '../../core/ecs/Scene';
+import type { Scene, SceneData } from '../../core/ecs/Scene';
+import { mat4ToQuat, mat4InverseInto, mat4MulInto } from '../../core/math';
 import type { Command, CommandContext } from './Command';
 
 export class SetFieldCommand implements Command {
@@ -155,8 +156,10 @@ export class ToggleComponentCommand implements Command {
     }
 }
 
-/** Reparent an entity (Hierarchy panel drag-and-drop). Undo restores the
- *  previous parent (or root if it was a root). */
+/** Reparent an entity (Hierarchy panel drag-and-drop). The entity's WORLD
+ *  transform is preserved: before reparent we snapshot its world matrix, then
+ *  recompute Local TRS = parentWorldInverse × oldWorld so the object stays
+ *  put visually. Undo restores the previous parent (also world-stays). */
 export class SetParentCommand implements Command {
     readonly type = 'setParent';
     get description(): string { return `setParent ${this.childKey} → ${this.newParent || '(root)'}`; }
@@ -164,21 +167,53 @@ export class SetParentCommand implements Command {
     constructor(private childKey: string, private newParent: string) {}
 
     execute(ctx: CommandContext): boolean {
-        const eid = ctx.engine.scene.entityKeyMap.get(this.childKey);
+        const scene = ctx.engine.scene;
+        const eid = scene.entityKeyMap.get(this.childKey);
         if (eid == null) return false;
-        this.oldParent = ctx.engine.scene.getParent(eid);
-        ctx.engine.scene.setParent(this.childKey, this.newParent);
+        this.oldParent = scene.getParent(eid);
+        reparentKeepWorld(scene, this.childKey, this.newParent);
         return true;
     }
 
     undo(ctx: CommandContext): boolean {
-        const eid = ctx.engine.scene.entityKeyMap.get(this.childKey);
-        if (eid == null) return false;
-        if (this.oldParent) {
-            ctx.engine.scene.setParent(this.childKey, this.oldParent);
-        } else {
-            ctx.engine.scene.setField(eid, 'Transform', 'parent', '');
-        }
+        reparentKeepWorld(ctx.engine.scene, this.childKey, this.oldParent);
         return true;
     }
+}
+
+/** Reparent `childKey` under `parentKey` (or detach to root if ''), keeping
+ *  the child's world transform. Decomposes the new local matrix into TRS so
+ *  Scene's Transform (local TRS + parent) reproduces the same world. */
+function reparentKeepWorld(scene: Scene, childKey: string, parentKey: string): void {
+    const childEid = scene.entityKeyMap.get(childKey);
+    if (childEid == null) return;
+    // Snapshot world before reparent (uses current parent chain).
+    const oldWorld = scene.getModelMatrix(childEid, new Float32Array(16));
+    if (parentKey) {
+        // setParent throws on cycles; the HierarchyPanel catches that.
+        scene.setParent(childKey, parentKey);
+        const parentEid = scene.entityKeyMap.get(parentKey);
+        if (parentEid != null) {
+            const parentWorld = scene.getModelMatrix(parentEid, new Float32Array(16));
+            const parentInv = new Float32Array(16);
+            mat4InverseInto(parentWorld, parentInv);
+            const newLocal = new Float32Array(16);
+            mat4MulInto(parentInv, oldWorld, newLocal);
+            writeLocalTRS(scene, childEid, newLocal);
+        }
+    } else {
+        // Detach to root: local = world (no parent to undo).
+        scene.setField(childEid, 'Transform', 'parent', '');
+        writeLocalTRS(scene, childEid, oldWorld);
+    }
+}
+
+function writeLocalTRS(scene: Scene, eid: number, m: Float32Array): void {
+    scene.setField(eid, 'Transform', 'position', [m[12], m[13], m[14]]);
+    scene.setField(eid, 'Transform', 'scale', [
+        Math.hypot(m[0], m[1], m[2]),
+        Math.hypot(m[4], m[5], m[6]),
+        Math.hypot(m[8], m[9], m[10]),
+    ]);
+    scene.setField(eid, 'Transform', 'rotation', mat4ToQuat(m));
 }
