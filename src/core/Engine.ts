@@ -390,8 +390,29 @@ export class Engine {
         delete this.attachmentsView[name];
     }
 
-    loadSceneData(json: SceneData): void {
+    async loadSceneData(json: SceneData): Promise<void> {
         for (const [key, entityData] of Object.entries(json)) {
+            // Prefab expansion: an entity with a PrefabComponent.prefab path
+            // is replaced by the prefab's component bundle (deep-copied) with
+            // overrideFields merged on top. The prefab.json is a plain
+            // { ComponentName: { field: value } } object (no entity key).
+            const prefab = entityData['PrefabComponent'] as { prefab?: string; overrideFields?: string } | undefined;
+            if (prefab?.prefab) {
+                try {
+                    const url = prefab.prefab.startsWith('/')
+                        ? prefab.prefab
+                        : `${this.engineConfig.dataRoot}/prefabs/${prefab.prefab}`;
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error(`prefab fetch failed: ${url}`);
+                    const prefabData = await resp.json() as Record<string, Record<string, unknown>>;
+                    const overrides = prefab.overrideFields ? JSON.parse(prefab.overrideFields) as Record<string, Record<string, unknown>> : {};
+                    const merged = mergePrefab(prefabData, overrides);
+                    this.scene.createEntity(key, merged);
+                    continue;
+                } catch (e) {
+                    console.error(`[Engine] prefab '${prefab.prefab}' failed:`, e, '— falling back to inline entity data');
+                }
+            }
             this.scene.createEntity(key, entityData);
         }
         this.resolveHandles();
@@ -891,4 +912,21 @@ export class Engine {
 
         this.resolveHandles();
     }
+}
+
+/** Merge prefab component data with instance overrides. Overrides are keyed
+ *  by component name then field: { Transform: { position: [1,2,3] } }. */
+function mergePrefab(
+    prefab: Record<string, Record<string, unknown>>,
+    overrides: Record<string, Record<string, unknown>>,
+): Record<string, Record<string, unknown>> {
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const [comp, fields] of Object.entries(prefab)) {
+        out[comp] = { ...fields };
+    }
+    for (const [comp, fields] of Object.entries(overrides)) {
+        if (!out[comp]) out[comp] = {};
+        Object.assign(out[comp], fields);
+    }
+    return out;
 }

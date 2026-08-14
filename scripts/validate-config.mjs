@@ -119,7 +119,14 @@ function checkPipeline(appName, appComponents, rel, cfgEntry) {
 /** Static checks for a value source used in renderer declarations and
  *  shader-graph-free configs. Kept here for callers below. */
 
-const NS = { builtin: ['entityId','time','dt','aspect','screenW','screenH'], transform: ['model','normalMatrix'], tag: ['color','extra'] };
+const NS = {
+    builtin: ['entityId','time','dt','aspect','screenW','screenH'],
+    transform: ['model','normalMatrix'],
+    tag: ['color','extra'],
+    // Runtime-registered namespace atoms (materials plugin). The validator
+    // can't see runtime registration, so it whitelists the known field names.
+    material: ['baseColor','metallic','roughness','ao','emissive','shadowCast','shadowReceive','texBaseColor','texMetalRough','texOcclusion','texEmissive','texNormal'],
+};
 function checkValueSource(appName, rel, src, allComps) {
     if (typeof src !== 'string') return;
     const colon = src.indexOf(':');

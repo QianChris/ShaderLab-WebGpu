@@ -47,6 +47,10 @@ export class ResourceManager {
     private skinData = new Map<string, GltfSkinData>();
     /** CPU-side animation clips from glTF (channels + samplers). */
     private animationData = new Map<string, GltfAnimationData>();
+    /** CPU-side shared material assets (PbrMaterial field bundle). Entities
+     *  reference these by name via PbrMaterial.material; the `materials`
+     *  plugin's value atoms resolve `material.*` against this registry. */
+    private materialData = new Map<string, Record<string, unknown>>();
     private colorTargets = new Map<string, ColorTarget>();
     private depthTargets = new Map<string, { tex: GPUTexture; w: number; h: number; format: GPUTextureFormat }>();
 
@@ -57,6 +61,7 @@ export class ResourceManager {
     private meshGpuOwner = new Map<string, string>();
     private skinDataOwner = new Map<string, string>();
     private animationDataOwner = new Map<string, string>();
+    private materialDataOwner = new Map<string, string>();
     private uniformOwner = new Map<string, string>();
     private storageOwner = new Map<string, string>();
     private textureOwner = new Map<string, string>();
@@ -225,6 +230,11 @@ export class ResourceManager {
             if (owner !== appId) continue;
             this.animationData.delete(name);
             this.animationDataOwner.delete(name);
+        }
+        for (const [name, owner] of this.materialDataOwner) {
+            if (owner !== appId) continue;
+            this.materialData.delete(name);
+            this.materialDataOwner.delete(name);
         }
         for (const [name, owner] of this.meshGpuOwner) {
             if (owner !== appId) continue;
@@ -463,6 +473,15 @@ export class ResourceManager {
     getAnimation(name: string): GltfAnimationData | undefined { return this.animationData.get(name); }
     getSkinNames(): string[] { return [...this.skinData.keys()]; }
     getAnimationNames(): string[] { return [...this.animationData.keys()]; }
+
+    /* ── Shared material assets (CPU-side, owner-tagged) ──────────── */
+
+    registerMaterial(name: string, data: Record<string, unknown>): void {
+        this.materialData.set(name, data);
+        this.materialDataOwner.set(name, this.currentOwner);
+    }
+    getMaterial(name: string): Record<string, unknown> | undefined { return this.materialData.get(name); }
+    getMaterialNames(): string[] { return [...this.materialData.keys()]; }
 
     private makeVertexBuffer(src: ArrayLike<number>): GPUBuffer {
         const arr = Float32Array.from(src);

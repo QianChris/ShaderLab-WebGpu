@@ -132,10 +132,18 @@
       "texOcclusion":     { "type": "u32", "default": 0 },
       "texEmissive":      { "type": "u32", "default": 0 },
       "texNormal":        { "type": "u32", "default": 0 },
-      "shadowCast":       { "type": "bool", "default": true },
-      "shadowReceive":    { "type": "bool", "default": true }
-    }
-  },
+    "shadowCast":       { "type": "bool", "default": true },
+    "shadowReceive":    { "type": "bool", "default": true },
+    "material":         { "type": "string", "default": "" }
+  }
+},
+{
+  "name": "PrefabComponent",
+  "fields": {
+    "prefab":          { "type": "string", "default": "" },
+    "overrideFields":  { "type": "string", "default": "" }
+  }
+},
   {
     "name": "EnvironmentComponent",
     "fields": {
