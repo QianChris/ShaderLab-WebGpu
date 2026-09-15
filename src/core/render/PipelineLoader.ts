@@ -263,12 +263,23 @@ export class PipelineLoader {
         return await resp.text();
     }
 
-    private static async ensureShaderModule(device: GPUDevice, base: ShaderBase, shaderRef: string): Promise<void> {
+    /** In-flight shader fetches, so concurrently compiling pipelines that
+     *  share a shader only download it once. */
+    private static inflightShaders = new Map<string, Promise<void>>();
+
+    private static ensureShaderModule(device: GPUDevice, base: ShaderBase, shaderRef: string): Promise<void> {
         const key = this.shaderKey(base, shaderRef);
-        if (this.shaderModules.has(key)) return;
-        const src = await this.shaderSource(base, shaderRef);
-        this.shaderModules.set(key, device.createShaderModule({ label: shaderRef, code: src }));
-        this.shaderSources.set(key, src);
+        if (this.shaderModules.has(key)) return Promise.resolve();
+        const pending = this.inflightShaders.get(key);
+        if (pending) return pending;
+        const p = this.shaderSource(base, shaderRef)
+            .then((src) => {
+                this.shaderModules.set(key, device.createShaderModule({ label: shaderRef, code: src }));
+                this.shaderSources.set(key, src);
+            })
+            .finally(() => this.inflightShaders.delete(key));
+        this.inflightShaders.set(key, p);
+        return p;
     }
 
     /** Fetch/lookup a render-pipeline config (virtual registry first). */
@@ -293,12 +304,11 @@ export class PipelineLoader {
         const config = await this.fetchRenderConfig(baseDir, configPath);
         const shaderBase = this.shaderBaseFor(baseDir, configPath);
 
+        // Vertex + fragment shaders fetch in parallel (one RTT instead of two).
         const shaderFiles = new Set<string>();
         shaderFiles.add(config.vertex.shader);
         if (config.fragment) shaderFiles.add(config.fragment.shader);
-        for (const shaderPath of shaderFiles) {
-            await this.ensureShaderModule(device, shaderBase, shaderPath);
-        }
+        await Promise.all([...shaderFiles].map((s) => this.ensureShaderModule(device, shaderBase, s)));
 
         this.configs.set(configPath, { config, format });
         return this.buildRender(device, format, configPath, config, shaderBase);

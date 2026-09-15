@@ -239,6 +239,63 @@ export class RenderGraph implements System, IRenderer {
             for (const [k, v] of hooks.compute) if (!this.computeHooks.has(k)) this.registerComputeHook(k, v, 'app');
         }
 
+        // Prefetch wave 1: every distinct pipeline referenced by the entries
+        // (render + compute), all in parallel. The serial loop below would
+        // otherwise cost one full network round trip per pipeline stage —
+        // dominant on high-latency links (plugin TS → pipeline JSON → WGSL).
+        const pendingRender = new Set<string>();
+        const pendingCompute = new Set<string>();
+        const wave1: Array<Promise<unknown>> = [];
+        for (const phase of this.phaseList) {
+            for (const entry of this.phases[phase.name] ?? []) {
+                const path = entry.pipeline;
+                if (entry.kind === 'compute') {
+                    if (!this.computePipelines.has(path) && !pendingCompute.has(path)) {
+                        pendingCompute.add(path);
+                        wave1.push(
+                            this.tryLoadCompute(device, dataBase, appBase, path)
+                                .then((p) => { this.computePipelines.set(path, p); }),
+                        );
+                    }
+                } else if (!this.pipelines.has(path) && !pendingRender.has(path)) {
+                    pendingRender.add(path);
+                    wave1.push(
+                        this.tryLoadPipeline(device, format, dataBase, appBase, path)
+                            .then((p) => { this.pipelines.set(path, p); }),
+                    );
+                }
+            }
+        }
+        await Promise.all(wave1);
+
+        // Prefetch wave 2: auxiliary compute pipelines + asset textures from
+        // the now-cached renderer configs, in parallel.
+        const pendingAux = new Set<string>();
+        const pendingTex = new Set<string>();
+        const wave2: Array<Promise<unknown>> = [];
+        for (const path of pendingRender) {
+            const decl = PipelineLoader.getConfig(path)?.renderer;
+            if (!decl) continue;
+            for (const v of Object.values(decl.aux ?? {})) {
+                if (typeof v === 'string' && v.endsWith('.json') && !this.computePipelines.has(v) && !pendingAux.has(v)) {
+                    pendingAux.add(v);
+                    wave2.push(
+                        this.tryLoadCompute(device, dataBase, appBase, v)
+                            .then((p) => { this.computePipelines.set(v, p); }),
+                    );
+                }
+            }
+            for (const bg of decl.bindGroups ?? []) {
+                for (const t of bg.textures ?? []) {
+                    if (t.source.startsWith('asset:') && !pendingTex.has(t.source)) {
+                        pendingTex.add(t.source);
+                        wave2.push(resourceManager.loadTexture(`${dataBase}/${t.source.slice(6)}`));
+                    }
+                }
+            }
+        }
+        await Promise.all(wave2);
+
         // Load every pipeline listed in the manifest, build a driver from its renderer block.
         for (const phase of this.phaseList) {
             for (const entry of this.phases[phase.name] ?? []) {

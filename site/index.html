@@ -118,6 +118,9 @@
     function showList() {
         gateEl.style.display = 'none';
         listEl.style.display = 'block';
+        // Warm the largest runtime asset into the HTTP cache while the user
+        // browses the list — every demo's plugin load needs it first.
+        fetch('assets/engine-api.js').catch(function () {});
         fetch('demos.json')
             .then(function (r) {
                 if (!r.ok) throw new Error('HTTP ' + r.status);

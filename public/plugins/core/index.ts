@@ -40,7 +40,8 @@ export default class CorePlugin extends EnginePlugin {
 
     /** Fetch the co-located declaration JSONs into the declaration fields.
      *  Runs before the engine applies declarations (PluginManager order:
-     *  init → applyDeclarations → setup). */
+     *  init → applyDeclarations → setup). All files fetch in parallel —
+     *  over high-latency links a serial chain costs one full RTT per file. */
     async init(ctx: PluginContext): Promise<void> {
         const load = async (file: string): Promise<never> => {
             const resp = await fetch(`${ctx.baseUrl}/${file}`);
@@ -50,18 +51,36 @@ export default class CorePlugin extends EnginePlugin {
             }
             return await resp.json() as never;
         };
-        this.components = await load('components.json');
-        this.uniformLayouts = await load('uniform-layouts.json');
-        this.bindLayouts = await load('bind-layouts.json');
-        this.vertexSlots = await load('vertex-slots.json');
-        this.vertexInputs = await load('vertex-inputs.json');
-        this.samplers = await load('samplers.json');
-        this.blendPresets = await load('blend-presets.json');
-        this.fallbackTextures = await load('fallback-textures.json');
-        this.vboPresets = await load('vbo-presets.json');
-        this.meshes = await load('meshes.json');
-        this.renderTargets = await load('render-targets.json');
-        this.phases = await load('phases.json');
+        const [
+            components, uniformLayouts, bindLayouts, vertexSlots, vertexInputs,
+            samplers, blendPresets, fallbackTextures, vboPresets, meshes,
+            renderTargets, phases,
+        ] = await Promise.all([
+            load('components.json'),
+            load('uniform-layouts.json'),
+            load('bind-layouts.json'),
+            load('vertex-slots.json'),
+            load('vertex-inputs.json'),
+            load('samplers.json'),
+            load('blend-presets.json'),
+            load('fallback-textures.json'),
+            load('vbo-presets.json'),
+            load('meshes.json'),
+            load('render-targets.json'),
+            load('phases.json'),
+        ]);
+        this.components = components;
+        this.uniformLayouts = uniformLayouts;
+        this.bindLayouts = bindLayouts;
+        this.vertexSlots = vertexSlots;
+        this.vertexInputs = vertexInputs;
+        this.samplers = samplers;
+        this.blendPresets = blendPresets;
+        this.fallbackTextures = fallbackTextures;
+        this.vboPresets = vboPresets;
+        this.meshes = meshes;
+        this.renderTargets = renderTargets;
+        this.phases = phases;
     }
 
     setup(ctx: PluginContext): void {

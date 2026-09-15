@@ -16,6 +16,12 @@ async function main(): Promise<void> {
         return;
     }
 
+    // Warm the plugin API chunk download in parallel with the engine boot
+    // fetches (config/systems/plugin TS). Plugins import it dynamically at
+    // load time — on slow links it is the single largest asset (~2MB raw),
+    // so overlapping it with boot traffic cuts first-frame latency a lot.
+    void import('./api');
+
     try {
         const host = new AppHost(canvas, uiContainer);
         await host.init();
