@@ -13,6 +13,7 @@ jobs:
           node-version: 24
       - run: npm ci
       - run: npm run build
+      - run: node scripts/check-api-exports.mjs
       - run: npm run check:plugins
       - run: npm test
       - run: node scripts/validate-config.mjs
